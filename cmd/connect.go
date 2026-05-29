@@ -372,7 +372,7 @@ func checkTwoWay(p remoteProfile) error {
 		return nil
 	}
 	printTwoWayFailureGuidance(p, addrs)
-	return fmt.Errorf("two-way connectivity failed: %s cannot reach this machine back (required for this machine to serve as the memory host)", p.Host)
+	return fmt.Errorf("host can't reach this machine back — pick a fix above and retry")
 }
 
 // localCandidateAddrs returns this machine's non-loopback IPv4 addresses — the
@@ -415,22 +415,11 @@ func hostCanReachBack(p remoteProfile, addrs []string) (string, bool) {
 }
 
 func printTwoWayFailureGuidance(p remoteProfile, addrs []string) {
-	fmt.Printf("   ✗ Two-way check FAILED — the host %s could not reach THIS machine back.\n", p.Host)
-	fmt.Printf("     Tried: %s (port 22)\n", strings.Join(addrs, ", "))
-	fmt.Println()
-	fmt.Println("   Why it matters: with this machine as the memory HOST, the remote must be able")
-	fmt.Println("   to SSH back IN to it at runtime — that's how its mcp-server launches and how")
-	fmt.Println("   /auxly-remote-connect shows a live link. Right now it can't, usually because")
-	fmt.Println("   the two machines are on different subnets / behind NAT, or reach each other")
-	fmt.Println("   only one-way (e.g. this machine dials out through a VPN tunnel).")
-	fmt.Println()
-	fmt.Println("   This option won't deliver a shared vault. Try one of:")
-	fmt.Println("     • Same subnet:    put both machines on the same LAN so the host gets an")
-	fmt.Println("                       address on the remote's network, then retry.")
-	fmt.Println("     • Mesh VPN:       install Tailscale on BOTH (each gets a stable 100.x IP")
-	fmt.Println("                       reachable both ways through NAT), then retry.")
-	fmt.Println("     • Server-as-host: make the always-on server the host and let this machine")
-	fmt.Println("                       consume it instead — works through NAT, no VPN needed.")
+	fmt.Printf("   ✗ %s can't reach this machine back on port 22 (different network / NAT).\n", p.Host)
+	fmt.Println("     For this machine to be the host, the remote must reach it. Pick a fix, then retry:")
+	fmt.Println("     • Same LAN — put both machines on the same subnet")
+	fmt.Println("     • Tailscale on both — stable IPs that work through NAT")
+	fmt.Println("     • Or make the server the host instead (no network change)")
 }
 
 // recordProvision logs the silent host install to the audit trail (best effort).
