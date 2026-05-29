@@ -450,7 +450,9 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 var connectCmd = &cobra.Command{
 	Use:     "connect [host]",
 	Aliases: []string{"remote"},
-	Short:   "Link this machine to a remote Auxly memory host over SSH",
+	// Don't dump usage text on a RunE error — keeps the TUI's captured output clean.
+	SilenceUsage: true,
+	Short:        "Link this machine to a remote Auxly memory host over SSH",
 	Long: `connect links this (remote/agent) machine to a memory HOST over SSH.
 
 Run with no arguments for an interactive wizard, or pass [user@]host[:port]
@@ -495,7 +497,14 @@ var (
 	addMethod string
 	addHost   string
 	addJump   string
+	addBatch  bool
 )
+
+// keyAuthWorks reports whether key-based SSH auth to the host already succeeds.
+func keyAuthWorks(p remoteProfile) bool {
+	_, err := runSSH(p, "true")
+	return err == nil
+}
 
 var connectAddCmd = &cobra.Command{
 	Use:    "add",
@@ -511,6 +520,7 @@ func init() {
 	connectAddCmd.Flags().StringVar(&addMethod, "method", "", "reachability: lan|vpn|bastion|public")
 	connectAddCmd.Flags().StringVar(&addHost, "host", "", "[user@]host[:port] of the memory host")
 	connectAddCmd.Flags().StringVar(&addJump, "jump", "", "jump host ([user@]host) for the bastion method")
+	connectAddCmd.Flags().BoolVar(&addBatch, "batch", false, "non-interactive: never prompt for an SSH password (fail fast if key auth is missing)")
 
 	connectCmd.AddCommand(connectListCmd)
 	connectCmd.AddCommand(connectRemoveCmd)
@@ -543,7 +553,19 @@ func runConnectAdd(cmd *cobra.Command, args []string) error {
 	}
 	p := remoteProfile{Name: name, Method: method, User: user, Host: host, Port: port, Jump: addJump}
 
-	if err := bootstrapKeyAuth(p); err != nil {
+	if addBatch {
+		// Batch mode (the TUI runs the doctor captured in-pane): never block on a
+		// password. If key auth isn't set up yet, fail fast with a token the TUI
+		// detects to offer a terminal-based key-setup step.
+		if !keyAuthWorks(p) {
+			// Return nil (not an error) so rootCmd's help banner isn't dumped into
+			// the TUI's captured output. The TUI keys off the token line below.
+			fmt.Printf("⚠️  SSH key authentication to %s is not set up yet.\n", p.Host)
+			fmt.Println("   The host could not be reached with your existing keys.")
+			fmt.Println("AUXLY_KEY_REQUIRED")
+			return nil
+		}
+	} else if err := bootstrapKeyAuth(p); err != nil {
 		fmt.Printf("⚠️  Key setup skipped/failed: %v\n", err)
 	}
 	if err := runDoctor(p); err != nil {

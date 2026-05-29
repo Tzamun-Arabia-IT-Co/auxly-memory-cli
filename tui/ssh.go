@@ -41,10 +41,12 @@ type remotesFile struct {
 
 // ssh interaction modes.
 const (
-	sshModeList    = ""
-	sshModeConfirm = "confirm"
-	sshModePrint   = "print"
-	sshModeForm    = "form"
+	sshModeList     = ""
+	sshModeConfirm  = "confirm"
+	sshModePrint    = "print"
+	sshModeForm     = "form"
+	sshModeProgress = "progress" // a captured connect command is running
+	sshModeResult   = "result"   // showing its captured output
 )
 
 // form steps.
@@ -71,6 +73,13 @@ type sshModel struct {
 	formJump   string
 	formName   string
 
+	// captured-run state (sshModeProgress / sshModeResult)
+	progressTitle  string
+	progressOut    []string
+	progressOK     bool
+	progressNeeded bool     // first-time SSH key setup required
+	pendingKeyArgs []string // non-batch `connect add …` args for the key-setup fallback
+
 	// editingHost drives app.go's key-routing contract: when true, ALL keys are
 	// delivered to this model (so the in-TUI add-host form can capture text). It
 	// is set only while the form is open.
@@ -82,9 +91,18 @@ type sshRefreshMsg struct {
 	remotes []remoteEntry
 }
 
-// sshExecDoneMsg is returned after a shelled-out `auxly connect …` finishes.
+// sshExecDoneMsg is returned after a SUSPENDED (ExecProcess) `auxly connect …`
+// finishes — used only for the key-setup step that needs a terminal password.
 type sshExecDoneMsg struct {
 	status string
+}
+
+// sshCapturedMsg carries the output of a `auxly connect …` run captured in-pane
+// (no TUI suspend), so the doctor/setup progress stays inside the TUI.
+type sshCapturedMsg struct {
+	output   string
+	err      error
+	needsKey bool
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -132,21 +150,40 @@ func (m sshModel) selectedName() string {
 	return ""
 }
 
-// runConnect shells out to this same binary's `connect` subcommand. tea.ExecProcess
-// releases the TUI to the real terminal so the wizard can prompt for SSH passwords
-// / run ssh-keygen, then restores the TUI and triggers a refresh.
-func runConnect(args ...string) tea.Cmd {
-	bin, err := os.Executable()
-	if err != nil || bin == "" {
-		bin = "auxly"
+func exePath() string {
+	if bin, err := os.Executable(); err == nil && bin != "" {
+		return bin
 	}
-	c := exec.Command(bin, append([]string{"connect"}, args...)...)
+	return "auxly"
+}
+
+// runConnect SUSPENDS the TUI (tea.ExecProcess) to run `auxly connect …` against
+// the real terminal — used only when an SSH password prompt is unavoidable
+// (first-time key install).
+func runConnect(args ...string) tea.Cmd {
+	c := exec.Command(exePath(), append([]string{"connect"}, args...)...)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		if err != nil {
 			return sshExecDoneMsg{status: "⚠ connect " + strings.Join(args, " ") + " exited: " + err.Error()}
 		}
 		return sshExecDoneMsg{status: ""}
 	})
+}
+
+// runConnectCaptured runs `auxly connect …` WITHOUT suspending the TUI, capturing
+// its output so the doctor/setup progress renders inside the pane. Safe only for
+// non-interactive runs (no password prompt) — add uses --batch to guarantee that.
+func runConnectCaptured(args ...string) tea.Cmd {
+	bin := exePath()
+	return func() tea.Msg {
+		c := exec.Command(bin, append([]string{"connect"}, args...)...)
+		out, err := c.CombinedOutput()
+		return sshCapturedMsg{
+			output:   string(out),
+			err:      err,
+			needsKey: strings.Contains(string(out), "AUXLY_KEY_REQUIRED"),
+		}
+	}
 }
 
 func mcpConfigJSON(name string) string {
@@ -187,6 +224,27 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 		m.mode = sshModeList
 		return m, m.Refresh()
 
+	case sshCapturedMsg:
+		var out []string
+		for _, l := range strings.Split(strings.TrimRight(msg.output, "\n"), "\n") {
+			if strings.Contains(l, "AUXLY_KEY_REQUIRED") {
+				continue // internal token, not for display
+			}
+			out = append(out, l)
+		}
+		m.progressOut = out
+		m.progressOK = msg.err == nil
+		m.progressNeeded = msg.needsKey
+		m.mode = sshModeResult
+		m.remotes = readRemotes() // reload list behind the result panel
+		if m.cursor >= len(m.remotes) {
+			m.cursor = len(m.remotes) - 1
+		}
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -203,11 +261,12 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 	case sshModeConfirm:
 		switch msg.String() {
 		case "y", "Y", "enter":
-			name := m.selectedName()
-			m.mode = sshModeList
-			if name != "" {
-				return m, runConnect("remove", name)
+			if name := m.selectedName(); name != "" {
+				m.mode = sshModeProgress
+				m.progressTitle = "Removing " + name
+				return m, runConnectCaptured("remove", name)
 			}
+			m.mode = sshModeList
 		case "n", "N", "esc":
 			m.mode = sshModeList
 		}
@@ -215,6 +274,19 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 
 	case sshModeForm:
 		return m.handleFormKey(msg)
+
+	case sshModeProgress:
+		return m, nil // ignore input while a captured run is in flight
+
+	case sshModeResult:
+		if m.progressNeeded && (msg.String() == "k" || msg.String() == "K") && len(m.pendingKeyArgs) > 0 {
+			args := m.pendingKeyArgs
+			m.mode = sshModeList
+			m.progressNeeded = false
+			return m, runConnect(args...) // suspend → one-time SSH password
+		}
+		m.mode = sshModeList // any other key closes the result panel
+		return m, nil
 
 	default: // list mode
 		switch msg.String() {
@@ -236,7 +308,9 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		case "t":
 			if name := m.selectedName(); name != "" {
 				m.status = ""
-				return m, runConnect("test", name)
+				m.mode = sshModeProgress
+				m.progressTitle = "Testing " + name
+				return m, runConnectCaptured("test", name)
 			}
 		case "p", "enter":
 			if name := m.selectedName(); name != "" {
@@ -319,16 +393,20 @@ func (m sshModel) submitForm() (sshModel, tea.Cmd) {
 		m.formStep = formStepHost
 		return m, nil
 	}
-	args := []string{"add", "--method", m.formMethod, "--host", host}
+	base := []string{"add", "--method", m.formMethod, "--host", host}
 	if name := strings.TrimSpace(m.formName); name != "" {
-		args = append(args, "--name", name)
+		base = append(base, "--name", name)
 	}
 	if jump := strings.TrimSpace(m.formJump); jump != "" {
-		args = append(args, "--jump", jump)
+		base = append(base, "--jump", jump)
 	}
-	m.mode = sshModeList
+	// Stash the non-batch args for the key-setup fallback ([K] on the result panel),
+	// then run the doctor/setup captured in-pane via --batch (never prompts here).
+	m.pendingKeyArgs = append([]string{}, base...)
 	m.editingHost = false
-	return m, runConnect(args...)
+	m.mode = sshModeProgress
+	m.progressTitle = "Connecting to " + host
+	return m, runConnectCaptured(append(base, "--batch")...)
 }
 
 func (m *sshModel) formAppend(s string) {
@@ -427,6 +505,30 @@ func (m sshModel) View() string {
 		warn := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning)
 		lines = append(lines, warn.Render(fmt.Sprintf("Remove remote %q?  ", m.selectedName()))+
 			accent.Render("[y]")+dim.Render(" yes   ")+accent.Render("[n]")+dim.Render(" cancel"))
+	case sshModeProgress:
+		lines = append(lines, cyan.Render("⏳ "+m.progressTitle)+dim.Render("  — running doctor & setup…"))
+		lines = append(lines, "")
+		lines = append(lines, dim.Render("Running inside the TUI; this can take a moment on first install."))
+	case sshModeResult:
+		head := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess).Render("✓ Done")
+		if !m.progressOK {
+			head = lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render("Finished with issues")
+		}
+		lines = append(lines, head+dim.Render("  ("+m.progressTitle+")"))
+		out := m.progressOut
+		if len(out) > 16 {
+			lines = append(lines, dim.Render(fmt.Sprintf("  … %d earlier lines", len(out)-16)))
+			out = out[len(out)-16:]
+		}
+		for _, l := range out {
+			lines = append(lines, "  "+l)
+		}
+		lines = append(lines, "")
+		if m.progressNeeded {
+			lines = append(lines, accent.Render("[K]")+dim.Render(" finish SSH key setup in a terminal (one-time password), then retry   ")+dim.Render("· any other key: close"))
+		} else {
+			lines = append(lines, dim.Render("Press any key to close."))
+		}
 	case sshModeForm:
 		hl := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
 		label := func(step, text string) string {
