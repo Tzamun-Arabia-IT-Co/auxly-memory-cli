@@ -354,11 +354,8 @@ func (m model) renderFooter() string {
 			footerText = "↑/↓: Select option • ←/→: Cycle agent overrides • Enter: Toggle option/Run • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 		}
 	case screenSSH:
-		if m.ssh.editingHost {
-			footerText = "Enter/Esc: Finish editing • Type SSH host • q: Quit"
-		} else {
-			footerText = "s/Enter: Start/Stop Daemon • h: Edit SSH Host • o: Cycle OS • m: Toggle Guide • Left/Right: Switch helper tab • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
-		}
+		// The Remote tab is informational; manage hosts via `auxly connect` in a terminal.
+		footerText = "Run `auxly connect` in a terminal to add a host • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenSkills:
 		footerText = "j/k: Navigate commands • d: Export Claude skills ZIP • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenAuditTrail:
