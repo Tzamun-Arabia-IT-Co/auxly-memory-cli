@@ -372,9 +372,9 @@ func checkTwoWay(p remoteProfile) error {
 		return nil
 	}
 	printTwoWayFailureGuidance(p, addrs)
-	// Machine-readable token so the TUI can offer the working alternative ([u]).
+	// Machine-readable token so the TUI can offer the method-retry ([m]).
 	fmt.Println("AUXLY_TWOWAY_FAILED:" + p.Name)
-	return fmt.Errorf("host can't reach this machine back — use the host's memory from here instead")
+	return fmt.Errorf("no return path on '%s' — try another method ([m]) or set up Tailscale/same-LAN", p.Method)
 }
 
 // localCandidateAddrs returns this machine's non-loopback IPv4 addresses — the
