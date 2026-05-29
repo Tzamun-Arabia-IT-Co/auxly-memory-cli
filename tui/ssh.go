@@ -47,6 +47,7 @@ const (
 	sshModeForm     = "form"
 	sshModeProgress = "progress" // a captured connect command is running
 	sshModeResult   = "result"   // showing its captured output
+	sshModePassword = "password" // masked SSH-password entry (PTY key install)
 )
 
 // form steps.
@@ -79,6 +80,7 @@ type sshModel struct {
 	progressOK     bool
 	progressNeeded bool     // first-time SSH key setup required
 	pendingKeyArgs []string // non-batch `connect add …` args for the key-setup fallback
+	password       string   // transient masked SSH password (sshModePassword)
 
 	// editingHost drives app.go's key-routing contract: when true, ALL keys are
 	// delivered to this model (so the in-TUI add-host form can capture text). It
@@ -279,14 +281,27 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		return m, nil // ignore input while a captured run is in flight
 
 	case sshModeResult:
-		if m.progressNeeded && (msg.String() == "k" || msg.String() == "K") && len(m.pendingKeyArgs) > 0 {
-			args := m.pendingKeyArgs
-			m.mode = sshModeList
-			m.progressNeeded = false
-			return m, runConnect(args...) // suspend → one-time SSH password
+		if m.progressNeeded && len(m.pendingKeyArgs) > 0 {
+			switch msg.String() {
+			case "p", "P":
+				// Enter the password right here (PTY-backed key install).
+				m.mode = sshModePassword
+				m.password = ""
+				m.editingHost = true
+				return m, nil
+			case "k", "K":
+				// Fallback: finish key setup in a real terminal.
+				args := m.pendingKeyArgs
+				m.mode = sshModeList
+				m.progressNeeded = false
+				return m, runConnect(args...)
+			}
 		}
 		m.mode = sshModeList // any other key closes the result panel
 		return m, nil
+
+	case sshModePassword:
+		return m.handlePasswordKey(msg)
 
 	default: // list mode
 		switch msg.String() {
@@ -420,6 +435,42 @@ func (m *sshModel) formAppend(s string) {
 	}
 }
 
+// handlePasswordKey captures the masked SSH password and, on Enter, runs the
+// key install through a PTY (runConnectPTY) so ssh's prompt is answered in-TUI.
+func (m sshModel) handlePasswordKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.password = ""
+		m.editingHost = false
+		m.mode = sshModeResult
+		return m, nil
+	case tea.KeyEnter:
+		if m.password == "" {
+			return m, nil // require a password
+		}
+		pw := m.password
+		args := m.pendingKeyArgs
+		m.password = "" // drop it from the model immediately
+		m.editingHost = false
+		m.progressNeeded = false
+		m.mode = sshModeProgress
+		m.progressTitle = "Installing key & connecting"
+		return m, runConnectPTY(pw, args...)
+	case tea.KeyBackspace, tea.KeyCtrlH:
+		if r := []rune(m.password); len(r) > 0 {
+			m.password = string(r[:len(r)-1])
+		}
+		return m, nil
+	case tea.KeySpace:
+		m.password += " "
+		return m, nil
+	case tea.KeyRunes:
+		m.password += string(msg.Runes)
+		return m, nil
+	}
+	return m, nil
+}
+
 func (m *sshModel) formTrim() {
 	trim := func(s string) string {
 		r := []rune(s)
@@ -525,10 +576,23 @@ func (m sshModel) View() string {
 		}
 		lines = append(lines, "")
 		if m.progressNeeded {
-			lines = append(lines, accent.Render("[K]")+dim.Render(" finish SSH key setup in a terminal (one-time password), then retry   ")+dim.Render("· any other key: close"))
+			lines = append(lines, accent.Render("[p]")+dim.Render(" enter SSH password here   ")+accent.Render("[K]")+dim.Render(" use a terminal instead   ·   any other key: close"))
 		} else {
 			lines = append(lines, dim.Render("Press any key to close."))
 		}
+	case sshModePassword:
+		host := "the host"
+		for i, a := range m.pendingKeyArgs {
+			if a == "--host" && i+1 < len(m.pendingKeyArgs) {
+				host = m.pendingKeyArgs[i+1]
+			}
+		}
+		lines = append(lines, cyan.Render("SSH PASSWORD")+dim.Render("  (one-time — installs your key, then key auth is used)"))
+		lines = append(lines, "")
+		dots := strings.Repeat("•", len([]rune(m.password)))
+		lines = append(lines, "  "+dim.Render("Password for ")+host+dim.Render(":  ")+dots+accent.Render("▌"))
+		lines = append(lines, "")
+		lines = append(lines, dim.Render("  Enter: submit · esc: cancel · the password is sent to ssh and not stored"))
 	case sshModeForm:
 		hl := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
 		label := func(step, text string) string {

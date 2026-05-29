@@ -993,7 +993,9 @@ func installPubKey(p remoteProfile, pubPath string) error {
 	target := connTarget(p)
 	if _, err := exec.LookPath("ssh-copy-id"); err == nil {
 		fmt.Println("   📤 Installing public key via ssh-copy-id (you may be prompted for a password)...")
-		args := []string{"-i", pubPath}
+		// accept-new so a first-time host key never adds a yes/no prompt — the only
+		// interactive prompt is then the password (important for the TUI's PTY flow).
+		args := []string{"-o", "StrictHostKeyChecking=accept-new", "-i", pubPath}
 		if p.Port != 0 && p.Port != defaultSSHPort {
 			args = append(args, "-p", strconv.Itoa(p.Port))
 		}
@@ -1018,7 +1020,7 @@ func installPubKey(p remoteProfile, pubPath string) error {
 		shellQuote(strings.TrimSpace(string(pub))) +
 		" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
 
-	args := []string{}
+	args := []string{"-o", "StrictHostKeyChecking=accept-new"}
 	if p.Jump != "" {
 		args = append(args, "-J", p.Jump)
 	}
