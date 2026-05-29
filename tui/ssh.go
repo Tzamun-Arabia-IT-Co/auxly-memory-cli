@@ -54,6 +54,7 @@ const (
 
 // form steps.
 const (
+	formStepOS     = "os"
 	formStepMethod = "method"
 	formStepHost   = "host"
 	formStepJump   = "jump"
@@ -71,6 +72,7 @@ type sshModel struct {
 
 	// add-host form state (mode == sshModeForm)
 	formStep   string
+	formOS     string
 	formMethod string
 	formHost   string
 	formJump   string
@@ -446,8 +448,8 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 			}
 		case "c":
 			m.mode = sshModeForm
-			m.formStep = formStepMethod
-			m.formMethod, m.formHost, m.formJump, m.formName = "", "", "", ""
+			m.formStep = formStepOS
+			m.formOS, m.formMethod, m.formHost, m.formJump, m.formName = "", "", "", "", ""
 			m.status = ""
 			m.editingHost = true // capture all keys for the in-TUI form
 			return m, nil
@@ -488,6 +490,17 @@ func (m sshModel) handleFormKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		return m, nil
 	case tea.KeyRunes:
 		s := string(msg.Runes)
+		if m.formStep == formStepOS {
+			switch s {
+			case "1":
+				m.formOS, m.formStep = "linux", formStepMethod
+			case "2":
+				m.formOS, m.formStep = "darwin", formStepMethod
+			case "3":
+				m.formOS, m.formStep = "windows", formStepMethod
+			}
+			return m, nil
+		}
 		if m.formStep == formStepMethod {
 			switch s {
 			case "1":
@@ -509,6 +522,11 @@ func (m sshModel) handleFormKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 
 func (m sshModel) advanceForm() (sshModel, tea.Cmd) {
 	switch m.formStep {
+	case formStepOS:
+		if m.formOS == "" {
+			m.formOS = "linux"
+		}
+		m.formStep = formStepMethod
 	case formStepMethod:
 		if m.formMethod == "" {
 			m.formMethod = "public"
@@ -537,7 +555,11 @@ func (m sshModel) submitForm() (sshModel, tea.Cmd) {
 		m.formStep = formStepHost
 		return m, nil
 	}
-	base := []string{"add", "--method", m.formMethod, "--host", host}
+	osTarget := m.formOS
+	if osTarget == "" {
+		osTarget = "linux"
+	}
+	base := []string{"add", "--os", osTarget, "--method", m.formMethod, "--host", host}
 	if name := strings.TrimSpace(m.formName); name != "" {
 		base = append(base, "--name", name)
 	}
@@ -759,6 +781,20 @@ func (m sshModel) View() string {
 		}
 		lines = append(lines, cyan.Render("ADD A REMOTE HOST")+dim.Render("    (esc cancels · Enter = next/save)"))
 		lines = append(lines, "")
+
+		osRadios := ""
+		for _, opt := range []struct{ v, lbl string }{{"linux", "Linux"}, {"darwin", "macOS"}, {"windows", "Windows"}} {
+			dot := "○"
+			if m.formOS == opt.v {
+				dot = accent.Render("●")
+			}
+			osRadios += fmt.Sprintf("%s %s   ", dot, opt.lbl)
+		}
+		osHint := ""
+		if m.formStep == formStepOS {
+			osHint = dim.Render("  ‹press 1–3›")
+		}
+		lines = append(lines, "  "+label(formStepOS, "OS    ")+"   "+osRadios+osHint)
 
 		radios := ""
 		for _, opt := range []struct{ k, v string }{{"1", "lan"}, {"2", "vpn"}, {"3", "bastion"}, {"4", "public"}} {

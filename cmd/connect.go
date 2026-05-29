@@ -30,6 +30,7 @@ const (
 type remoteProfile struct {
 	Name    string   `yaml:"name"`
 	Method  string   `yaml:"method"` // "lan" | "vpn" | "bastion" | "public"
+	OS      string   `yaml:"os,omitempty"` // "linux" | "darwin" | "windows"
 	User    string   `yaml:"user"`
 	Host    string   `yaml:"host"`
 	Port    int      `yaml:"port,omitempty"`
@@ -309,42 +310,43 @@ func runDoctor(p remoteProfile) error {
 	}
 	fmt.Println("   ✓ Local SSH client present")
 
-	// 2. Probe host OS/arch (also validates reachability).
+	targetOS := strings.ToLower(strings.TrimSpace(p.OS))
+
+	// Windows host: there is no `uname`, and a `curl | sh` silent install can't
+	// run in the host's cmd.exe/PowerShell shell. So we probe auxly directly and,
+	// if it's not available, guide the user with the PowerShell one-liner.
+	if targetOS == "windows" {
+		if _, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
+			fmt.Println("   ✓ auxly present on host (Windows)")
+			return nil
+		}
+		fmt.Printf("   ⚠ auxly is not reachable on the Windows host %s.\n", p.Host)
+		fmt.Println("     • If SSH itself failed: enable the OpenSSH Server optional feature on the host")
+		fmt.Println("       (Settings → Apps → Optional Features).")
+		fmt.Printf("     • Then install auxly ON THE HOST in PowerShell:  irm %s | iex\n", remoteInstallPS)
+		return fmt.Errorf("auxly not available on Windows host %s; enable sshd if needed, run `irm %s | iex` on the host, then retry", p.Host, remoteInstallPS)
+	}
+
+	// Unix host (linux/darwin — or unspecified, which we treat as unix and confirm
+	// via uname). Probe reachability + arch with uname.
 	uname, unameErr := runSSH(p, "uname", "-sm")
 	if unameErr != nil {
-		// Connection failed OR host is Windows (no uname).
 		printConnectionFailureGuidance(p, unameErr)
 		return fmt.Errorf("could not reach %s over SSH: %w", p.Host, unameErr)
 	}
 	fmt.Printf("   ✓ Host reachable (uname: %s)\n", uname)
 
-	hostOS := strings.ToLower(strings.Fields(uname)[0])
-	isUnixHost := hostOS == "darwin" || hostOS == "linux"
-
-	// 3. Check for auxly on the host.
+	// auxly already present?
 	if _, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
 		fmt.Println("   ✓ auxly present on host")
 		return nil
 	}
 
-	// 4. auxly missing.
-	if !isUnixHost {
-		// Windows host (or unknown): guided step, never silent. Silent install
-		// over SSH is unreliable on Windows (the remote default shell may be
-		// cmd.exe or PowerShell), so we print the exact PowerShell one-liner to
-		// run on the host instead.
-		fmt.Printf("   ⚠ auxly not found on host (%s). Run this in PowerShell ON THE HOST:\n", hostOS)
-		fmt.Printf("       irm %s | iex\n", remoteInstallPS)
-		return fmt.Errorf("auxly not installed on host %s; run `irm %s | iex` on the host (PowerShell), then retry", p.Host, remoteInstallPS)
-	}
-
-	// 5. Silent OS-aware install on darwin/linux host.
-	fmt.Println("   ⬇ auxly not found on host — installing silently (OS-aware)...")
+	// Silent install on the (confirmed) unix host.
+	fmt.Println("   ⬇ auxly not found on host — installing silently...")
 	if _, instErr := runSSH(p, "sh", "-c", "'curl -fsSL "+remoteInstallURL+" | sh'"); instErr != nil {
 		return fmt.Errorf("failed to install auxly on host %s: %w", p.Host, instErr)
 	}
-
-	// 6. Re-probe.
 	if _, verErr := runSSH(p, "auxly", "--version"); verErr != nil {
 		return fmt.Errorf("auxly still missing on host %s after install attempt: %w", p.Host, verErr)
 	}
@@ -391,10 +393,21 @@ func printSSHClientGuidance() {
 func printConnectionFailureGuidance(p remoteProfile, cause error) {
 	fmt.Printf("   ✗ Could not reach %s over SSH (%v).\n", p.Host, cause)
 	fmt.Println("     The SSH server (sshd) may be disabled on the host. Enable it on the host:")
-	fmt.Println("     • macOS:   System Settings → General → Sharing → Remote Login")
-	fmt.Println("     • Linux:   sudo systemctl enable --now ssh")
-	fmt.Println("     • Windows: enable the OpenSSH Server optional feature (Settings → Apps →")
-	fmt.Printf("                Optional Features), then install auxly on the host: irm %s | iex\n", remoteInstallPS)
+	switch strings.ToLower(strings.TrimSpace(p.OS)) {
+	case "darwin":
+		fmt.Println("     • macOS: System Settings → General → Sharing → Remote Login")
+	case "linux":
+		fmt.Println("     • Linux: sudo systemctl enable --now ssh")
+	case "windows":
+		fmt.Println("     • Windows: enable the OpenSSH Server optional feature (Settings → Apps →")
+		fmt.Printf("                Optional Features), then install auxly on the host: irm %s | iex\n", remoteInstallPS)
+	default:
+		// Target OS wasn't specified — show all so the user can act.
+		fmt.Println("     • macOS:   System Settings → General → Sharing → Remote Login")
+		fmt.Println("     • Linux:   sudo systemctl enable --now ssh")
+		fmt.Println("     • Windows: enable the OpenSSH Server optional feature (Settings → Apps →")
+		fmt.Printf("                Optional Features), then install auxly on the host: irm %s | iex\n", remoteInstallPS)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -512,11 +525,26 @@ var connectPrintCmd = &cobra.Command{
 var (
 	addName    string
 	addMethod  string
+	addOS      string
 	addHost    string
 	addJump    string
 	addMemPath string
 	addBatch   bool
 )
+
+// normalizeOS maps user input to the canonical target OS, defaulting to linux.
+func normalizeOS(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "mac", "macos", "osx", "darwin":
+		return "darwin"
+	case "win", "windows":
+		return "windows"
+	case "linux", "":
+		return "linux"
+	default:
+		return "linux"
+	}
+}
 
 // keyAuthWorks reports whether key-based SSH auth to the host already succeeds.
 func keyAuthWorks(p remoteProfile) bool {
@@ -536,6 +564,7 @@ func init() {
 
 	connectAddCmd.Flags().StringVar(&addName, "name", "", "profile name (defaults to host)")
 	connectAddCmd.Flags().StringVar(&addMethod, "method", "", "reachability: lan|vpn|bastion|public")
+	connectAddCmd.Flags().StringVar(&addOS, "os", "", "target host OS: linux|darwin|windows (default linux)")
 	connectAddCmd.Flags().StringVar(&addHost, "host", "", "[user@]host[:port] of the memory host")
 	connectAddCmd.Flags().StringVar(&addJump, "jump", "", "jump host ([user@]host) for the bastion method")
 	connectAddCmd.Flags().StringVar(&addMemPath, "mem-path", "", "host memory folder to serve (passed as --path; default: host's ~/.auxly/memory)")
@@ -570,7 +599,7 @@ func runConnectAdd(cmd *cobra.Command, args []string) error {
 			method = "lan"
 		}
 	}
-	p := remoteProfile{Name: name, Method: method, User: user, Host: host, Port: port, Jump: addJump, MemPath: addMemPath}
+	p := remoteProfile{Name: name, Method: method, OS: normalizeOS(addOS), User: user, Host: host, Port: port, Jump: addJump, MemPath: addMemPath}
 
 	if addBatch {
 		// Batch mode (the TUI runs the doctor captured in-pane): never block on a
@@ -866,7 +895,10 @@ func runConnectWizard() error {
 	fmt.Println("Link this machine to a shared Auxly memory host over SSH.")
 	fmt.Println()
 
-	// Step 1: method.
+	// Step 1: target OS (decides install method + guidance — no guessing).
+	targetOS := wizardSelectOS(reader)
+
+	// Step 2: method.
 	method := wizardSelectMethod(reader)
 
 	// Cheap pre-fill discovery.
@@ -895,6 +927,7 @@ func runConnectWizard() error {
 	p := remoteProfile{
 		Name:   name,
 		Method: method,
+		OS:     targetOS,
 		User:   user,
 		Host:   host,
 		Port:   port,
@@ -922,13 +955,28 @@ func runConnectWizard() error {
 	}
 	fmt.Printf("💾 Saved remote profile %q\n", p.Name)
 
-	// Step 6 + 7: inject configs and install skills.
-	injectRemoteConfigs(p.Name)
-	installAuxlySkills(remoteBanner())
+	// Step 6: provision the remote host (install skills + MCP on the host itself).
+	_ = provisionRemote(p)
 
-	// Step 8: summary.
+	// Step 7: summary.
 	printConnectSummary(p)
 	return nil
+}
+
+func wizardSelectOS(reader *bufio.Scanner) string {
+	fmt.Println("What OS is the target host?")
+	fmt.Println("  1) Linux")
+	fmt.Println("  2) macOS")
+	fmt.Println("  3) Windows")
+	choice := promptLine(reader, "Select [1-3]: ")
+	switch strings.TrimSpace(choice) {
+	case "2":
+		return "darwin"
+	case "3":
+		return "windows"
+	default:
+		return "linux"
+	}
 }
 
 func wizardSelectMethod(reader *bufio.Scanner) string {
