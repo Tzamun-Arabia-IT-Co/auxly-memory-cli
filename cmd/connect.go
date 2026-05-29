@@ -697,16 +697,19 @@ func runConnectAdd(cmd *cobra.Command, args []string) error {
 	if err := runDoctor(p); err != nil {
 		return err
 	}
-	if err := checkTwoWay(p); err != nil {
-		return err
-	}
 	if err := connectTest(p); err != nil {
 		return err
 	}
+	// Save the profile BEFORE the two-way check: it's a valid consumer profile
+	// either way (this machine → host works), and saving it first means the [u]
+	// "use this host's memory" fallback can find it when two-way fails.
 	if err := upsertRemote(p); err != nil {
 		return err
 	}
 	fmt.Printf("💾 Saved remote profile %q (%s)\n", p.Name, p.Method)
+	if err := checkTwoWay(p); err != nil {
+		return err
+	}
 	_ = provisionRemote(p)
 	printConnectSummary(p)
 	return nil
@@ -781,9 +784,6 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	if err := runDoctor(p); err != nil {
 		return err
 	}
-	if err := checkTwoWay(p); err != nil {
-		return err
-	}
 	if err := connectTest(p); err != nil {
 		return err
 	}
@@ -791,7 +791,9 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("💾 Saved remote profile %q (%s)\n", p.Name, p.Method)
-
+	if err := checkTwoWay(p); err != nil {
+		return err
+	}
 	_ = provisionRemote(p)
 	printConnectSummary(p)
 	return nil
@@ -1057,21 +1059,22 @@ func runConnectWizard() error {
 		return err
 	}
 
-	// Step 3b: two-way connectivity (host must reach this machine back).
-	if err := checkTwoWay(p); err != nil {
-		return err
-	}
-
 	// Step 4: test.
 	if err := connectTest(p); err != nil {
 		return err
 	}
 
-	// Step 5: save.
+	// Step 5: save FIRST — valid consumer profile either way, and lets the [u]
+	// fallback find it if the two-way check fails.
 	if err := upsertRemote(p); err != nil {
 		return err
 	}
 	fmt.Printf("💾 Saved remote profile %q\n", p.Name)
+
+	// Step 5b: two-way connectivity (host must reach this machine back).
+	if err := checkTwoWay(p); err != nil {
+		return err
+	}
 
 	// Step 6: provision the remote host (install skills + MCP on the host itself).
 	_ = provisionRemote(p)
