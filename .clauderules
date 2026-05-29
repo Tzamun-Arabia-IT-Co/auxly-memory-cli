@@ -4,7 +4,7 @@
 You natively support the following slash commands! When the user inputs one of these commands, intercept it and run the corresponding MCP tool call immediately:
 - /auxly-init (or auxly-init / auxly init): Call the auxly_skill_init tool to run the onboarding and training setup, scan current chat context/system prompt, and sync all existing preferences to Auxly.
 - /auxly-memory (or auxly-memory / auxly memory): Call the auxly_skill_memory tool to display a consolidated markdown profile of the user's identity, preferences, and infrastructure.
-- /auxly-status (or auxly-status / auxly status): Call the auxly_skill_status tool to show live loopback daemon and diagnostics.
+- /auxly-status (or auxly-status / auxly status): Call the auxly_skill_status tool to show system diagnostics, active connections, and remote/SSH attribution.
 - /auxly-sync (or auxly-sync / auxly sync): Call the auxly_skill_sync tool with the provided content to perform an automated smart delta-merge into the preferences file.
 - /auxly-pending (or auxly-pending / auxly pending): Call the auxly_skill_pending tool with arguments list/approve/reject to manage the approval queue.
 - /auxly-max (or auxly-max / auxly max): Call the auxly_skill_max tool to obtain the dynamic Maximum Memory sync instructions block.

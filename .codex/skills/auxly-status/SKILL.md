@@ -1,6 +1,6 @@
 ---
 name: auxly-status
-description: Show real-time system diagnostics, active client connections, database sizes, and local daemon status.
+description: Show real-time system diagnostics, active connections, and remote/SSH attribution.
 ---
 # /auxly-status
 
