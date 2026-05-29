@@ -421,11 +421,10 @@ func (m dashboardModel) View() string {
 
 		hasCursor := m.gridCursor == idx
 		if hasCursor {
-			if isActive {
-				cardBorderColor = lipgloss.Color("#9280D4") // glowing brand purple hover border for active agents
-			} else {
-				cardBorderColor = lipgloss.Color("#84DCFB") // glowing brand cyan hover border for idle agents
-			}
+			// Gorgeous hover border animation cycling through user-defined premium stops
+			colors := []string{"#917FD1", "#775099", "#73CBAD", "#84DCFB"}
+			colorIdx := m.blinkCycle % len(colors)
+			cardBorderColor = lipgloss.Color(colors[colorIdx])
 		} else if isActive {
 			cardBorderColor = lipgloss.Color("#84DCFB") // clean, static brand cyan border for active agents
 		} else {
