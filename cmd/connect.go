@@ -487,16 +487,107 @@ var connectPrintCmd = &cobra.Command{
 	RunE:  runConnectPrint,
 }
 
+// connect add — flag-driven, non-interactive add used by the TUI Remote tab.
+// The TUI collects the form natively, then runs this; the only terminal prompt
+// is the SSH password during first-time key install (ssh reads it from /dev/tty).
+var (
+	addName   string
+	addMethod string
+	addHost   string
+	addJump   string
+)
+
+var connectAddCmd = &cobra.Command{
+	Use:    "add",
+	Short:  "Add a remote from flags (key bootstrap + doctor + save + IDE config)",
+	Hidden: true,
+	RunE:   runConnectAdd,
+}
+
 func init() {
 	connectMCPCmd.Flags().StringVar(&connectMCPProvider, "provider", "", "provider id used for attribution (default: claude-code)")
+
+	connectAddCmd.Flags().StringVar(&addName, "name", "", "profile name (defaults to host)")
+	connectAddCmd.Flags().StringVar(&addMethod, "method", "", "reachability: lan|vpn|bastion|public")
+	connectAddCmd.Flags().StringVar(&addHost, "host", "", "[user@]host[:port] of the memory host")
+	connectAddCmd.Flags().StringVar(&addJump, "jump", "", "jump host ([user@]host) for the bastion method")
 
 	connectCmd.AddCommand(connectListCmd)
 	connectCmd.AddCommand(connectRemoveCmd)
 	connectCmd.AddCommand(connectTestCmd)
 	connectCmd.AddCommand(connectPrintCmd)
+	connectCmd.AddCommand(connectAddCmd)
 
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(connectMCPCmd)
+}
+
+func runConnectAdd(cmd *cobra.Command, args []string) error {
+	if addHost == "" {
+		return fmt.Errorf("--host is required (e.g. --host user@mac-mini.local)")
+	}
+	user, host, port, err := parseHostSpec(addHost)
+	if err != nil {
+		return fmt.Errorf("invalid --host: %w", err)
+	}
+	name := addName
+	if name == "" {
+		name = host
+	}
+	method := addMethod
+	if method == "" {
+		method = "public"
+		if isPrivateHost(host) {
+			method = "lan"
+		}
+	}
+	p := remoteProfile{Name: name, Method: method, User: user, Host: host, Port: port, Jump: addJump}
+
+	if err := bootstrapKeyAuth(p); err != nil {
+		fmt.Printf("⚠️  Key setup skipped/failed: %v\n", err)
+	}
+	if err := runDoctor(p); err != nil {
+		return err
+	}
+	if err := connectTest(p); err != nil {
+		return err
+	}
+	if err := upsertRemote(p); err != nil {
+		return err
+	}
+	fmt.Printf("💾 Saved remote profile %q (%s)\n", p.Name, p.Method)
+	injectRemoteConfigs(p.Name)
+	installAuxlySkills(remoteBanner())
+	printConnectSummary(p)
+	return nil
+}
+
+// bootstrapKeyAuth ensures key-based SSH auth works, generating an ed25519 key and
+// installing it on the host if needed. Non-interactive (assumes consent — the TUI
+// form already confirmed intent); the SSH password during key install is read by
+// ssh from /dev/tty, so it works under tea.ExecProcess.
+func bootstrapKeyAuth(p remoteProfile) error {
+	if _, err := runSSH(p, "true"); err == nil {
+		return nil // key auth already works
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to resolve home directory: %w", err)
+	}
+	keyPath := filepath.Join(home, ".ssh", "id_ed25519")
+	pubPath := keyPath + ".pub"
+	if _, statErr := os.Stat(keyPath); os.IsNotExist(statErr) {
+		if mkErr := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); mkErr != nil {
+			return fmt.Errorf("failed to create ~/.ssh: %w", mkErr)
+		}
+		fmt.Println("🔑 Generating ed25519 key…")
+		gen := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", keyPath)
+		gen.Stdin, gen.Stdout, gen.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if genErr := gen.Run(); genErr != nil {
+			return fmt.Errorf("ssh-keygen failed: %w", genErr)
+		}
+	}
+	return installPubKey(p, pubPath)
 }
 
 func runConnect(cmd *cobra.Command, args []string) error {

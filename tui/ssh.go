@@ -44,6 +44,15 @@ const (
 	sshModeList    = ""
 	sshModeConfirm = "confirm"
 	sshModePrint   = "print"
+	sshModeForm    = "form"
+)
+
+// form steps.
+const (
+	formStepMethod = "method"
+	formStepHost   = "host"
+	formStepJump   = "jump"
+	formStepName   = "name"
 )
 
 type sshModel struct {
@@ -55,8 +64,16 @@ type sshModel struct {
 	width   int
 	height  int
 
-	// editingHost is retained for the app.go contract. The new surface has
-	// its own modal state (mode), so this stays false.
+	// add-host form state (mode == sshModeForm)
+	formStep   string
+	formMethod string
+	formHost   string
+	formJump   string
+	formName   string
+
+	// editingHost drives app.go's key-routing contract: when true, ALL keys are
+	// delivered to this model (so the in-TUI add-host form can capture text). It
+	// is set only while the form is open.
 	editingHost bool
 }
 
@@ -196,6 +213,9 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		}
 		return m, nil
 
+	case sshModeForm:
+		return m.handleFormKey(msg)
+
 	default: // list mode
 		switch msg.String() {
 		case "j", "down":
@@ -207,8 +227,12 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 				m.cursor--
 			}
 		case "c":
+			m.mode = sshModeForm
+			m.formStep = formStepMethod
+			m.formMethod, m.formHost, m.formJump, m.formName = "", "", "", ""
 			m.status = ""
-			return m, runConnect() // interactive add-host wizard
+			m.editingHost = true // capture all keys for the in-TUI form
+			return m, nil
 		case "t":
 			if name := m.selectedName(); name != "" {
 				m.status = ""
@@ -225,6 +249,114 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 			}
 		}
 		return m, nil
+	}
+}
+
+// ── add-host form ─────────────────────────────────────────────────
+
+func (m sshModel) handleFormKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.mode = sshModeList
+		m.editingHost = false
+		return m, nil
+	case tea.KeyEnter:
+		return m.advanceForm()
+	case tea.KeyBackspace, tea.KeyCtrlH:
+		m.formTrim()
+		return m, nil
+	case tea.KeySpace:
+		m.formAppend(" ")
+		return m, nil
+	case tea.KeyRunes:
+		s := string(msg.Runes)
+		if m.formStep == formStepMethod {
+			switch s {
+			case "1":
+				m.formMethod, m.formStep = "lan", formStepHost
+			case "2":
+				m.formMethod, m.formStep = "vpn", formStepHost
+			case "3":
+				m.formMethod, m.formStep = "bastion", formStepHost
+			case "4":
+				m.formMethod, m.formStep = "public", formStepHost
+			}
+			return m, nil
+		}
+		m.formAppend(s)
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m sshModel) advanceForm() (sshModel, tea.Cmd) {
+	switch m.formStep {
+	case formStepMethod:
+		if m.formMethod == "" {
+			m.formMethod = "public"
+		}
+		m.formStep = formStepHost
+	case formStepHost:
+		if strings.TrimSpace(m.formHost) == "" {
+			return m, nil // host is required
+		}
+		if m.formMethod == "bastion" {
+			m.formStep = formStepJump
+		} else {
+			m.formStep = formStepName
+		}
+	case formStepJump:
+		m.formStep = formStepName
+	case formStepName:
+		return m.submitForm()
+	}
+	return m, nil
+}
+
+func (m sshModel) submitForm() (sshModel, tea.Cmd) {
+	host := strings.TrimSpace(m.formHost)
+	if host == "" {
+		m.formStep = formStepHost
+		return m, nil
+	}
+	args := []string{"add", "--method", m.formMethod, "--host", host}
+	if name := strings.TrimSpace(m.formName); name != "" {
+		args = append(args, "--name", name)
+	}
+	if jump := strings.TrimSpace(m.formJump); jump != "" {
+		args = append(args, "--jump", jump)
+	}
+	m.mode = sshModeList
+	m.editingHost = false
+	return m, runConnect(args...)
+}
+
+func (m *sshModel) formAppend(s string) {
+	switch m.formStep {
+	case formStepHost:
+		m.formHost += s
+	case formStepJump:
+		m.formJump += s
+	case formStepName:
+		m.formName += s
+	}
+}
+
+func (m *sshModel) formTrim() {
+	trim := func(s string) string {
+		r := []rune(s)
+		if len(r) == 0 {
+			return s
+		}
+		return string(r[:len(r)-1])
+	}
+	switch m.formStep {
+	case formStepHost:
+		m.formHost = trim(m.formHost)
+	case formStepJump:
+		m.formJump = trim(m.formJump)
+	case formStepName:
+		m.formName = trim(m.formName)
 	}
 }
 
@@ -295,6 +427,52 @@ func (m sshModel) View() string {
 		warn := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning)
 		lines = append(lines, warn.Render(fmt.Sprintf("Remove remote %q?  ", m.selectedName()))+
 			accent.Render("[y]")+dim.Render(" yes   ")+accent.Render("[n]")+dim.Render(" cancel"))
+	case sshModeForm:
+		hl := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+		label := func(step, text string) string {
+			if m.formStep == step {
+				return hl.Render(text)
+			}
+			return dim.Render(text)
+		}
+		caret := func(step string) string {
+			if m.formStep == step {
+				return accent.Render("▌")
+			}
+			return ""
+		}
+		lines = append(lines, cyan.Render("ADD A REMOTE HOST")+dim.Render("    (esc cancels · Enter = next/save)"))
+		lines = append(lines, "")
+
+		radios := ""
+		for _, opt := range []struct{ k, v string }{{"1", "lan"}, {"2", "vpn"}, {"3", "bastion"}, {"4", "public"}} {
+			dot := "○"
+			if m.formMethod == opt.v {
+				dot = accent.Render("●")
+			}
+			radios += fmt.Sprintf("%s %s   ", dot, opt.v)
+		}
+		methodHint := ""
+		if m.formStep == formStepMethod {
+			methodHint = dim.Render("  ‹press 1–4›")
+		}
+		lines = append(lines, "  "+label(formStepMethod, "Method")+"   "+radios+methodHint)
+
+		hostHint := ""
+		if m.formStep == formStepHost {
+			hostHint = dim.Render("  ‹user@host[:port]›")
+		}
+		lines = append(lines, "  "+label(formStepHost, "Host  ")+"   "+m.formHost+caret(formStepHost)+hostHint)
+
+		if m.formMethod == "bastion" {
+			lines = append(lines, "  "+label(formStepJump, "Jump  ")+"   "+m.formJump+caret(formStepJump))
+		}
+
+		nameShown := m.formName + caret(formStepName)
+		if m.formName == "" && m.formStep != formStepName {
+			nameShown = dim.Render("(defaults to host)")
+		}
+		lines = append(lines, "  "+label(formStepName, "Name  ")+"   "+nameShown)
 	case sshModePrint:
 		lines = append(lines, cyan.Render(fmt.Sprintf("MCP config for %q", m.selectedName()))+dim.Render("  (paste into your IDE)"))
 		for _, l := range strings.Split(m.preview, "\n") {
