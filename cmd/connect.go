@@ -417,11 +417,9 @@ func hostCanReachBack(p remoteProfile, addrs []string) (string, bool) {
 }
 
 func printTwoWayFailureGuidance(p remoteProfile, addrs []string) {
-	fmt.Printf("   ✗ %s can't reach this machine back (NAT) — it can't use this machine as host.\n", p.Host)
-	fmt.Println("     You can still connect right now — the other way around:")
-	fmt.Printf("     → Use %s's memory from THIS machine (this direction works).\n", p.Host)
-	fmt.Printf("        TUI: press [u]    ·    CLI: auxly connect use %s\n", p.Name)
-	fmt.Println("     To keep this machine as the host instead: same LAN, or Tailscale on both.")
+	fmt.Printf("   ✗ %s can't reach this machine back over '%s' (NAT) — no return path.\n", p.Host, p.Method)
+	fmt.Println("     Try a connection method that gives a return path to this machine:")
+	fmt.Printf("     TUI: press [m] to pick another method   ·   CLI: re-run with --method vpn|bastion|public\n")
 }
 
 // recordProvision logs the silent host install to the audit trail (best effort).

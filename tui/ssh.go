@@ -30,9 +30,22 @@ import (
 type remoteEntry struct {
 	Name   string `yaml:"name"`
 	Method string `yaml:"method"`
+	OS     string `yaml:"os"`
 	User   string `yaml:"user"`
 	Host   string `yaml:"host"`
 	Port   int    `yaml:"port"`
+}
+
+// spec rebuilds the [user@]host[:port] form used by the add form.
+func (r remoteEntry) spec() string {
+	s := r.Host
+	if r.User != "" {
+		s = r.User + "@" + r.Host
+	}
+	if r.Port != 0 && r.Port != 22 {
+		s = fmt.Sprintf("%s:%d", s, r.Port)
+	}
+	return s
 }
 
 // remotesFile is the shape we read from ~/.auxly/remotes.yaml. A missing
@@ -427,10 +440,25 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 	case sshModeResult:
 		if m.twoWayFailed && m.twoWayHost != "" {
 			switch msg.String() {
-			case "u", "U":
+			case "m", "M":
+				// Re-open the method picker for this host, keeping it as the host.
+				// Pre-fill OS/host/name from the saved profile so the user only
+				// re-chooses the connection method (try VPN/bastion/public).
 				name := m.twoWayHost
+				for _, r := range m.remotes {
+					if r.Name == name {
+						m.formName = r.Name
+						m.formHost = r.spec()
+						m.formOS = r.OS
+						m.formMethod = r.Method
+						break
+					}
+				}
 				m.twoWayFailed = false
-				return m.beginCaptured("Using "+name+"'s memory", "use", name)
+				m.mode = sshModeForm
+				m.formStep = formStepMethod
+				m.editingHost = true
+				return m, nil
 			}
 		}
 		if m.progressNeeded && len(m.pendingKeyArgs) > 0 {
@@ -768,7 +796,7 @@ func (m sshModel) View() string {
 		lines = append(lines, "")
 		switch {
 		case m.twoWayFailed && m.twoWayHost != "":
-			lines = append(lines, accent.Render("[u]")+dim.Render(" use "+m.twoWayHost+"'s memory from this machine (works now)   ·   any other key: close"))
+			lines = append(lines, accent.Render("[m]")+dim.Render(" try a different connection method (VPN / bastion / public)   ·   any other key: close"))
 		case m.progressNeeded:
 			lines = append(lines, accent.Render("[p]")+dim.Render(" enter SSH password here   ")+accent.Render("[K]")+dim.Render(" use a terminal instead   ·   any other key: close"))
 		default:
