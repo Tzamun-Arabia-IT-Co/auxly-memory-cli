@@ -17,19 +17,30 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}}
 
-  # Windows host build. go-sqlite3 needs CGO, so cross-compiling to Windows
-  # requires the mingw-w64 toolchain on the release runner
-  # (e.g. `brew install mingw-w64` or `apt-get install gcc-mingw-w64`).
+  # Windows host build (amd64 + arm64). go-sqlite3 needs CGO, so cross-compiling
+  # to Windows requires a Windows C toolchain on the release runner. We use
+  # llvm-mingw (https://github.com/mstorsjo/llvm-mingw) because it ships BOTH
+  # x86_64- and aarch64- Windows clang targets; the standard gcc mingw-w64
+  # package is amd64-only. Put its bin/ on PATH in CI before `goreleaser release`.
   - id: windows
     main: .
     binary: auxly
     env:
       - CGO_ENABLED=1
-      - CC=x86_64-w64-mingw32-gcc
     goos:
       - windows
     goarch:
       - amd64
+      - arm64
+    overrides:
+      - goos: windows
+        goarch: amd64
+        env:
+          - CC=x86_64-w64-mingw32-clang
+      - goos: windows
+        goarch: arm64
+        env:
+          - CC=aarch64-w64-mingw32-clang
     ldflags:
       - -s -w -X main.version={{.Version}}
 

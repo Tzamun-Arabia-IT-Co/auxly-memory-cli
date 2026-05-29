@@ -17,13 +17,7 @@ if (-not $rawArch) { $rawArch = $env:PROCESSOR_ARCHITECTURE }
 
 switch ($rawArch) {
     'AMD64' { $goarch = 'amd64' }
-    'ARM64' {
-        Write-Error @'
-Windows arm64 release archives are not published yet.
-Options: run the amd64 build under emulation, or build from source (go build).
-'@
-        exit 1
-    }
+    'ARM64' { $goarch = 'arm64' }
     default { Write-Error "Unsupported architecture: $rawArch"; exit 1 }
 }
 
