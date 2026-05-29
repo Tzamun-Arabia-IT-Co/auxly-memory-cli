@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite" // pure-Go SQLite driver (no CGO) — enables cross-compilation
 )
 
 // Entry represents a single audit log entry.
@@ -50,7 +50,7 @@ func NewLogger(memoryRoot string) (*Logger, error) {
 	logPath := filepath.Join(memoryRoot, ".audit.log")
 	dbPath := filepath.Join(memoryRoot, "audit.db")
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open audit.db: %w", err)
 	}
