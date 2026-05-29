@@ -1,0 +1,50 @@
+version: 2
+
+project_name: auxly-cli
+
+builds:
+  - main: .
+    binary: auxly
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - wrappers/*
+
+brews:
+  - repository:
+      owner: Tzamun-Arabia-IT-Co
+      name: homebrew-tap
+    homepage: "https://auxly.io/cli"
+    description: "Local-first unified memory system for AI agents"
+    license: MIT
+    install: |
+      bin.install "auxly"
+
+nfpms:
+  - package_name: auxly-cli
+    homepage: "https://auxly.io/cli"
+    description: "Local-first unified memory system for AI agents"
+    license: MIT
+    formats:
+      - deb
+      - rpm
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

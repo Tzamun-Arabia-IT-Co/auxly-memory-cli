@@ -1,0 +1,9 @@
+# Binary
+auxly
+auxly-cli
+
+# Build artifacts
+dist/
+
+# OS
+.DS_Store
