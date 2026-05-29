@@ -421,9 +421,25 @@ func (m dashboardModel) View() string {
 
 		hasCursor := m.gridCursor == idx
 		if hasCursor {
-			cardBorderColor = lipgloss.Color("#84DCFB") // selected highlight border
+			if isActive {
+				// Smooth, high-fidelity Auxly branding animation: cycles between glowing cyan and purple
+				colors := []string{
+					"#00AFD7", "#00C3EB", "#00D6FF", "#5D7BFA", "#8E4DF5", "#AF5FDF", "#D500F9",
+					"#AF5FDF", "#8E4DF5", "#5D7BFA", "#00D6FF", "#00C3EB",
+				}
+				colorIdx := m.blinkCycle % len(colors)
+				cardBorderColor = lipgloss.Color(colors[colorIdx])
+			} else {
+				cardBorderColor = lipgloss.Color("#84DCFB") // selected highlight border
+			}
 		} else if isActive {
-			cardBorderColor = lipgloss.Color("#008080") // active green/cyan border
+			// Slower, breathing cyan/purple animation for non-hovered active agents
+			colors := []string{
+				"#008080", "#009688", "#00A896", "#00C3EB", "#3F51B5", "#8E4DF5",
+				"#3F51B5", "#00C3EB", "#00A896", "#009688",
+			}
+			colorIdx := (m.blinkCycle / 2) % len(colors)
+			cardBorderColor = lipgloss.Color(colors[colorIdx])
 		} else {
 			cardBorderColor = ColorDim // static grey border for idle agents
 		}
