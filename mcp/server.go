@@ -49,9 +49,9 @@ type serverInfo struct {
 }
 
 type initializeResult struct {
-	ProtocolVersion string            `json:"protocolVersion"`
+	ProtocolVersion string                 `json:"protocolVersion"`
 	Capabilities    map[string]interface{} `json:"capabilities"`
-	ServerInfo      serverInfo        `json:"serverInfo"`
+	ServerInfo      serverInfo             `json:"serverInfo"`
 }
 
 type tool struct {
@@ -61,9 +61,9 @@ type tool struct {
 }
 
 type inputSchema struct {
-	Type       string                 `json:"type"`
-	Properties map[string]property    `json:"properties"`
-	Required   []string               `json:"required,omitempty"`
+	Type       string              `json:"type"`
+	Properties map[string]property `json:"properties"`
+	Required   []string            `json:"required,omitempty"`
 }
 
 type property struct {
@@ -88,6 +88,7 @@ type Server struct {
 	logger     *audit.Logger
 	pendingMgr *pending.Manager
 	outWriter  io.Writer
+	sourceMeta audit.SourceMeta
 	mu         sync.Mutex
 }
 
@@ -103,6 +104,31 @@ func NewServer(memoryPath string) *Server {
 		logger:     logger,
 		pendingMgr: pendingMgr,
 		outWriter:  os.Stdout,
+		sourceMeta: resolveSourceMeta(),
+	}
+}
+
+// resolveSourceMeta determines write attribution once, based on the env vars
+// set by the host process (cmd/mcp_server.go) and sshd's SSH_CONNECTION.
+func resolveSourceMeta() audit.SourceMeta {
+	source := os.Getenv("AUXLY_SOURCE")
+	if source == "" {
+		source = "local"
+	}
+
+	var remoteIP string
+	if conn := os.Getenv("SSH_CONNECTION"); conn != "" {
+		// sshd sets "SSH_CONNECTION=<clientIP> <clientPort> <serverIP> <serverPort>".
+		if fields := strings.Fields(conn); len(fields) > 0 {
+			remoteIP = fields[0]
+		}
+	}
+
+	return audit.SourceMeta{
+		Source:     source,
+		RemoteIP:   remoteIP,
+		RemoteOS:   os.Getenv("AUXLY_REMOTE_OS"),
+		RemoteHost: os.Getenv("AUXLY_REMOTE_HOST"),
 	}
 }
 
@@ -160,7 +186,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 			ServerInfo: serverInfo{
 				Name:    "auxly-memory",
 				Version: "1.0.0",
-				},
+			},
 		})
 
 	case "notifications/initialized":
@@ -327,6 +353,14 @@ func (s *Server) getTools() []tool {
 				Required: []string{"context"},
 			},
 		},
+		{
+			Name:        "auxly_skill_remote_connect",
+			Description: "Report the active Auxly remote connection: host, client IP, OS; confirm shared remote vault.",
+			InputSchema: inputSchema{
+				Type:       "object",
+				Properties: map[string]property{},
+			},
+		},
 	}
 }
 
@@ -406,6 +440,9 @@ func (s *Server) handleToolCall(req *jsonRPCRequest) {
 		context, _ := params.Arguments["context"].(string)
 		s.logActivity("", "skill_learn", "")
 		result = s.toolSkillLearn(context)
+	case "auxly_skill_remote_connect":
+		s.logActivity("", "skill_remote_connect", "")
+		result = s.toolSkillRemoteConnect()
 	default:
 		result = toolResult{
 			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Unknown tool: %s", params.Name)}},
@@ -429,29 +466,29 @@ func getParentProcessName() string {
 func getAncestorProcesses() []string {
 	var ancestors []string
 	pid := os.Getppid() // Start from parent process to avoid self-matching
-	
+
 	for i := 0; i < 10; i++ {
 		cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "ppid=,comm=")
 		out, err := cmd.Output()
 		if err != nil {
 			break
 		}
-		
+
 		line := strings.TrimSpace(string(out))
 		if line == "" {
 			break
 		}
-		
+
 		parts := strings.Fields(line)
 		if len(parts) < 2 {
 			break
 		}
-		
+
 		ppidStr := parts[0]
 		comm := strings.Join(parts[1:], " ")
-		
+
 		baseLower := strings.ToLower(filepath.Base(comm))
-		
+
 		ppid, err := strconv.Atoi(ppidStr)
 		if err != nil || ppid <= 1 {
 			if !strings.Contains(baseLower, "auxly") {
@@ -459,17 +496,17 @@ func getAncestorProcesses() []string {
 			}
 			break
 		}
-		
+
 		// Skip self/auxly binary processes to avoid self-matching bug
 		if strings.Contains(baseLower, "auxly") {
 			pid = ppid
 			continue
 		}
-		
+
 		ancestors = append(ancestors, comm)
 		pid = ppid
 	}
-	
+
 	return ancestors
 }
 
@@ -528,7 +565,7 @@ func (s *Server) logActivity(provider, action, file string) {
 	}
 	agentID := fmt.Sprintf("%s-mcp", provider)
 	if s.logger != nil {
-		s.logger.Log(agentID, provider, action, file, "", "Activity log", "auto")
+		s.logger.LogWithSource(agentID, provider, action, file, "", "Activity log", "auto", s.sourceMeta)
 	}
 }
 
@@ -599,7 +636,7 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 			return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}}, IsError: true}
 		}
 		if s.logger != nil {
-			s.logger.Log(agentID, provider, "write", file, diff, reason, level)
+			s.logger.LogWithSource(agentID, provider, "write", file, diff, reason, level, s.sourceMeta)
 		}
 		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(fmt.Sprintf("⏳ Change queued for approval: .pending/%s\nHuman must run 'auxly approve %s' to apply.", pendingName, pendingName))}}}
 	}
@@ -616,7 +653,7 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 	}
 
 	if s.logger != nil {
-		s.logger.Log(agentID, provider, "write", file, diff, reason, level)
+		s.logger.LogWithSource(agentID, provider, "write", file, diff, reason, level, s.sourceMeta)
 	}
 
 	msgText := fmt.Sprintf("✅ Your Auxly memory has been updated! Written to %s.\n\nAuxly Unified Memory has been re-compiled in the background.", file)
@@ -693,28 +730,17 @@ func (s *Server) toolPendingList() toolResult {
 	return toolResult{Content: []toolContent{{Type: "text", Text: sb.String()}}}
 }
 
-
-func getDaemonActiveHelper() bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
+// describeRemote builds a compact "<ip>, <os>" description from source meta,
+// gracefully omitting empty parts.
+func describeRemote(meta audit.SourceMeta) string {
+	var parts []string
+	if meta.RemoteIP != "" {
+		parts = append(parts, meta.RemoteIP)
 	}
-	pidPath := filepath.Join(home, ".auxly", "daemon.pid")
-	pidData, err := os.ReadFile(pidPath)
-	if err != nil {
-		return false
+	if meta.RemoteOS != "" {
+		parts = append(parts, meta.RemoteOS)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
-	if err != nil {
-		return false
-	}
-
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
+	return strings.Join(parts, ", ")
 }
 
 func appendSkillSyncFooter(text string) string {
@@ -928,7 +954,7 @@ func (s *Server) toolSkillPending(action, targetID string) toolResult {
 				provider = "claude"
 			}
 			agentID := fmt.Sprintf("%s-mcp", provider)
-			s.logger.Log(agentID, provider, "write", targetID, "", "Approved pending change via skill", "auto")
+			s.logger.LogWithSource(agentID, provider, "write", targetID, "", "Approved pending change via skill", "auto", s.sourceMeta)
 		}
 		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(fmt.Sprintf("✓ Successfully approved and committed pending entry: %s", targetID))}}}
 	}
@@ -948,18 +974,46 @@ func (s *Server) toolSkillStatus() toolResult {
 	var sb strings.Builder
 	sb.WriteString("📡 **AUXLY GATEWAY SYSTEM STATUS**\n\n")
 
-	daemonText := "○ inactive"
-	if getDaemonActiveHelper() {
-		daemonText = "● active (Port 7357)"
+	sourceText := "● local"
+	if s.sourceMeta.Source == "ssh-remote" {
+		sourceText = fmt.Sprintf("● ssh-remote (%s)", describeRemote(s.sourceMeta))
 	}
-
-	sb.WriteString(fmt.Sprintf("• **Daemon Gateway:** %s\n", daemonText))
+	sb.WriteString(fmt.Sprintf("• **Source:** %s\n", sourceText))
 
 	if stats, err := s.logger.Stats(); err == nil && stats != nil {
 		sb.WriteString(fmt.Sprintf("• **Writes Today:** %d\n", stats.WritesToday))
 		sb.WriteString(fmt.Sprintf("• **Total Memory Entries:** %d\n", stats.TotalEntries))
 	}
 
+	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+}
+
+func (s *Server) toolSkillRemoteConnect() toolResult {
+	var sb strings.Builder
+	sb.WriteString("🔗 **AUXLY REMOTE CONNECTION**\n\n")
+
+	if s.sourceMeta.Source == "ssh-remote" {
+		host := s.sourceMeta.RemoteHost
+		if host == "" {
+			host = "(unknown)"
+		}
+		clientIP := s.sourceMeta.RemoteIP
+		if clientIP == "" {
+			clientIP = "(unknown)"
+		}
+		remoteOS := s.sourceMeta.RemoteOS
+		if remoteOS == "" {
+			remoteOS = "(unknown)"
+		}
+		sb.WriteString(fmt.Sprintf("• **Host:** %s\n", host))
+		sb.WriteString(fmt.Sprintf("• **Client IP:** %s\n", clientIP))
+		sb.WriteString(fmt.Sprintf("• **Remote OS:** %s\n", remoteOS))
+		sb.WriteString("\nReads and writes are centralized and audited on the shared remote host's Auxly vault.")
+		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+	}
+
+	sb.WriteString("• **Source:** local vault\n\n")
+	sb.WriteString("This session is using a LOCAL Auxly vault. To link a remote host and share a central, audited vault, run the `auxly connect` CLI wizard.")
 	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
 }
 
@@ -1213,4 +1267,3 @@ func (s *Server) handlePromptGet(req *jsonRPCRequest) {
 		},
 	})
 }
-

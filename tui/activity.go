@@ -80,9 +80,9 @@ func (m activityModel) Update(msg tea.Msg) (activityModel, tea.Cmd) {
 				}
 				return m, nil
 			}
-			
+
 			listStartY := contentOffsetY + 6
-			
+
 			visibleCount := 10
 			start := m.cursor - visibleCount/2
 			if start < 0 {
@@ -98,7 +98,7 @@ func (m activityModel) Update(msg tea.Msg) (activityModel, tea.Cmd) {
 					start = 0
 				}
 			}
-			
+
 			listHeight := end - start
 			if msg.Y >= listStartY && msg.Y < listStartY+listHeight {
 				clickedIdx := start + (msg.Y - listStartY)
@@ -237,7 +237,7 @@ func (m activityModel) renderDetailPopup(e audit.Entry) string {
 	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Timestamp:"), ts.Format("02/01/2006 15:04:05")))
 	lines = append(lines, fmt.Sprintf("  %-12s %s %s (%s)", dim.Render("Agent:"), icon, styledProvider, dim.Render(e.AgentID)))
 	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Trust Level:"), green.Render(e.TrustLevel)))
-	
+
 	cleanReasonLines := wrapText(e.Reason, 50)
 	for i, rl := range cleanReasonLines {
 		label := ""
@@ -249,31 +249,31 @@ func (m activityModel) renderDetailPopup(e audit.Entry) string {
 	lines = append(lines, "")
 
 	lines = append(lines, dim.Render("  ── Diff Content ──"))
-	
+
 	wrappedRawDiff := wrapRawDiffText(e.Diff, 68)
 	fullDiffFormatted := formatDiff(wrappedRawDiff)
 	diffLines := strings.Split(fullDiffFormatted, "\n")
-	
+
 	maxLines := 10
 	startLine := m.detailScrollY
 	endLine := startLine + maxLines
 	if endLine > len(diffLines) {
 		endLine = len(diffLines)
 	}
-	
+
 	if startLine > 0 {
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWarning).Render("  ▲ MORE LINES ABOVE"))
 	}
-	
+
 	for i := startLine; i < endLine; i++ {
 		line := diffLines[i]
-		lines = append(lines, "  " + line)
+		lines = append(lines, "  "+line)
 	}
-	
+
 	if endLine < len(diffLines) {
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWarning).Render("  ▼ MORE LINES BELOW"))
 	}
-	
+
 	lines = append(lines, "")
 	lines = append(lines, StyleFooter.Render("  [Esc] or [Enter] to Close • ↑/↓ or scroll to scroll diff"))
 
@@ -359,9 +359,9 @@ func (m auditTrailModel) Update(msg tea.Msg) (auditTrailModel, tea.Cmd) {
 				}
 				return m, nil
 			}
-			
+
 			listStartY := contentOffsetY + 6
-			
+
 			visibleCount := 10
 			start := m.cursor - visibleCount/2
 			if start < 0 {
@@ -377,7 +377,7 @@ func (m auditTrailModel) Update(msg tea.Msg) (auditTrailModel, tea.Cmd) {
 					start = 0
 				}
 			}
-			
+
 			listHeight := end - start
 			if msg.Y >= listStartY && msg.Y < listStartY+listHeight {
 				clickedIdx := start + (msg.Y - listStartY)
@@ -516,7 +516,7 @@ func (m auditTrailModel) renderDetailPopup(e audit.Entry) string {
 	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Timestamp:"), ts.Format("02/01/2006 15:04:05")))
 	lines = append(lines, fmt.Sprintf("  %-12s %s %s (%s)", dim.Render("Agent:"), icon, styledProvider, dim.Render(e.AgentID)))
 	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Action:"), green.Render(e.Action)))
-	
+
 	cleanReasonLines := wrapText(e.Reason, 50)
 	for i, rl := range cleanReasonLines {
 		label := ""
@@ -528,31 +528,31 @@ func (m auditTrailModel) renderDetailPopup(e audit.Entry) string {
 	lines = append(lines, "")
 
 	lines = append(lines, dim.Render("  ── Diff Content ──"))
-	
+
 	wrappedRawDiff := wrapRawDiffText(e.Diff, 68)
 	fullDiffFormatted := formatDiff(wrappedRawDiff)
 	diffLines := strings.Split(fullDiffFormatted, "\n")
-	
+
 	maxLines := 10
 	startLine := m.detailScrollY
 	endLine := startLine + maxLines
 	if endLine > len(diffLines) {
 		endLine = len(diffLines)
 	}
-	
+
 	if startLine > 0 {
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWarning).Render("  ▲ MORE LINES ABOVE"))
 	}
-	
+
 	for i := startLine; i < endLine; i++ {
 		line := diffLines[i]
-		lines = append(lines, "  " + line)
+		lines = append(lines, "  "+line)
 	}
-	
+
 	if endLine < len(diffLines) {
 		lines = append(lines, lipgloss.NewStyle().Foreground(ColorWarning).Render("  ▼ MORE LINES BELOW"))
 	}
-	
+
 	lines = append(lines, "")
 	lines = append(lines, StyleFooter.Render("  [Esc] or [Enter] to Close • ↑/↓ or scroll to scroll diff"))
 
@@ -586,13 +586,13 @@ func repeatChar(char string, count int) string {
 func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) string {
 	border := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	bold := lipgloss.NewStyle().Bold(true)
-	
+
 	// Subtract 6 from mWidth to guarantee a safe right margin in all terminals
 	mWidth = mWidth - 6
 	if mWidth < 58 {
 		mWidth = 58
 	}
-	
+
 	colTimeW := 21
 	colAgentW := 16
 	colSourceW := 13
@@ -608,39 +608,39 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 			colActivityW = 90
 		}
 	}
-	
+
 	var sb strings.Builder
-	
-	sb.WriteString(border.Render("┌" + repeatChar("─", colTimeW) + "┬" + repeatChar("─", colAgentW) + "┬" + repeatChar("─", colActivityW) + "┬" + repeatChar("─", colSourceW) + "┐") + "\n")
-	
+
+	sb.WriteString(border.Render("┌"+repeatChar("─", colTimeW)+"┬"+repeatChar("─", colAgentW)+"┬"+repeatChar("─", colActivityW)+"┬"+repeatChar("─", colSourceW)+"┐") + "\n")
+
 	// Pad header strings manually to ensure mathematically perfect widths that connect seamlessly with the borders
 	timeH := fmt.Sprintf(" %-*s", colTimeW-1, "Timestamp")
-	
+
 	var agentH string
 	if colAgentW >= 18 {
 		agentH = fmt.Sprintf(" %-*s", colAgentW-1, "Agent / Provider")
 	} else {
 		agentH = fmt.Sprintf(" %-*s", colAgentW-1, "Agent")
 	}
-	
+
 	var actH string
 	if colActivityW >= 18 {
 		actH = fmt.Sprintf(" %-*s", colActivityW-1, "Activity Details")
 	} else {
 		actH = fmt.Sprintf(" %-*s", colActivityW-1, "Activity")
 	}
-	
+
 	srcH := fmt.Sprintf(" %-*s", colSourceW-1, "Source")
-	
+
 	sb.WriteString(border.Render("│") + bold.Render(timeH) + border.Render("│") + bold.Render(agentH) + border.Render("│") + bold.Render(actH) + border.Render("│") + bold.Render(srcH) + border.Render("│") + "\n")
-	
-	sb.WriteString(border.Render("├" + repeatChar("─", colTimeW) + "┼" + repeatChar("─", colAgentW) + "┼" + repeatChar("─", colActivityW) + "┼" + repeatChar("─", colSourceW) + "┤") + "\n")
-	
+
+	sb.WriteString(border.Render("├"+repeatChar("─", colTimeW)+"┼"+repeatChar("─", colAgentW)+"┼"+repeatChar("─", colActivityW)+"┼"+repeatChar("─", colSourceW)+"┤") + "\n")
+
 	for i := start; i < end; i++ {
 		e := entries[i]
 		ts, _ := time.Parse(time.RFC3339, e.Timestamp)
 		timeStr := ts.Format("02/01/2006 15:04:05")
-		
+
 		styledAgent := colorProvider(e.Provider)
 		agentStr := fmt.Sprintf("%s (%s)", styledAgent, e.AgentID)
 		agentStr = stripEmojis(agentStr)
@@ -657,7 +657,7 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 				agentCleanWidth = visibleWidth(stripANSI(agentStr))
 			}
 		}
-		
+
 		summary := e.Reason
 		if e.Action == "write" && e.Diff != "" {
 			cleanDiff := strings.TrimSpace(e.Diff)
@@ -693,20 +693,29 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 		summary = strings.ReplaceAll(summary, "\n", " ")
 		summary = strings.ReplaceAll(summary, "\r", " ")
 		summary = stripEmojis(summary)
-		
+
 		actCleanWidth := visibleWidth(stripANSI(summary))
 		if actCleanWidth > colActivityW-2 {
 			summary = safeTruncate(summary, colActivityW-5) + "..."
 			actCleanWidth = visibleWidth(stripANSI(summary))
 		}
-		
-		sourceVal := "Local Stdio"
-		if strings.Contains(e.AgentID, "ssh") || strings.Contains(e.File, ".ssh") {
-			sourceVal = "SSH Bridge"
-		} else if e.Provider == "antigravity" || strings.HasPrefix(e.Provider, "antigravity") || e.Provider == "claude-code" || e.Provider == "gemini" {
-			sourceVal = "Local CLI"
+
+		sourceVal := "Local"
+		if e.Source == "ssh-remote" {
+			var parts []string
+			if e.RemoteIP != "" {
+				parts = append(parts, e.RemoteIP)
+			}
+			if e.RemoteOS != "" {
+				parts = append(parts, e.RemoteOS)
+			}
+			if len(parts) > 0 {
+				sourceVal = "SSH (" + strings.Join(parts, ", ") + ")"
+			} else {
+				sourceVal = "SSH"
+			}
 		}
-		
+
 		var rowLine string
 		if i == cursor {
 			cleanAgent := stripANSI(agentStr)
@@ -714,12 +723,12 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 			agCell := " " + cleanAgent + padSpace(colAgentW-2-visibleWidth(stripANSI(cleanAgent))) + " "
 			aCell := " " + summary + padSpace(colActivityW-2-visibleWidth(stripANSI(summary))) + " "
 			sCell := fmt.Sprintf(" %-*s ", colSourceW-2, sourceVal)
-			
+
 			styleSelectedSep := lipgloss.NewStyle().
 				Background(lipgloss.Color("236")).
 				Foreground(lipgloss.Color("250"))
 			innerSep := styleSelectedSep.Render("│")
-			
+
 			rowLine = border.Render("│") + StyleSelectedRow.Render(tCell) + innerSep + StyleSelectedRow.Render(agCell) + innerSep + StyleSelectedRow.Render(aCell) + innerSep + StyleSelectedRow.Render(sCell) + border.Render("│")
 		} else {
 			tCell := " " + timeStr + " "
@@ -731,9 +740,9 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 		}
 		sb.WriteString(rowLine + "\n")
 	}
-	
-	sb.WriteString(border.Render("└" + repeatChar("─", colTimeW) + "┴" + repeatChar("─", colAgentW) + "┴" + repeatChar("─", colActivityW) + "┴" + repeatChar("─", colSourceW) + "┘") + "\n")
-	
+
+	sb.WriteString(border.Render("└"+repeatChar("─", colTimeW)+"┴"+repeatChar("─", colAgentW)+"┴"+repeatChar("─", colActivityW)+"┴"+repeatChar("─", colSourceW)+"┘") + "\n")
+
 	return sb.String()
 }
 
@@ -741,11 +750,11 @@ func stripEmojis(s string) string {
 	var sb strings.Builder
 	for _, r := range s {
 		if (r >= 0x1F000 && r <= 0x1FBFF) || // Emojis, pictographs, symbols
-			(r >= 0x2600 && r <= 0x27BF) ||  // Dingbats, Miscellaneous Symbols
-			(r >= 0x2300 && r <= 0x23FF) ||  // Miscellaneous Technical
-			(r >= 0x2B00 && r <= 0x2BFF) ||  // Miscellaneous Symbols and Arrows
-			(r >= 0xFE00 && r <= 0xFE0F) ||  // Variation Selectors
-			(r == 0x200D) {                  // Zero Width Joiner
+			(r >= 0x2600 && r <= 0x27BF) || // Dingbats, Miscellaneous Symbols
+			(r >= 0x2300 && r <= 0x23FF) || // Miscellaneous Technical
+			(r >= 0x2B00 && r <= 0x2BFF) || // Miscellaneous Symbols and Arrows
+			(r >= 0xFE00 && r <= 0xFE0F) || // Variation Selectors
+			(r == 0x200D) { // Zero Width Joiner
 			continue
 		}
 		sb.WriteRune(r)
@@ -834,28 +843,28 @@ func formatDiff(diffText string) string {
 	if diffText == "" {
 		return ""
 	}
-	
+
 	// Pre-process: split inline [+] and [-] changes to separate lines for clean normal diff UX
 	diffText = strings.ReplaceAll(diffText, " [+] ", "\n[+] ")
 	diffText = strings.ReplaceAll(diffText, " [-] ", "\n[-] ")
 	diffText = strings.ReplaceAll(diffText, " + [+] ", "\n[+] ")
 	diffText = strings.ReplaceAll(diffText, " + [-] ", "\n[-] ")
-	
+
 	lines := strings.Split(diffText, "\n")
 	var formatted []string
-	
+
 	// White text on user-specified hex dark green (#21381E) & dark red (#3C1211) backgrounds
 	styleAdd := lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("#21381E")) // dark forest green
 	styleDel := lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("#3C1211")) // dark wine red
 	styleHeader := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)                          // bright cyan
-	styleDim := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))                                        // dim grey
-	
+	styleDim := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))                                       // dim grey
+
 	for _, line := range lines {
 		cleanLine := strings.TrimSpace(line)
 		if cleanLine == "" {
 			continue
 		}
-		
+
 		// If line has '[-]' or starts with '-' (excluding diff headers)
 		if strings.Contains(cleanLine, "[-]") || (strings.HasPrefix(cleanLine, "-") && !strings.HasPrefix(cleanLine, "---")) {
 			formatted = append(formatted, styleDel.Render(line))
@@ -910,9 +919,9 @@ func wrapDiffLine(line string, width int) []string {
 		}
 		chunk := string(runes[:limit])
 		if len(chunks) == 0 {
-			chunks = append(chunks, prefix + chunk)
+			chunks = append(chunks, prefix+chunk)
 		} else {
-			chunks = append(chunks, "   " + chunk)
+			chunks = append(chunks, "   "+chunk)
 		}
 		runes = runes[limit:]
 	}
