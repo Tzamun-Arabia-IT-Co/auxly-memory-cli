@@ -421,10 +421,11 @@ func (m dashboardModel) View() string {
 
 		hasCursor := m.gridCursor == idx
 		if hasCursor {
-			// Gorgeous hover border animation cycling through user-defined premium stops
-			colors := []string{"#917FD1", "#775099", "#73CBAD", "#84DCFB"}
-			colorIdx := m.blinkCycle % len(colors)
-			cardBorderColor = lipgloss.Color(colors[colorIdx])
+			if isActive {
+				cardBorderColor = lipgloss.Color("#917FD1") // premium brand purple for hovered active agents
+			} else {
+				cardBorderColor = lipgloss.Color("#84DCFB") // brand cyan for hovered idle agents
+			}
 		} else if isActive {
 			cardBorderColor = lipgloss.Color("#84DCFB") // clean, static brand cyan border for active agents
 		} else {
@@ -433,7 +434,12 @@ func (m dashboardModel) View() string {
 
 		if isActive {
 			dotPart := lipgloss.NewStyle().Foreground(lipgloss.Color("#73CBAD")).Render("●")
-			activePart := renderShimmerText("active", m.blinkCycle)
+			var activePart string
+			if hasCursor {
+				activePart = renderHoverShimmerText("active", m.blinkCycle)
+			} else {
+				activePart = renderShimmerText("active", m.blinkCycle)
+			}
 			statusDot = fmt.Sprintf("%s %s", dotPart, activePart)
 			cardName = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#73CBAD")).Render(b.name)
 		} else {
@@ -815,21 +821,22 @@ func getDaemonState() (bool, int) {
 }
 
 // shimmerPalette defines a smooth multi-stop gradient between Auxly brand colors.
-// We expand 3 brand hex stops into a 12-step palette using linear interpolation
+// We expand brand hex stops into a 24-step palette using linear interpolation
 // so adjacent stops look almost identical — producing a silky smooth wave.
 var shimmerPalette = buildShimmerPalette()
 
 func buildShimmerPalette() []string {
-	// Brand color stops: #84DCFB → #9280D4 → #73CBAD → #84DCFB (loop)
+	// Brand color stops: #917FD1 (purple) → #775099 (deep purple) → #73CBAD (teal) → #84DCFB (cyan) → loop
 	type stop struct{ r, g, b int }
 	stops := []stop{
-		{0x84, 0xDC, 0xFB}, // #84DCFB cyan
-		{0x92, 0x80, 0xD4}, // #9280D4 purple
+		{0x91, 0x7F, 0xD1}, // #917FD1 purple
+		{0x77, 0x50, 0x99}, // #775099 deep purple
 		{0x73, 0xCB, 0xAD}, // #73CBAD teal
-		{0x84, 0xDC, 0xFB}, // back to cyan for seamless loop
+		{0x84, 0xDC, 0xFB}, // #84DCFB cyan
+		{0x91, 0x7F, 0xD1}, // loop
 	}
 
-	stepsPerSegment := 8 // 3 segments × 8 steps = 24 total (matches blinkCycle mod 24)
+	stepsPerSegment := 6 // 4 segments × 6 steps = 24 total (matches blinkCycle mod 24)
 	var palette []string
 	for seg := 0; seg < len(stops)-1; seg++ {
 		a, b := stops[seg], stops[seg+1]
@@ -853,10 +860,55 @@ func renderShimmerText(text string, frame int) string {
 			result.WriteRune(r)
 			continue
 		}
-		// Each character picks a palette entry offset by its position and the
-		// current animation frame, flowing left-to-right as frame advances.
-		colorIdx := ((frame + i*2) % n + n) % n
+		// Flowing left-to-right wave
+		colorIdx := ((frame - i*2) % n + n) % n
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color(shimmerPalette[colorIdx])).Bold(true)
+		result.WriteString(style.Render(string(r)))
+	}
+	return result.String()
+}
+
+// hoverShimmerPalette defines a smooth multi-stop gradient for hovered active agents.
+var hoverShimmerPalette = buildHoverShimmerPalette()
+
+func buildHoverShimmerPalette() []string {
+	// Hover Brand color stops: #917FD1 (purple) → #775099 (deep purple) → #73CBAD (teal) → #84DCFB (cyan) → loop
+	type stop struct{ r, g, b int }
+	stops := []stop{
+		{0x91, 0x7F, 0xD1}, // #917FD1 purple
+		{0x77, 0x50, 0x99}, // #775099 deep purple
+		{0x73, 0xCB, 0xAD}, // #73CBAD teal
+		{0x84, 0xDC, 0xFB}, // #84DCFB cyan
+		{0x91, 0x7F, 0xD1}, // loop
+	}
+
+	stepsPerSegment := 6 // 4 segments × 6 steps = 24 total (matches blinkCycle mod 24)
+	var palette []string
+	for seg := 0; seg < len(stops)-1; seg++ {
+		a, b := stops[seg], stops[seg+1]
+		for step := 0; step < stepsPerSegment; step++ {
+			t := float64(step) / float64(stepsPerSegment)
+			r := int(float64(a.r) + t*float64(b.r-a.r))
+			g := int(float64(a.g) + t*float64(b.g-a.g))
+			bv := int(float64(a.b) + t*float64(b.b-a.b))
+			palette = append(palette, fmt.Sprintf("#%02X%02X%02X", r, g, bv))
+		}
+	}
+	return palette
+}
+
+func renderHoverShimmerText(text string, frame int) string {
+	n := len(hoverShimmerPalette) // 24
+
+	var result strings.Builder
+	for i, r := range text {
+		if r == ' ' {
+			result.WriteRune(r)
+			continue
+		}
+		// Flowing left-to-right wave
+		colorIdx := ((frame - i*2) % n + n) % n
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(hoverShimmerPalette[colorIdx])).Bold(true)
 		result.WriteString(style.Render(string(r)))
 	}
 	return result.String()

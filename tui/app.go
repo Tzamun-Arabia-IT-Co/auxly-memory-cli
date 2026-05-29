@@ -191,6 +191,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case animationTickMsg:
+		m.dashboard.blinkCycle = (m.dashboard.blinkCycle + 1) % 24
+		return m, animationTickCmd()
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
