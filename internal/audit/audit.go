@@ -69,10 +69,10 @@ func NewLogger(memoryRoot string) (*Logger, error) {
 			trust_level TEXT NOT NULL,
 			request_id TEXT NOT NULL,
 			signature TEXT,
-			source TEXT,
-			remote_ip TEXT,
-			remote_os TEXT,
-			remote_host TEXT
+			source TEXT DEFAULT '',
+			remote_ip TEXT DEFAULT '',
+			remote_os TEXT DEFAULT '',
+			remote_host TEXT DEFAULT ''
 		)
 	`)
 	if err != nil {
@@ -84,7 +84,7 @@ func NewLogger(memoryRoot string) (*Logger, error) {
 	// attribution columns. SQLite returns a "duplicate column" error if the
 	// column already exists, which we intentionally ignore.
 	for _, col := range []string{"source", "remote_ip", "remote_os", "remote_host"} {
-		_, err := db.Exec(fmt.Sprintf("ALTER TABLE audit_entries ADD COLUMN %s TEXT", col))
+		_, err := db.Exec(fmt.Sprintf("ALTER TABLE audit_entries ADD COLUMN %s TEXT DEFAULT ''", col))
 		if err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
 			return nil, fmt.Errorf("failed to migrate audit table column %s: %w", col, err)
@@ -158,7 +158,8 @@ func (l *Logger) Tail(n int) ([]Entry, error) {
 	}
 
 	rows, err := l.db.Query(`
-		SELECT timestamp, agent_id, provider, action, file, diff, reason, trust_level, request_id, signature, source, remote_ip, remote_os, remote_host
+		SELECT timestamp, agent_id, provider, action, file, diff, reason, trust_level, request_id,
+		       COALESCE(signature, ''), COALESCE(source, ''), COALESCE(remote_ip, ''), COALESCE(remote_os, ''), COALESCE(remote_host, '')
 		FROM audit_entries
 		ORDER BY id DESC LIMIT ?`, n)
 	if err != nil {
@@ -186,7 +187,8 @@ func (l *Logger) TailWrites(n int) ([]Entry, error) {
 	}
 
 	rows, err := l.db.Query(`
-		SELECT timestamp, agent_id, provider, action, file, diff, reason, trust_level, request_id, signature, source, remote_ip, remote_os, remote_host
+		SELECT timestamp, agent_id, provider, action, file, diff, reason, trust_level, request_id,
+		       COALESCE(signature, ''), COALESCE(source, ''), COALESCE(remote_ip, ''), COALESCE(remote_os, ''), COALESCE(remote_host, '')
 		FROM audit_entries
 		WHERE action = 'write'
 		ORDER BY id DESC LIMIT ?`, n)
