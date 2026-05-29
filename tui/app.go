@@ -156,13 +156,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "9":
 			m.screen = screenAuditTrail
 			return m, m.refreshCurrentScreen()
-		case "]":
+		case "]", "tab":
+			if msg.String() == "tab" && (
+				(m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
+				(m.screen == screenSSH && m.ssh.editingHost) ||
+				(m.screen == screenSettings && (m.settings.configuringCustom || m.settings.showingDiff || m.settings.confirmingRun))) {
+				break
+			}
 			if m.screen == screenViewer {
 				m.screen = screenBrowser
 			}
 			m.screen = (m.screen + 1) % 9
 			return m, m.refreshCurrentScreen()
-		case "[":
+		case "[", "shift+tab", "backtab":
+			if (msg.String() == "shift+tab" || msg.String() == "backtab") && (
+				(m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
+				(m.screen == screenSSH && m.ssh.editingHost) ||
+				(m.screen == screenSettings && (m.settings.configuringCustom || m.settings.showingDiff || m.settings.confirmingRun))) {
+				break
+			}
 			if m.screen == screenViewer {
 				m.screen = screenBrowser
 			}
@@ -306,21 +318,55 @@ func (m model) renderFooter() string {
 	var footerText string
 	switch m.screen {
 	case screenDashboard:
-		footerText = "r: Force-Restart MCP • [ or ]: tabs • q: quit"
+		if m.dashboard.selectedAgent != "" {
+			footerText = "Tab: Switch popup tabs • Esc: Close popup • q: Quit"
+		} else {
+			footerText = "j/k/h/l: Navigate cards • Enter: Configure • r: Force-Restart MCP • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		}
+	case screenActivity:
+		if m.activity.viewingDetail {
+			footerText = "j/k: Scroll diff • Esc: Close details • q: Quit"
+		} else {
+			footerText = "j/k: Navigate feed • Enter: View details • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		}
 	case screenBrowser:
-		footerText = "j/k: navigate • Enter: view file • [ or ]: tabs • q: quit"
+		footerText = "j/k: Navigate files • Enter: View file • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenViewer:
-		footerText = "j/k: scroll • Esc: back to files • [ or ]: tabs • q: quit"
+		footerText = "j/k: Scroll file • PgUp/PgDn: Scroll page • Esc: Back to files • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenDiff:
-		footerText = "j/k: navigate • Enter: view diff • a: approve • r: reject • [ or ]: tabs • q: quit"
+		if m.diff.viewing != "" {
+			footerText = "a: Approve • r: Reject • Esc: Back to queue • q: Quit"
+		} else {
+			footerText = "j/k: Navigate queue • Enter: View diff • a: Approve • r: Reject • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		}
+	case screenAnalytics:
+		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenSettings:
-		footerText = "↑/↓: move • Enter/Space: cycle trust level • [ or ]: tabs • q: quit"
+		if m.settings.showingDiff {
+			footerText = "j/k: Scroll diff • Esc/Enter: Close diff • q: Quit"
+		} else if m.settings.confirmingRun {
+			footerText = "y/n or Enter/Esc: Confirm/Cancel run • q: Quit"
+		} else if m.settings.configuringCustom {
+			footerText = "Enter: Fetch models/configure • Esc: Cancel • q: Quit"
+		} else {
+			footerText = "↑/↓: Select option • ←/→: Cycle agent overrides • Enter: Toggle option/Run • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		}
 	case screenSSH:
-		footerText = "↑/↓: move • Enter or key letter: execute action • [ or ]: tabs • q: quit"
+		if m.ssh.editingHost {
+			footerText = "Enter/Esc: Finish editing • Type SSH host • q: Quit"
+		} else {
+			footerText = "s/Enter: Start/Stop Daemon • h: Edit SSH Host • o: Cycle OS • m: Toggle Guide • Left/Right: Switch helper tab • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		}
 	case screenSkills:
-		footerText = "j/k: navigate commands • [ or ]: tabs • q: quit"
+		footerText = "j/k: Navigate commands • d: Export Claude skills ZIP • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+	case screenAuditTrail:
+		if m.auditTrail.viewingDetail {
+			footerText = "j/k: Scroll details • Esc: Close details • q: Quit"
+		} else {
+			footerText = "j/k: Navigate logs • Enter: View details • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		}
 	default:
-		footerText = "j/k: navigate • [ or ]: tabs • q: quit"
+		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	}
 	
 	return StyleFooter.Render(footerText)

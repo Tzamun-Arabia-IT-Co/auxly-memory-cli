@@ -852,8 +852,6 @@ func (m settingsModel) View() string {
 	sb.WriteString(StyleTitle.Render("Settings & Access Configuration"))
 	sb.WriteString("\n\n")
 	sb.WriteString(content)
-	sb.WriteString("\n\n")
-	sb.WriteString(StyleFooter.Render("  ↑/↓: move • ←/→: cycle agent • Enter: select/run • Tab: switch tabs"))
 
 	fullView := sb.String()
 

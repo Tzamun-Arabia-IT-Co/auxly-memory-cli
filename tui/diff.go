@@ -81,10 +81,9 @@ func (m diffModel) View() string {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorDim).
 			Padding(1, 2)
-		return fmt.Sprintf("%s\n\n%s\n\n%s",
+		return fmt.Sprintf("%s\n\n%s",
 			title,
 			diffStyle.Render(m.viewing),
-			StyleFooter.Render("a: approve • r: reject • Esc: back"),
 		)
 	}
 
@@ -106,6 +105,5 @@ func (m diffModel) View() string {
 		content += line + "\n"
 	}
 
-	return fmt.Sprintf("%s\n\n%s\n\n%s", title, content,
-		StyleFooter.Render("Enter: view diff • a: approve • r: reject"))
+	return fmt.Sprintf("%s\n\n%s", title, content)
 }

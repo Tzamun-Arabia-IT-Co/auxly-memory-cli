@@ -207,8 +207,6 @@ func (m activityModel) View() string {
 			w = 80
 		}
 		listContent = renderTable(m.entries, m.cursor, start, end, w)
-		footerText := fmt.Sprintf("showing %d-%d of %d  •  j/k: navigate  •  Enter: view details  •  q: quit", start+1, end, len(m.entries))
-		listContent += "\n" + StyleFooter.Render(footerText)
 	}
 
 	fullView := title + "\n\n" + listContent
@@ -489,8 +487,6 @@ func (m auditTrailModel) View() string {
 			w = 80
 		}
 		listContent = renderTable(m.entries, m.cursor, start, end, w)
-		footerText := fmt.Sprintf("showing %d-%d of %d  •  j/k: navigate  •  Enter: view details  •  q: quit", start+1, end, len(m.entries))
-		listContent += "\n" + StyleFooter.Render(footerText)
 	}
 
 	fullView := title + "\n\n" + listContent
