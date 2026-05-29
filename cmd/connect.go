@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -355,6 +356,83 @@ func runDoctor(p remoteProfile) error {
 	return nil
 }
 
+// checkTwoWay verifies the HOST can reach THIS machine back over SSH. When this
+// machine is the memory host, the remote must be able to SSH in to it at runtime
+// (that's how its mcp-server launches). If the return path is missing, we stop
+// with a clear explanation + alternatives instead of leaving a dead config.
+func checkTwoWay(p remoteProfile) error {
+	fmt.Println("🔁 Checking two-way connectivity (the host must reach this machine back)...")
+	addrs := localCandidateAddrs()
+	if len(addrs) == 0 {
+		fmt.Println("   ⚠ Could not determine this machine's IP addresses — skipping two-way check.")
+		return nil
+	}
+	if reachAddr, ok := hostCanReachBack(p, addrs); ok {
+		fmt.Printf("   ✓ Two-way OK — %s can reach this machine at %s:22\n", p.Host, reachAddr)
+		return nil
+	}
+	printTwoWayFailureGuidance(p, addrs)
+	return fmt.Errorf("two-way connectivity failed: %s cannot reach this machine back (required for this machine to serve as the memory host)", p.Host)
+}
+
+// localCandidateAddrs returns this machine's non-loopback IPv4 addresses — the
+// addresses a remote might use to reach back to us.
+func localCandidateAddrs() []string {
+	var out []string
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return out
+	}
+	for _, a := range addrs {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		if ip4 := ip.To4(); ip4 != nil {
+			out = append(out, ip4.String())
+		}
+	}
+	return out
+}
+
+// hostCanReachBack probes, FROM the host, whether it can open a TCP connection to
+// any of our candidate addresses on port 22. Returns the first reachable one.
+func hostCanReachBack(p remoteProfile, addrs []string) (string, bool) {
+	for _, a := range addrs {
+		// Prefer nc; fall back to bash's /dev/tcp. addrs are our own numeric IPs.
+		script := fmt.Sprintf("nc -z -w3 %s 22 >/dev/null 2>&1 || timeout 3 bash -c 'echo > /dev/tcp/%s/22' >/dev/null 2>&1", a, a)
+		if _, err := runSSH(p, "sh", "-c", "'"+script+"'"); err == nil {
+			return a, true
+		}
+	}
+	return "", false
+}
+
+func printTwoWayFailureGuidance(p remoteProfile, addrs []string) {
+	fmt.Printf("   ✗ Two-way check FAILED — the host %s could not reach THIS machine back.\n", p.Host)
+	fmt.Printf("     Tried: %s (port 22)\n", strings.Join(addrs, ", "))
+	fmt.Println()
+	fmt.Println("   Why it matters: with this machine as the memory HOST, the remote must be able")
+	fmt.Println("   to SSH back IN to it at runtime — that's how its mcp-server launches and how")
+	fmt.Println("   /auxly-remote-connect shows a live link. Right now it can't, usually because")
+	fmt.Println("   the two machines are on different subnets / behind NAT, or reach each other")
+	fmt.Println("   only one-way (e.g. this machine dials out through a VPN tunnel).")
+	fmt.Println()
+	fmt.Println("   This option won't deliver a shared vault. Try one of:")
+	fmt.Println("     • Same subnet:    put both machines on the same LAN so the host gets an")
+	fmt.Println("                       address on the remote's network, then retry.")
+	fmt.Println("     • Mesh VPN:       install Tailscale on BOTH (each gets a stable 100.x IP")
+	fmt.Println("                       reachable both ways through NAT), then retry.")
+	fmt.Println("     • Server-as-host: make the always-on server the host and let this machine")
+	fmt.Println("                       consume it instead — works through NAT, no VPN needed.")
+}
+
 // recordProvision logs the silent host install to the audit trail (best effort).
 func recordProvision(p remoteProfile) {
 	logger, err := audit.NewLogger(getMemoryPath())
@@ -619,6 +697,9 @@ func runConnectAdd(cmd *cobra.Command, args []string) error {
 	if err := runDoctor(p); err != nil {
 		return err
 	}
+	if err := checkTwoWay(p); err != nil {
+		return err
+	}
 	if err := connectTest(p); err != nil {
 		return err
 	}
@@ -700,6 +781,9 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	if err := runDoctor(p); err != nil {
 		return err
 	}
+	if err := checkTwoWay(p); err != nil {
+		return err
+	}
 	if err := connectTest(p); err != nil {
 		return err
 	}
@@ -765,6 +849,9 @@ func runConnectTest(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("remote profile %q not found", name)
 	}
 	if err := runDoctor(p); err != nil {
+		return err
+	}
+	if err := checkTwoWay(p); err != nil {
 		return err
 	}
 	fmt.Printf("✅ Remote %q passed all checks.\n", name)
@@ -941,6 +1028,11 @@ func runConnectWizard() error {
 
 	// Step 3: doctor.
 	if err := runDoctor(p); err != nil {
+		return err
+	}
+
+	// Step 3b: two-way connectivity (host must reach this machine back).
+	if err := checkTwoWay(p); err != nil {
 		return err
 	}
 
