@@ -43,6 +43,10 @@ func Execute() {
 }
 
 func init() {
+	// Don't dump the full help banner on a command error, and let Execute() print
+	// the error once — keeps the TUI's captured result pane clean.
+	rootCmd.SilenceUsage = true
+	rootCmd.SilenceErrors = true
 	rootCmd.PersistentFlags().StringVar(&cfgPath, "path", "", "Override memory folder path (default: ~/.auxly/memory/)")
 	rootCmd.Version = "1.0.0"
 	rootCmd.SetVersionTemplate("\r\n🧠 Auxly-Memory CLI Version: 1.0.0\r\n   ↳ Platform: stdio-native\r\n   ↳ Revision: release-v1.0.0\r\n\r\n")
