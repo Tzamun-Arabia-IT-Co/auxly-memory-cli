@@ -8,45 +8,58 @@ import (
 	"os/exec"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/creack/pty"
 )
 
-// runConnectPTY runs `auxly connect <args>` attached to a pseudo-terminal so the
+// startPTYRun spawns `auxly connect <args>` attached to a pseudo-terminal so the
 // SSH password prompt — which ssh reads from /dev/tty, not stdin — can be answered
-// from INSIDE the TUI. We give ssh its own PTY, watch the output for "password:",
-// and write the user's password to it. All output is captured and returned as a
-// sshCapturedMsg for the result pane (ssh disables echo during the read, so the
-// password never appears in the captured text).
-func runConnectPTY(password string, args ...string) tea.Cmd {
-	bin := exePath()
-	return func() tea.Msg {
-		c := exec.Command(bin, append([]string{"connect"}, args...)...)
+// from INSIDE the TUI. It streams output lines into ch (for live progress), watches
+// for "password:" and writes the user's password (ssh disables echo, so it never
+// appears in the stream).
+func startPTYRun(ch chan progressEvent, password string, args ...string) {
+	go func() {
+		c := exec.Command(exePath(), append([]string{"connect"}, args...)...)
 		ptmx, err := pty.Start(c)
 		if err != nil {
-			return sshCapturedMsg{output: "Could not allocate a PTY for the password prompt: " + err.Error(), err: err}
+			ch <- progressEvent{done: true, err: err, out: "Could not allocate a PTY: " + err.Error()}
+			return
 		}
 		defer func() { _ = ptmx.Close() }()
 
-		var buf bytes.Buffer
+		var all bytes.Buffer
+		var line bytes.Buffer
 		sent := 0
-		chunk := make([]byte, 4096)
+		buf := make([]byte, 4096)
 		for {
-			n, rerr := ptmx.Read(chunk)
+			n, rerr := ptmx.Read(buf)
 			if n > 0 {
-				buf.Write(chunk[:n])
-				// Answer each "password:" prompt (initial + up to 3 retries) once.
-				if count := strings.Count(strings.ToLower(buf.String()), "password:"); count > sent {
+				all.Write(buf[:n])
+				// Answer each "password:" prompt (initial + retries) once.
+				if count := strings.Count(strings.ToLower(all.String()), "password:"); count > sent {
 					_, _ = io.WriteString(ptmx, password+"\n")
 					sent = count
+				}
+				for _, b := range buf[:n] {
+					switch b {
+					case '\n':
+						ch <- progressEvent{line: line.String()}
+						line.Reset()
+					case '\r':
+						// ignore carriage returns
+					default:
+						line.WriteByte(b)
+					}
 				}
 			}
 			if rerr != nil {
 				break
 			}
 		}
+		if line.Len() > 0 {
+			ch <- progressEvent{line: line.String()}
+		}
 		werr := c.Wait()
-		out := buf.String()
-		return sshCapturedMsg{output: out, err: werr, needsKey: strings.Contains(out, "AUXLY_KEY_REQUIRED")}
-	}
+		out := all.String()
+		ch <- progressEvent{done: true, err: werr, out: out, needsKey: strings.Contains(out, "AUXLY_KEY_REQUIRED")}
+	}()
 }

@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -77,10 +79,14 @@ type sshModel struct {
 	// captured-run state (sshModeProgress / sshModeResult)
 	progressTitle  string
 	progressOut    []string
+	progressLast   string // most recent streamed line (current status)
 	progressOK     bool
-	progressNeeded bool     // first-time SSH key setup required
-	pendingKeyArgs []string // non-batch `connect add …` args for the key-setup fallback
-	password       string   // transient masked SSH password (sshModePassword)
+	progressPct    int                // milestone-based progress (0–100)
+	spin           int                // spinner frame counter
+	progressCh     chan progressEvent // live line stream from the running command
+	progressNeeded bool               // first-time SSH key setup required
+	pendingKeyArgs []string           // non-batch `connect add …` args for the key-setup fallback
+	password       string             // transient masked SSH password (sshModePassword)
 
 	// editingHost drives app.go's key-routing contract: when true, ALL keys are
 	// delivered to this model (so the in-TUI add-host form can capture text). It
@@ -99,13 +105,19 @@ type sshExecDoneMsg struct {
 	status string
 }
 
-// sshCapturedMsg carries the output of a `auxly connect …` run captured in-pane
-// (no TUI suspend), so the doctor/setup progress stays inside the TUI.
-type sshCapturedMsg struct {
-	output   string
+// progressEvent is one streamed line from a running `auxly connect …` command,
+// or (done=true) the terminal event with the full captured output. It lets the
+// doctor/setup steps render live inside the TUI.
+type progressEvent struct {
+	line     string
+	done     bool
 	err      error
+	out      string
 	needsKey bool
 }
+
+// sshSpinTickMsg animates the progress spinner.
+type sshSpinTickMsg struct{}
 
 // ─────────────────────────────────────────────────────────────────
 //  Constructor / data
@@ -172,20 +184,117 @@ func runConnect(args ...string) tea.Cmd {
 	})
 }
 
-// runConnectCaptured runs `auxly connect …` WITHOUT suspending the TUI, capturing
-// its output so the doctor/setup progress renders inside the pane. Safe only for
-// non-interactive runs (no password prompt) — add uses --batch to guarantee that.
-func runConnectCaptured(args ...string) tea.Cmd {
-	bin := exePath()
-	return func() tea.Msg {
-		c := exec.Command(bin, append([]string{"connect"}, args...)...)
-		out, err := c.CombinedOutput()
-		return sshCapturedMsg{
-			output:   string(out),
-			err:      err,
-			needsKey: strings.Contains(string(out), "AUXLY_KEY_REQUIRED"),
+// startCapturedRun spawns `auxly connect …` and streams its output line-by-line
+// into ch (no TUI suspend). Safe only for non-interactive runs (no password) —
+// add uses --batch to guarantee that. The PTY variant (startPTYRun) handles the
+// password case.
+func startCapturedRun(ch chan progressEvent, args ...string) {
+	go func() {
+		c := exec.Command(exePath(), append([]string{"connect"}, args...)...)
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			ch <- progressEvent{done: true, err: err, out: "pipe error: " + err.Error()}
+			return
 		}
+		c.Stdout = pw
+		c.Stderr = pw
+		if err := c.Start(); err != nil {
+			pw.Close()
+			pr.Close()
+			ch <- progressEvent{done: true, err: err, out: "start error: " + err.Error()}
+			return
+		}
+		pw.Close() // parent's copy; the child keeps its own dup
+		var all strings.Builder
+		sc := bufio.NewScanner(pr)
+		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for sc.Scan() {
+			line := sc.Text()
+			all.WriteString(line)
+			all.WriteByte('\n')
+			ch <- progressEvent{line: line}
+		}
+		werr := c.Wait()
+		pr.Close()
+		out := all.String()
+		ch <- progressEvent{done: true, err: werr, out: out, needsKey: strings.Contains(out, "AUXLY_KEY_REQUIRED")}
+	}()
+}
+
+// waitProgress blocks for the next streamed event from ch.
+func waitProgress(ch chan progressEvent) tea.Cmd {
+	return func() tea.Msg { return <-ch }
+}
+
+// spinTick drives the progress spinner animation.
+func spinTick() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return sshSpinTickMsg{} })
+}
+
+// beginRun resets progress state and starts the stream+spinner loops.
+func (m sshModel) beginRun(title string, ch chan progressEvent) (sshModel, tea.Cmd) {
+	m.progressCh = ch
+	m.progressOut = nil
+	m.progressLast = ""
+	m.progressPct = 0
+	m.spin = 0
+	m.progressTitle = title
+	m.mode = sshModeProgress
+	return m, tea.Batch(waitProgress(ch), spinTick())
+}
+
+func (m sshModel) beginCaptured(title string, args ...string) (sshModel, tea.Cmd) {
+	ch := make(chan progressEvent, 128)
+	startCapturedRun(ch, args...)
+	return m.beginRun(title, ch)
+}
+
+func (m sshModel) beginPTY(title, password string, args ...string) (sshModel, tea.Cmd) {
+	ch := make(chan progressEvent, 128)
+	startPTYRun(ch, password, args...)
+	return m.beginRun(title, ch)
+}
+
+// milestonePct maps a streamed line to a coarse completion percentage so the bar
+// advances through the recognisable doctor/setup stages.
+func milestonePct(line string) int {
+	l := strings.ToLower(line)
+	switch {
+	case strings.Contains(l, "configured") || strings.Contains(l, "injected") || strings.Contains(l, "restart your") || strings.Contains(l, "onboard"):
+		return 95
+	case strings.Contains(l, "saved remote profile"):
+		return 85
+	case strings.Contains(l, "auxly present on host") || strings.Contains(l, "auxly installed"):
+		return 75
+	case strings.Contains(l, "installing"):
+		return 55
+	case strings.Contains(l, "host reachable"):
+		return 45
+	case strings.Contains(l, "local ssh client"):
+		return 25
+	case strings.Contains(l, "doctor"):
+		return 10
 	}
+	return 0
+}
+
+func spinnerFrame(i int) string {
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	return frames[((i%len(frames))+len(frames))%len(frames)]
+}
+
+func progressBar(pct, width int) string {
+	if width < 4 {
+		width = 4
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	filled := pct * width / 100
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 }
 
 func mcpConfigJSON(name string) string {
@@ -226,24 +335,48 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 		m.mode = sshModeList
 		return m, m.Refresh()
 
-	case sshCapturedMsg:
-		var out []string
-		for _, l := range strings.Split(strings.TrimRight(msg.output, "\n"), "\n") {
-			if strings.Contains(l, "AUXLY_KEY_REQUIRED") {
-				continue // internal token, not for display
+	case progressEvent:
+		if msg.done {
+			var out []string
+			for _, l := range strings.Split(strings.TrimRight(msg.out, "\n"), "\n") {
+				if strings.Contains(l, "AUXLY_KEY_REQUIRED") {
+					continue // internal token, not for display
+				}
+				out = append(out, l)
 			}
-			out = append(out, l)
+			if len(out) > 0 {
+				m.progressOut = out
+			}
+			m.progressOK = msg.err == nil
+			m.progressNeeded = msg.needsKey
+			m.progressPct = 100
+			m.progressCh = nil
+			m.mode = sshModeResult
+			m.remotes = readRemotes() // reload list behind the result panel
+			if m.cursor >= len(m.remotes) {
+				m.cursor = len(m.remotes) - 1
+			}
+			if m.cursor < 0 {
+				m.cursor = 0
+			}
+			return m, nil
 		}
-		m.progressOut = out
-		m.progressOK = msg.err == nil
-		m.progressNeeded = msg.needsKey
-		m.mode = sshModeResult
-		m.remotes = readRemotes() // reload list behind the result panel
-		if m.cursor >= len(m.remotes) {
-			m.cursor = len(m.remotes) - 1
+		if line := strings.TrimRight(msg.line, "\r"); strings.TrimSpace(line) != "" {
+			m.progressLast = line
+			m.progressOut = append(m.progressOut, line)
+			if p := milestonePct(line); p > m.progressPct {
+				m.progressPct = p
+			}
 		}
-		if m.cursor < 0 {
-			m.cursor = 0
+		if m.progressCh != nil {
+			return m, waitProgress(m.progressCh)
+		}
+		return m, nil
+
+	case sshSpinTickMsg:
+		if m.mode == sshModeProgress {
+			m.spin++
+			return m, spinTick()
 		}
 		return m, nil
 
@@ -264,9 +397,7 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		switch msg.String() {
 		case "y", "Y", "enter":
 			if name := m.selectedName(); name != "" {
-				m.mode = sshModeProgress
-				m.progressTitle = "Removing " + name
-				return m, runConnectCaptured("remove", name)
+				return m.beginCaptured("Removing "+name, "remove", name)
 			}
 			m.mode = sshModeList
 		case "n", "N", "esc":
@@ -323,9 +454,7 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		case "t":
 			if name := m.selectedName(); name != "" {
 				m.status = ""
-				m.mode = sshModeProgress
-				m.progressTitle = "Testing " + name
-				return m, runConnectCaptured("test", name)
+				return m.beginCaptured("Testing "+name, "test", name)
 			}
 		case "p", "enter":
 			if name := m.selectedName(); name != "" {
@@ -416,12 +545,10 @@ func (m sshModel) submitForm() (sshModel, tea.Cmd) {
 		base = append(base, "--jump", jump)
 	}
 	// Stash the non-batch args for the key-setup fallback ([K] on the result panel),
-	// then run the doctor/setup captured in-pane via --batch (never prompts here).
+	// then stream the doctor/setup in-pane via --batch (never prompts here).
 	m.pendingKeyArgs = append([]string{}, base...)
 	m.editingHost = false
-	m.mode = sshModeProgress
-	m.progressTitle = "Connecting to " + host
-	return m, runConnectCaptured(append(base, "--batch")...)
+	return m.beginCaptured("Connecting to "+host, append(base, "--batch")...)
 }
 
 func (m *sshModel) formAppend(s string) {
@@ -453,9 +580,7 @@ func (m sshModel) handlePasswordKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		m.password = "" // drop it from the model immediately
 		m.editingHost = false
 		m.progressNeeded = false
-		m.mode = sshModeProgress
-		m.progressTitle = "Installing key & connecting"
-		return m, runConnectPTY(pw, args...)
+		return m.beginPTY("Installing key & connecting", pw, args...)
 	case tea.KeyBackspace, tea.KeyCtrlH:
 		if r := []rune(m.password); len(r) > 0 {
 			m.password = string(r[:len(r)-1])
@@ -557,9 +682,26 @@ func (m sshModel) View() string {
 		lines = append(lines, warn.Render(fmt.Sprintf("Remove remote %q?  ", m.selectedName()))+
 			accent.Render("[y]")+dim.Render(" yes   ")+accent.Render("[n]")+dim.Render(" cancel"))
 	case sshModeProgress:
-		lines = append(lines, cyan.Render("⏳ "+m.progressTitle)+dim.Render("  — running doctor & setup…"))
+		spin := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render(spinnerFrame(m.spin))
+		lines = append(lines, spin+"  "+cyan.Render(m.progressTitle))
+		bar := lipgloss.NewStyle().Foreground(ColorPrimary).Render(progressBar(m.progressPct, 30))
+		lines = append(lines, "  "+bar+dim.Render(fmt.Sprintf("  %3d%%", m.progressPct)))
 		lines = append(lines, "")
-		lines = append(lines, dim.Render("Running inside the TUI; this can take a moment on first install."))
+		tail := m.progressOut
+		start := 0
+		if len(tail) > 7 {
+			start = len(tail) - 7
+		}
+		if len(tail) == 0 {
+			lines = append(lines, dim.Render("   starting…"))
+		}
+		for i := start; i < len(tail); i++ {
+			if i == len(tail)-1 {
+				lines = append(lines, "   "+tail[i]) // current line, in its own colors
+			} else {
+				lines = append(lines, "   "+dim.Render(tail[i]))
+			}
+		}
 	case sshModeResult:
 		head := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess).Render("✓ Done")
 		if !m.progressOK {
