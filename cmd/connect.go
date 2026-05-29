@@ -164,12 +164,17 @@ func sshConnArgs(p remoteProfile) []string {
 		args = append(args, "-p", strconv.Itoa(p.Port))
 	}
 	args = append(args, p.SSHArgs...)
-	args = append(args, connTarget(p))
+	// "--" terminates ssh option processing so the target can never be parsed
+	// as a flag, even if it somehow slipped past validateForExec.
+	args = append(args, "--", connTarget(p))
 	return args
 }
 
 // runSSH runs a remote command non-interactively and returns trimmed stdout.
 func runSSH(p remoteProfile, remoteCmd ...string) (string, error) {
+	if err := validateForExec(p); err != nil {
+		return "", err
+	}
 	args := append(sshConnArgs(p), remoteCmd...)
 	cmd := exec.Command("ssh", args...)
 	out, err := cmd.CombinedOutput()
@@ -211,7 +216,37 @@ func parseHostSpec(spec string) (user, host string, port int, err error) {
 	if host == "" {
 		return "", "", 0, fmt.Errorf("missing host in %q", spec)
 	}
+	// Reject leading '-' so a host/user can never be smuggled into ssh as a flag
+	// (e.g. "-oProxyCommand=...") — see validateForExec for the use-site guard.
+	if strings.HasPrefix(host, "-") {
+		return "", "", 0, fmt.Errorf("invalid host %q: must not begin with '-'", host)
+	}
+	if strings.HasPrefix(user, "-") {
+		return "", "", 0, fmt.Errorf("invalid user %q: must not begin with '-'", user)
+	}
 	return user, host, port, nil
+}
+
+// validateForExec is the use-site guard against argv flag smuggling. Profiles
+// loaded from remotes.yaml bypass parseHostSpec, so every ssh-executing path
+// re-validates: no host/user/jump may begin with '-', and no ssh_args entry may
+// carry a command-executing option (ProxyCommand / LocalCommand /
+// PermitLocalCommand) sourced from the YAML file.
+func validateForExec(p remoteProfile) error {
+	for label, v := range map[string]string{"host": p.Host, "user": p.User, "jump": p.Jump} {
+		if strings.HasPrefix(strings.TrimSpace(v), "-") {
+			return fmt.Errorf("refusing to use %s %q: must not begin with '-' (argv flag smuggling)", label, v)
+		}
+	}
+	for _, a := range p.SSHArgs {
+		low := strings.ToLower(strings.ReplaceAll(a, " ", ""))
+		if strings.Contains(low, "proxycommand") ||
+			strings.Contains(low, "localcommand") ||
+			strings.Contains(low, "permitlocalcommand") {
+			return fmt.Errorf("refusing ssh_args entry %q: command-executing ssh options are not allowed in remote profiles", a)
+		}
+	}
+	return nil
 }
 
 // isPrivateHost is a cheap heuristic: RFC1918 / loopback / .local hostnames
@@ -365,6 +400,10 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("remote profile %q not found in remotes.yaml", name)
 	}
 
+	if err := validateForExec(p); err != nil {
+		return err
+	}
+
 	provider := connectMCPProvider
 	if provider == "" {
 		provider = defaultProviderID
@@ -378,7 +417,8 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 		sshArgs = append(sshArgs, "-p", strconv.Itoa(p.Port))
 	}
 	sshArgs = append(sshArgs, p.SSHArgs...)
-	sshArgs = append(sshArgs, connTarget(p))
+	// "--" terminates ssh option processing before the target.
+	sshArgs = append(sshArgs, "--", connTarget(p))
 	sshArgs = append(sshArgs,
 		"auxly", "mcp-server",
 		"--provider", provider,
@@ -828,6 +868,9 @@ func ensureKeyAuth(reader *bufio.Scanner, p remoteProfile) error {
 // installPubKey installs the public key on the host (ssh-copy-id if present,
 // otherwise appends to ~/.ssh/authorized_keys over one password SSH).
 func installPubKey(p remoteProfile, pubPath string) error {
+	if err := validateForExec(p); err != nil {
+		return err
+	}
 	target := connTarget(p)
 	if _, err := exec.LookPath("ssh-copy-id"); err == nil {
 		fmt.Println("   📤 Installing public key via ssh-copy-id (you may be prompted for a password)...")
@@ -863,7 +906,9 @@ func installPubKey(p remoteProfile, pubPath string) error {
 	if p.Port != 0 && p.Port != defaultSSHPort {
 		args = append(args, "-p", strconv.Itoa(p.Port))
 	}
-	args = append(args, target, "sh", "-c", shellQuote(remoteScript))
+	// "--" terminates ssh option processing before the target. ssh-copy-id (the
+	// preferred path above) has no "--" support, so it relies on validateForExec.
+	args = append(args, "--", target, "sh", "-c", shellQuote(remoteScript))
 	pkCmd := exec.Command("ssh", args...)
 	pkCmd.Stdin = os.Stdin
 	pkCmd.Stdout = os.Stdout
