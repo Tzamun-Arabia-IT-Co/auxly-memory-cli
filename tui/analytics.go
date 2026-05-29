@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,6 +16,12 @@ type analyticsModel struct {
 
 type analyticsRefreshMsg struct {
 	stats *audit.Stats
+}
+
+// kvCount is a single (key, count) pair used for stable, sorted rendering.
+type kvCount struct {
+	key   string
+	count int
 }
 
 func newAnalyticsModel(logger *audit.Logger) analyticsModel {
@@ -47,30 +54,59 @@ func (m analyticsModel) View() string {
 		return title + "\n\nLoading..."
 	}
 
+	barStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("134"))
 	var content string
 
 	content += "\n📡 Writes per Provider:\n"
-	if len(m.stats.ByProvider) > 0 {
-		for provider, count := range m.stats.ByProvider {
-			bar := ""
-			for i := 0; i < count && i < 40; i++ {
-				bar += "█"
+	providers := sortedCounts(m.stats.ByProvider)
+	if len(providers) > 0 {
+		for _, p := range providers {
+			name := p.key
+			if name == "" {
+				name = "(unknown)"
 			}
-			content += fmt.Sprintf("   %-15s %3d %s\n", provider, count, lipgloss.NewStyle().Foreground(lipgloss.Color("134")).Render(bar))
+			content += fmt.Sprintf("   %-15s %3d %s\n", name, p.count, barStyle.Render(barOf(p.count, 40)))
 		}
 	} else {
 		content += "   (no data yet)\n"
 	}
 
 	content += "\n📊 Actions Breakdown:\n"
-	if len(m.stats.ByAction) > 0 {
-		for action, count := range m.stats.ByAction {
-			content += fmt.Sprintf("   %-15s %d\n", action, count)
-		}
+	for _, a := range sortedCounts(m.stats.ByAction) {
+		content += fmt.Sprintf("   %-15s %d\n", a.key, a.count)
 	}
 
 	content += fmt.Sprintf("\n📝 Total Entries: %d", m.stats.TotalEntries)
 	content += fmt.Sprintf("\n✍️  Writes Today: %d", m.stats.WritesToday)
 
 	return fmt.Sprintf("%s\n%s", title, content)
+}
+
+// sortedCounts returns map entries in a STABLE order — by count descending, then
+// key ascending — so the view does not reshuffle on every render (Go randomizes
+// map iteration order, which made the chart jump around).
+func sortedCounts(m map[string]int) []kvCount {
+	out := make([]kvCount, 0, len(m))
+	for k, v := range m {
+		out = append(out, kvCount{key: k, count: v})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].count != out[j].count {
+			return out[i].count > out[j].count
+		}
+		return out[i].key < out[j].key
+	})
+	return out
+}
+
+// barOf renders a bar of `count` blocks, capped at max.
+func barOf(count, max int) string {
+	if count > max {
+		count = max
+	}
+	bar := make([]rune, 0, count)
+	for i := 0; i < count; i++ {
+		bar = append(bar, '█')
+	}
+	return string(bar)
 }
