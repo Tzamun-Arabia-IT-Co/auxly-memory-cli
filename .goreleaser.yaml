@@ -3,7 +3,8 @@ version: 2
 project_name: auxly-cli
 
 builds:
-  - main: .
+  - id: unix
+    main: .
     binary: auxly
     env:
       - CGO_ENABLED=1
@@ -16,9 +17,30 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}}
 
+  # Windows host build. go-sqlite3 needs CGO, so cross-compiling to Windows
+  # requires the mingw-w64 toolchain on the release runner
+  # (e.g. `brew install mingw-w64` or `apt-get install gcc-mingw-w64`).
+  - id: windows
+    main: .
+    binary: auxly
+    env:
+      - CGO_ENABLED=1
+      - CC=x86_64-w64-mingw32-gcc
+    goos:
+      - windows
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
 archives:
-  - format: tar.gz
+  - id: default
+    format: tar.gz
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    # tar.gz everywhere except Windows, which gets a .zip (matches install.ps1).
+    format_overrides:
+      - goos: windows
+        format: zip
     files:
       - README.md
       - wrappers/*
@@ -27,6 +49,8 @@ brews:
   - repository:
       owner: Tzamun-Arabia-IT-Co
       name: homebrew-tap
+    ids:
+      - default
     homepage: "https://auxly.io/cli"
     description: "Local-first unified memory system for AI agents"
     license: MIT
@@ -35,6 +59,8 @@ brews:
 
 nfpms:
   - package_name: auxly-cli
+    builds:
+      - unix
     homepage: "https://auxly.io/cli"
     description: "Local-first unified memory system for AI agents"
     license: MIT

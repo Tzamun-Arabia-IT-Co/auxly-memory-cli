@@ -197,7 +197,13 @@ Sessions opened from a remote machine show up in the **Audit / Activity** views 
 `auxly connect` runs an OS-aware doctor that auto-checks the dependency surface on the host before linking:
 
 - On a **macOS or Linux** host, it **silently installs** the `auxly` binary via the official release channel if it is missing.
-- On a **Windows** host, or when **sshd** needs to be enabled, the steps are **guided** (printed instructions you confirm) rather than performed silently.
+- On a **Windows** host, or when **sshd** needs to be enabled, the steps are **guided** (printed instructions you confirm) rather than performed silently. For a Windows host, the doctor prints the PowerShell installer one-liner to run on the host:
+
+  ```powershell
+  irm https://get.auxly.io/cli.ps1 | iex
+  ```
+
+  (Silent install isn't attempted over SSH on Windows because the remote default shell may be `cmd.exe` or PowerShell.)
 
 Run `auxly connect test` any time to re-run reachability checks and the host-side dependency doctor without re-linking.
 

@@ -20,6 +20,7 @@ const (
 	defaultSSHPort     = 22
 	defaultProviderID  = "claude-code"
 	remoteInstallURL   = "https://get.auxly.io/cli"
+	remoteInstallPS    = "https://get.auxly.io/cli.ps1"
 	connectAuditAgent  = "auxly-connect"
 	connectMCPArgsName = "connect-mcp"
 )
@@ -314,10 +315,13 @@ func runDoctor(p remoteProfile) error {
 
 	// 4. auxly missing.
 	if !isUnixHost {
-		// Windows host (or unknown): guided step, never silent.
-		fmt.Printf("   ⚠ auxly not found on host (%s). A Windows-host binary install is a guided\n", hostOS)
-		fmt.Println("     step (scripts/install.ps1 is a tracked follow-up). Install auxly on the host manually.")
-		return fmt.Errorf("auxly not installed on host %s and silent install is not supported for this OS", p.Host)
+		// Windows host (or unknown): guided step, never silent. Silent install
+		// over SSH is unreliable on Windows (the remote default shell may be
+		// cmd.exe or PowerShell), so we print the exact PowerShell one-liner to
+		// run on the host instead.
+		fmt.Printf("   ⚠ auxly not found on host (%s). Run this in PowerShell ON THE HOST:\n", hostOS)
+		fmt.Printf("       irm %s | iex\n", remoteInstallPS)
+		return fmt.Errorf("auxly not installed on host %s; run `irm %s | iex` on the host (PowerShell), then retry", p.Host, remoteInstallPS)
 	}
 
 	// 5. Silent OS-aware install on darwin/linux host.
@@ -375,7 +379,8 @@ func printConnectionFailureGuidance(p remoteProfile, cause error) {
 	fmt.Println("     The SSH server (sshd) may be disabled on the host. Enable it on the host:")
 	fmt.Println("     • macOS:   System Settings → General → Sharing → Remote Login")
 	fmt.Println("     • Linux:   sudo systemctl enable --now ssh")
-	fmt.Println("     • Windows: a Windows-host binary install is a guided step (scripts/install.ps1, tracked follow-up)")
+	fmt.Println("     • Windows: enable the OpenSSH Server optional feature (Settings → Apps →")
+	fmt.Printf("                Optional Features), then install auxly on the host: irm %s | iex\n", remoteInstallPS)
 }
 
 // ---------------------------------------------------------------------------
