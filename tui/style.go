@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	runewidth "github.com/mattn/go-runewidth"
 )
 
 // Curated Style Tokens
@@ -136,6 +137,18 @@ func padLine(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-w)
+}
+
+// clampLine guarantees a line never exceeds width visible columns so a bordered
+// panel built from these lines can't grow past the terminal width and wrap/
+// mangle the whole layout. Lines that fit are returned untouched (color kept);
+// over-long lines (e.g. a long captured command line with no break points) are
+// stripped of ANSI and hard-truncated with an ellipsis.
+func clampLine(s string, width int) string {
+	if width <= 0 || visibleWidth(s) <= width {
+		return s
+	}
+	return runewidth.Truncate(stripANSI(s), width, "…")
 }
 
 // wrapText wraps a string to a maximum visible terminal column width, accounting for ANSI escapes and double-width characters.

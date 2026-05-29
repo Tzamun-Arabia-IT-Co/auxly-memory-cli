@@ -696,10 +696,15 @@ func (m sshModel) View() string {
 			lines = append(lines, dim.Render("   starting…"))
 		}
 		for i := start; i < len(tail); i++ {
-			if i == len(tail)-1 {
-				lines = append(lines, "   "+tail[i]) // current line, in its own colors
-			} else {
-				lines = append(lines, "   "+dim.Render(tail[i]))
+			// Wrap each captured line to the panel width so a long command line
+			// (e.g. the ssh-copy-id hint) can't push the bordered box past the
+			// terminal width and mangle the whole layout.
+			for _, wl := range wrapText(tail[i], bodyWidth-3) {
+				if i == len(tail)-1 {
+					lines = append(lines, "   "+wl) // current line, in its own colors
+				} else {
+					lines = append(lines, "   "+dim.Render(wl))
+				}
 			}
 		}
 	case sshModeResult:
@@ -709,12 +714,15 @@ func (m sshModel) View() string {
 		}
 		lines = append(lines, head+dim.Render("  ("+m.progressTitle+")"))
 		out := m.progressOut
-		if len(out) > 16 {
-			lines = append(lines, dim.Render(fmt.Sprintf("  … %d earlier lines", len(out)-16)))
-			out = out[len(out)-16:]
+		if len(out) > 12 {
+			lines = append(lines, dim.Render(fmt.Sprintf("  … %d earlier lines", len(out)-12)))
+			out = out[len(out)-12:]
 		}
 		for _, l := range out {
-			lines = append(lines, "  "+l)
+			// Wrap to panel width — long captured lines must not widen the box.
+			for _, wl := range wrapText(l, bodyWidth-2) {
+				lines = append(lines, "  "+wl)
+			}
 		}
 		lines = append(lines, "")
 		if m.progressNeeded {
@@ -805,7 +813,7 @@ func (m sshModel) View() string {
 
 	var padded []string
 	for _, line := range lines {
-		padded = append(padded, padLine(line, bodyWidth))
+		padded = append(padded, padLine(clampLine(line, bodyWidth), bodyWidth))
 	}
 	panel := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
