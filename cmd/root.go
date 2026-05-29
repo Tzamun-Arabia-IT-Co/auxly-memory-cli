@@ -26,7 +26,7 @@ Supports Claude, Claude Code, Codex, Gemini, Copilot, Antigravity, and any CLI-b
 		} else {
 			// Automatically check and install missing dependencies (Node.js)
 			checkAndInstallDependencies()
-			
+
 			tui.RunWizard(memPath)
 			// Ensure memory files are populated after wizard
 			// (TUI closure may not reliably write files)
@@ -90,9 +90,12 @@ func customHelpFunc(cmd *cobra.Command, args []string) {
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"populate"+reset, "Auto-detect system profile and populate files"))
 	sb.WriteString("\r\n")
 
-	sb.WriteString(bold + "Daemon & Tunneling:" + reset + "\r\n")
-	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"server"+reset, "Start the local memory TCP daemon gateway"))
-	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"bridge"+reset, "Remote stdio-to-TCP bridge relayer for SSH"))
+	sb.WriteString(bold + "Remote Access:" + reset + "\r\n")
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"connect"+reset, "Interactive wizard to link a remote memory host over SSH"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"connect list"+reset, "List configured remote hosts"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"connect remove"+reset, "Remove a configured remote host"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"connect test"+reset, "Reachability + host-auxly dependency doctor"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"connect print"+reset, "Print the MCP JSON block (manual fallback)"))
 	sb.WriteString("\r\n")
 
 	sb.WriteString(bold + "Audit & Pending Queue:" + reset + "\r\n")

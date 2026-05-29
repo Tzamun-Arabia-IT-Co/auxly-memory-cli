@@ -34,7 +34,7 @@ var screenNames = []string{
 	"Approvals",
 	"Analytics",
 	"Settings",
-	"SSH Bridge",
+	"Remote",
 	"Skills",
 	"Audit Trail",
 }
@@ -157,8 +157,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = screenAuditTrail
 			return m, m.refreshCurrentScreen()
 		case "]", "tab":
-			if msg.String() == "tab" && (
-				(m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
+			if msg.String() == "tab" && ((m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
 				(m.screen == screenSSH && m.ssh.editingHost) ||
 				(m.screen == screenSettings && (m.settings.configuringCustom || m.settings.showingDiff || m.settings.confirmingRun))) {
 				break
@@ -169,8 +168,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = (m.screen + 1) % 9
 			return m, m.refreshCurrentScreen()
 		case "[", "shift+tab", "backtab":
-			if (msg.String() == "shift+tab" || msg.String() == "backtab") && (
-				(m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
+			if (msg.String() == "shift+tab" || msg.String() == "backtab") && ((m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
 				(m.screen == screenSSH && m.ssh.editingHost) ||
 				(m.screen == screenSettings && (m.settings.configuringCustom || m.settings.showingDiff || m.settings.confirmingRun))) {
 				break
@@ -372,7 +370,7 @@ func (m model) renderFooter() string {
 	default:
 		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	}
-	
+
 	return StyleFooter.Render(footerText)
 }
 

@@ -9,8 +9,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/spf13/cobra"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/tui"
+	"github.com/spf13/cobra"
 )
 
 var setupCmd = &cobra.Command{
@@ -63,14 +63,145 @@ func getBinaryPath() string {
 	return "/usr/local/bin/auxly"
 }
 
-func updateLocalMCPConfigFile(path string, binaryPath string, memPath string, appName string, baseDir string, isClaudeDesktop bool, providerID string) string {
+// ideTarget describes a single IDE/agent MCP config target.
+type ideTarget struct {
+	Path            string
+	AppName         string
+	BaseDir         string
+	IsClaudeDesktop bool
+	ProviderID      string
+}
+
+// knownIDETargets returns every IDE/agent config target that auxly setup writes,
+// with OS-specific path construction resolved for the given home directory.
+func knownIDETargets(home string) []ideTarget {
+	var targets []ideTarget
+
+	// 1. Claude Desktop
+	var claudeConfigPath, claudeBaseDir string
+	switch runtime.GOOS {
+	case "darwin":
+		claudeBaseDir = filepath.Join(home, "Library/Application Support/Claude")
+		claudeConfigPath = filepath.Join(claudeBaseDir, "claude_desktop_config.json")
+	case "linux":
+		claudeBaseDir = filepath.Join(home, ".config/Claude")
+		claudeConfigPath = filepath.Join(claudeBaseDir, "claude_desktop_config.json")
+	default:
+		claudeBaseDir = filepath.Join(os.Getenv("APPDATA"), "Claude")
+		claudeConfigPath = filepath.Join(claudeBaseDir, "claude_desktop_config.json")
+	}
+	targets = append(targets, ideTarget{claudeConfigPath, "Claude Desktop", claudeBaseDir, true, "claude"})
+
+	// 2. Cursor
+	var cursorConfigPath, cursorBaseDir string
+	switch runtime.GOOS {
+	case "darwin":
+		cursorBaseDir = filepath.Join(home, "Library/Application Support/Cursor")
+		cursorConfigPath = filepath.Join(cursorBaseDir, "User/globalStorage/co.heron.cursor/mcpServers.json")
+	case "linux":
+		cursorBaseDir = filepath.Join(home, ".config/Cursor")
+		cursorConfigPath = filepath.Join(cursorBaseDir, "User/globalStorage/co.heron.cursor/mcpServers.json")
+	default:
+		cursorBaseDir = filepath.Join(os.Getenv("APPDATA"), "Cursor")
+		cursorConfigPath = filepath.Join(cursorBaseDir, "User", "globalStorage", "co.heron.cursor", "mcpServers.json")
+	}
+	targets = append(targets, ideTarget{cursorConfigPath, "Cursor", cursorBaseDir, false, "cursor"})
+
+	// 4. Antigravity CLI
+	antigravityBaseDir := filepath.Join(home, ".gemini/antigravity-cli")
+	targets = append(targets, ideTarget{filepath.Join(antigravityBaseDir, "mcp.json"), "Antigravity CLI", antigravityBaseDir, false, "antigravity-cli"})
+	targets = append(targets, ideTarget{filepath.Join(antigravityBaseDir, "mcp_config.json"), "Antigravity Agent (Config)", antigravityBaseDir, false, "antigravity-agent"})
+
+	// 4b. Antigravity IDE (Bundle Support Paths)
+	var antigravityIdeConfigPath, antigravityIdeBaseDir string
+	switch runtime.GOOS {
+	case "darwin":
+		antigravityIdeBaseDir = filepath.Join(home, "Library/Application Support/Antigravity")
+		antigravityIdeConfigPath = filepath.Join(antigravityIdeBaseDir, "User/settings.json")
+	case "linux":
+		antigravityIdeBaseDir = filepath.Join(home, ".config/Antigravity")
+		antigravityIdeConfigPath = filepath.Join(antigravityIdeBaseDir, "User/settings.json")
+	default:
+		antigravityIdeBaseDir = filepath.Join(os.Getenv("APPDATA"), "Antigravity")
+		antigravityIdeConfigPath = filepath.Join(antigravityIdeBaseDir, "User", "settings.json")
+	}
+	targets = append(targets, ideTarget{antigravityIdeConfigPath, "Antigravity Agent (settings)", antigravityIdeBaseDir, false, "antigravity-agent"})
+
+	var antigravityIdeConfigPath2, antigravityIdeBaseDir2 string
+	switch runtime.GOOS {
+	case "darwin":
+		antigravityIdeBaseDir2 = filepath.Join(home, "Library/Application Support/Antigravity IDE")
+		antigravityIdeConfigPath2 = filepath.Join(antigravityIdeBaseDir2, "User/settings.json")
+	case "linux":
+		antigravityIdeBaseDir2 = filepath.Join(home, ".config/Antigravity IDE")
+		antigravityIdeConfigPath2 = filepath.Join(antigravityIdeBaseDir2, "User", "settings.json")
+	default:
+		antigravityIdeBaseDir2 = filepath.Join(os.Getenv("APPDATA"), "Antigravity IDE")
+		antigravityIdeConfigPath2 = filepath.Join(antigravityIdeBaseDir2, "User", "settings.json")
+	}
+	targets = append(targets, ideTarget{antigravityIdeConfigPath2, "Antigravity IDE (Bundle)", antigravityIdeBaseDir2, false, "antigravity-ide"})
+
+	// 4c. Antigravity IDE (True Gemini Config Directories)
+	antigravityGeminiBaseDir := filepath.Join(home, ".gemini/antigravity")
+	targets = append(targets, ideTarget{filepath.Join(antigravityGeminiBaseDir, "mcp_config.json"), "Antigravity Agent (Gemini)", antigravityGeminiBaseDir, false, "antigravity-agent"})
+
+	antigravityIdeGeminiBaseDir := filepath.Join(home, ".gemini/antigravity-ide")
+	targets = append(targets, ideTarget{filepath.Join(antigravityIdeGeminiBaseDir, "mcp_config.json"), "Antigravity IDE (Gemini IDE)", antigravityIdeGeminiBaseDir, false, "antigravity-ide"})
+
+	antigravityConfigBaseDir := filepath.Join(home, ".gemini/config")
+	targets = append(targets, ideTarget{filepath.Join(antigravityConfigBaseDir, "mcp_config.json"), "Antigravity IDE (Config)", antigravityConfigBaseDir, false, "antigravity-ide"})
+
+	// Dynamic Gemini CLI / Root overrides
+	geminiBaseDir := filepath.Join(home, ".gemini")
+	targets = append(targets, ideTarget{filepath.Join(home, ".gemini/settings.json"), "Gemini CLI settings.json", geminiBaseDir, false, "gemini"})
+	targets = append(targets, ideTarget{filepath.Join(home, ".gemini/mcp_config.json"), "Gemini CLI Config", geminiBaseDir, false, "gemini"})
+	targets = append(targets, ideTarget{filepath.Join(home, ".gemini/mcp.json"), "Gemini CLI mcp.json", geminiBaseDir, false, "gemini"})
+	targets = append(targets, ideTarget{filepath.Join(home, ".gemini/antigravity-cli/mcp_config.json"), "Antigravity CLI Config", antigravityBaseDir, false, "antigravity-cli"})
+
+	// 5. Claude Code CLI Configs (fallback manually if command fails)
+	claudeCodeBaseDir := filepath.Join(home, ".claudecode")
+	targets = append(targets, ideTarget{filepath.Join(claudeCodeBaseDir, "mcp.json"), "Claude Code CLI (~/.claudecode)", claudeCodeBaseDir, false, "claude-code"})
+	targets = append(targets, ideTarget{filepath.Join(home, ".claude.json"), "Claude Code CLI (~/.claude.json)", "", false, "claude-code"})
+
+	// 5b. Kimi Code CLI (Global Config)
+	kimiCodeBaseDir := filepath.Join(home, ".kimi-code")
+	targets = append(targets, ideTarget{filepath.Join(kimiCodeBaseDir, "mcp.json"), "Kimi Code CLI (~/.kimi-code/mcp.json)", "", false, "kimi"})
+	targets = append(targets, ideTarget{filepath.Join(kimiCodeBaseDir, "mcp_config.json"), "Kimi CLI config", "", false, "kimi"})
+	targets = append(targets, ideTarget{filepath.Join(home, ".kimi/mcp.json"), "Kimi mcp.json", "", false, "kimi"})
+	targets = append(targets, ideTarget{filepath.Join(home, ".kimi/mcp_config.json"), "Kimi mcp_config.json", "", false, "kimi"})
+
+	// 5c. Trae IDE (Global Config)
+	traeBaseDir := filepath.Join(home, ".trae")
+	targets = append(targets, ideTarget{filepath.Join(traeBaseDir, "mcp.json"), "Trae IDE (~/.trae/mcp.json)", "", false, "trae"})
+
+	return targets
+}
+
+// localServerDef builds the MCP server definition for a locally-installed auxly binary.
+func localServerDef(binaryPath, memPath, providerID string) map[string]interface{} {
+	return map[string]interface{}{
+		"command": binaryPath,
+		"args":    []interface{}{"--path", memPath, "mcp-server"},
+		"env": map[string]string{
+			"AUXLY_MEMORY_PATH": memPath,
+			"AUXLY_PROVIDER":    providerID,
+		},
+	}
+}
+
+// writeMCPConfigEntry writes serverDef into the target's config file, honoring
+// the per-file placement rules. Returns the app name on success, "" on skip/error.
+func writeMCPConfigEntry(t ideTarget, serverDef map[string]interface{}) string {
+	path := t.Path
+	appName := t.AppName
+
 	// Check if base directory exists (meaning the app is installed)
-	if baseDir != "" {
-		if _, err := os.Stat(baseDir); err != nil {
+	if t.BaseDir != "" {
+		if _, err := os.Stat(t.BaseDir); err != nil {
 			if os.IsNotExist(err) {
 				return "" // Skip since app is not installed
 			}
-			fmt.Printf("⚠️  [Debug] Stat error on baseDir %s for %s: %v\n", baseDir, appName, err)
+			fmt.Printf("⚠️  [Debug] Stat error on baseDir %s for %s: %v\n", t.BaseDir, appName, err)
 		}
 	}
 
@@ -99,17 +230,7 @@ func updateLocalMCPConfigFile(path string, binaryPath string, memPath string, ap
 		config = make(map[string]interface{})
 	}
 
-	// Define our server structure with robust path fallbacks for GUI applications
-	serverDef := map[string]interface{}{
-		"command": binaryPath,
-		"args":    []interface{}{"--path", memPath, "mcp-server"},
-		"env": map[string]string{
-			"AUXLY_MEMORY_PATH": memPath,
-			"AUXLY_PROVIDER":    providerID,
-		},
-	}
-
-	if isClaudeDesktop || filepath.Base(path) == "settings.json" || filepath.Base(path) == "mcp_config.json" || filepath.Base(path) == "mcpServers.json" {
+	if t.IsClaudeDesktop || filepath.Base(path) == "settings.json" || filepath.Base(path) == "mcp_config.json" || filepath.Base(path) == "mcpServers.json" {
 		// Claude Desktop, Cursor, VS Code, and Antigravity put servers inside "mcpServers" key
 		servers, ok := config["mcpServers"].(map[string]interface{})
 		if !ok {
@@ -135,7 +256,7 @@ func updateLocalMCPConfigFile(path string, binaryPath string, memPath string, ap
 		}
 	}
 
-	if filepath.Base(path) == "settings.json" && providerID == "gemini" {
+	if filepath.Base(path) == "settings.json" && t.ProviderID == "gemini" {
 		config["model"] = map[string]string{"name": "gemini-2.5-flash"}
 	}
 
@@ -179,138 +300,11 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	var configuredApps []string
 
-	// 1. Claude Desktop
-	var claudeConfigPath string
-	var claudeBaseDir string
-	switch runtime.GOOS {
-	case "darwin":
-		claudeBaseDir = filepath.Join(home, "Library/Application Support/Claude")
-		claudeConfigPath = filepath.Join(claudeBaseDir, "claude_desktop_config.json")
-	case "linux":
-		claudeBaseDir = filepath.Join(home, ".config/Claude")
-		claudeConfigPath = filepath.Join(claudeBaseDir, "claude_desktop_config.json")
-	default:
-		claudeBaseDir = filepath.Join(os.Getenv("APPDATA"), "Claude")
-		claudeConfigPath = filepath.Join(claudeBaseDir, "claude_desktop_config.json")
-	}
-	if app := updateLocalMCPConfigFile(claudeConfigPath, binaryPath, memPath, "Claude Desktop", claudeBaseDir, true, "claude"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-
-	// 2. Cursor
-	var cursorConfigPath string
-	var cursorBaseDir string
-	switch runtime.GOOS {
-	case "darwin":
-		cursorBaseDir = filepath.Join(home, "Library/Application Support/Cursor")
-		cursorConfigPath = filepath.Join(cursorBaseDir, "User/globalStorage/co.heron.cursor/mcpServers.json")
-	case "linux":
-		cursorBaseDir = filepath.Join(home, ".config/Cursor")
-		cursorConfigPath = filepath.Join(cursorBaseDir, "User/globalStorage/co.heron.cursor/mcpServers.json")
-	default:
-		cursorBaseDir = filepath.Join(os.Getenv("APPDATA"), "Cursor")
-		cursorConfigPath = filepath.Join(cursorBaseDir, "User", "globalStorage", "co.heron.cursor", "mcpServers.json")
-	}
-	if app := updateLocalMCPConfigFile(cursorConfigPath, binaryPath, memPath, "Cursor", cursorBaseDir, false, "cursor"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-
-	// 4. Antigravity CLI
-	antigravityBaseDir := filepath.Join(home, ".gemini/antigravity-cli")
-	antigravityConfigPath := filepath.Join(antigravityBaseDir, "mcp.json")
-	if app := updateLocalMCPConfigFile(antigravityConfigPath, binaryPath, memPath, "Antigravity CLI", antigravityBaseDir, false, "antigravity-cli"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-
-	antigravityCliConfigPath2 := filepath.Join(antigravityBaseDir, "mcp_config.json")
-	if app := updateLocalMCPConfigFile(antigravityCliConfigPath2, binaryPath, memPath, "Antigravity Agent (Config)", antigravityBaseDir, false, "antigravity-agent"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-
-	// 4b. Antigravity IDE (Bundle Support Paths)
-	var antigravityIdeConfigPath string
-	var antigravityIdeBaseDir string
-	switch runtime.GOOS {
-	case "darwin":
-		antigravityIdeBaseDir = filepath.Join(home, "Library/Application Support/Antigravity")
-		antigravityIdeConfigPath = filepath.Join(antigravityIdeBaseDir, "User/settings.json")
-	case "linux":
-		antigravityIdeBaseDir = filepath.Join(home, ".config/Antigravity")
-		antigravityIdeConfigPath = filepath.Join(antigravityIdeBaseDir, "User/settings.json")
-	default:
-		antigravityIdeBaseDir = filepath.Join(os.Getenv("APPDATA"), "Antigravity")
-		antigravityIdeConfigPath = filepath.Join(antigravityIdeBaseDir, "User", "settings.json")
-	}
-	if app := updateLocalMCPConfigFile(antigravityIdeConfigPath, binaryPath, memPath, "Antigravity Agent (settings)", antigravityIdeBaseDir, false, "antigravity-agent"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-
-	var antigravityIdeConfigPath2 string
-	var antigravityIdeBaseDir2 string
-	switch runtime.GOOS {
-	case "darwin":
-		antigravityIdeBaseDir2 = filepath.Join(home, "Library/Application Support/Antigravity IDE")
-		antigravityIdeConfigPath2 = filepath.Join(antigravityIdeBaseDir2, "User/settings.json")
-	case "linux":
-		antigravityIdeBaseDir2 = filepath.Join(home, ".config/Antigravity IDE")
-		antigravityIdeConfigPath2 = filepath.Join(antigravityIdeBaseDir2, "User", "settings.json")
-	default:
-		antigravityIdeBaseDir2 = filepath.Join(os.Getenv("APPDATA"), "Antigravity IDE")
-		antigravityIdeConfigPath2 = filepath.Join(antigravityIdeBaseDir2, "User", "settings.json")
-	}
-	if app := updateLocalMCPConfigFile(antigravityIdeConfigPath2, binaryPath, memPath, "Antigravity IDE (Bundle)", antigravityIdeBaseDir2, false, "antigravity-ide"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-
-	// 4c. Antigravity IDE (True Gemini Config Directories)
-	antigravityGeminiBaseDir := filepath.Join(home, ".gemini/antigravity")
-	antigravityGeminiConfigPath := filepath.Join(antigravityGeminiBaseDir, "mcp_config.json")
-	if app := updateLocalMCPConfigFile(antigravityGeminiConfigPath, binaryPath, memPath, "Antigravity Agent (Gemini)", antigravityGeminiBaseDir, false, "antigravity-agent"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-
-	antigravityIdeGeminiBaseDir := filepath.Join(home, ".gemini/antigravity-ide")
-	antigravityIdeGeminiConfigPath := filepath.Join(antigravityIdeGeminiBaseDir, "mcp_config.json")
-	if app := updateLocalMCPConfigFile(antigravityIdeGeminiConfigPath, binaryPath, memPath, "Antigravity IDE (Gemini IDE)", antigravityIdeGeminiBaseDir, false, "antigravity-ide"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-
-	antigravityConfigBaseDir := filepath.Join(home, ".gemini/config")
-	antigravityConfigPath3 := filepath.Join(antigravityConfigBaseDir, "mcp_config.json")
-	if app := updateLocalMCPConfigFile(antigravityConfigPath3, binaryPath, memPath, "Antigravity IDE (Config)", antigravityConfigBaseDir, false, "antigravity-ide"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-
-	// Dynamic Gemini CLI / Root overrides
-	if app := updateLocalMCPConfigFile(filepath.Join(home, ".gemini/settings.json"), binaryPath, memPath, "Gemini CLI settings.json", filepath.Join(home, ".gemini"), false, "gemini"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-	updateLocalMCPConfigFile(filepath.Join(home, ".gemini/mcp_config.json"), binaryPath, memPath, "Gemini CLI Config", filepath.Join(home, ".gemini"), false, "gemini")
-	updateLocalMCPConfigFile(filepath.Join(home, ".gemini/mcp.json"), binaryPath, memPath, "Gemini CLI mcp.json", filepath.Join(home, ".gemini"), false, "gemini")
-	updateLocalMCPConfigFile(filepath.Join(home, ".gemini/antigravity-cli/mcp_config.json"), binaryPath, memPath, "Antigravity CLI Config", filepath.Join(home, ".gemini/antigravity-cli"), false, "antigravity-cli")
-
-	// 5. Claude Code CLI Configs (fallback manually if command fails)
-	claudeCodeBaseDir := filepath.Join(home, ".claudecode")
-	if app := updateLocalMCPConfigFile(filepath.Join(claudeCodeBaseDir, "mcp.json"), binaryPath, memPath, "Claude Code CLI (~/.claudecode)", claudeCodeBaseDir, false, "claude-code"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-	if app := updateLocalMCPConfigFile(filepath.Join(home, ".claude.json"), binaryPath, memPath, "Claude Code CLI (~/.claude.json)", "", false, "claude-code"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-
-	// 5b. Kimi Code CLI (Global Config)
-	kimiCodeBaseDir := filepath.Join(home, ".kimi-code")
-	if app := updateLocalMCPConfigFile(filepath.Join(kimiCodeBaseDir, "mcp.json"), binaryPath, memPath, "Kimi Code CLI (~/.kimi-code/mcp.json)", "", false, "kimi"); app != "" {
-		configuredApps = append(configuredApps, app)
-	}
-	updateLocalMCPConfigFile(filepath.Join(kimiCodeBaseDir, "mcp_config.json"), binaryPath, memPath, "Kimi CLI config", "", false, "kimi")
-	updateLocalMCPConfigFile(filepath.Join(home, ".kimi/mcp.json"), binaryPath, memPath, "Kimi mcp.json", "", false, "kimi")
-	updateLocalMCPConfigFile(filepath.Join(home, ".kimi/mcp_config.json"), binaryPath, memPath, "Kimi mcp_config.json", "", false, "kimi")
-
-	// 5c. Trae IDE (Global Config)
-	traeBaseDir := filepath.Join(home, ".trae")
-	if app := updateLocalMCPConfigFile(filepath.Join(traeBaseDir, "mcp.json"), binaryPath, memPath, "Trae IDE (~/.trae/mcp.json)", "", false, "trae"); app != "" {
-		configuredApps = append(configuredApps, app)
+	// Inject the local MCP server definition into every known IDE/agent target.
+	for _, t := range knownIDETargets(home) {
+		if app := writeMCPConfigEntry(t, localServerDef(binaryPath, memPath, t.ProviderID)); app != "" {
+			configuredApps = append(configuredApps, app)
+		}
 	}
 
 	// Print beautiful aligned configured applications
@@ -385,7 +379,11 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func ensureClaudeAndCodexSkills(memPath string) {
+// installAuxlySkills writes every getSkillsMap() skill's SKILL.md into the
+// Claude (global + local), Codex (global + local), and Gemini target dirs.
+// extraBanner is appended after the standard update reminder (empty for local
+// setup; a remote banner for `auxly connect`).
+func installAuxlySkills(extraBanner string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
@@ -399,8 +397,9 @@ func ensureClaudeAndCodexSkills(memPath string) {
 	localClaude := ".claude/skills"
 	globalCodex := filepath.Join(home, ".codex", "skills")
 	localCodex := ".codex/skills"
+	globalGeminiSkills := filepath.Join(home, ".gemini", "config", "skills")
 
-	targetDirs := []string{globalClaude, localClaude, globalCodex, localCodex}
+	targetDirs := []string{globalClaude, localClaude, globalCodex, localCodex, globalGeminiSkills}
 
 	for _, baseDir := range targetDirs {
 		// Only write local dirs if we are actually in a directory that is not home
@@ -415,28 +414,19 @@ func ensureClaudeAndCodexSkills(memPath string) {
 			skillDir := filepath.Join(baseDir, skillName)
 			_ = os.MkdirAll(skillDir, 0755)
 			skillFilePath := filepath.Join(skillDir, "SKILL.md")
-			_ = os.WriteFile(skillFilePath, []byte(content+updateReminder), 0644)
+			_ = os.WriteFile(skillFilePath, []byte(content+updateReminder+extraBanner), 0644)
 		}
 	}
 }
 
+func ensureClaudeAndCodexSkills(memPath string) {
+	installAuxlySkills("")
+}
+
 func ensureAntigravitySlashCommands(memPath string) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
-
-	commands := getSkillsMap()
-	updateReminder := "\n\nIMPORTANT: You are expected to proactively update the user's unified Auxly memory vault. Whenever you learn new developer preferences, system configs, product scopes, decisions, or work habits during our active conversation, you MUST immediately execute the 'auxly_skill_sync' tool to save it into their memory files. Keep the memory synchronized!"
-
-	globalGeminiSkills := filepath.Join(home, ".gemini", "config", "skills")
-
-	for skillName, content := range commands {
-		skillDir := filepath.Join(globalGeminiSkills, skillName)
-		_ = os.MkdirAll(skillDir, 0755)
-		skillFilePath := filepath.Join(skillDir, "SKILL.md")
-		_ = os.WriteFile(skillFilePath, []byte(content+updateReminder), 0644)
-	}
+	// Skill installation (Claude/Codex/Gemini) is handled centrally by
+	// ensureClaudeAndCodexSkills -> installAuxlySkills. Kept as a no-op for
+	// call-site compatibility.
 }
 
 func cleanupGeminiSlashCommands() {
@@ -472,7 +462,7 @@ func ensureWorkspaceRuleFiles() {
 You natively support the following slash commands! When the user inputs one of these commands, intercept it and run the corresponding MCP tool call immediately:
 - /auxly-init (or auxly-init / auxly init): Call the auxly_skill_init tool to run the onboarding and training setup, scan current chat context/system prompt, and sync all existing preferences to Auxly.
 - /auxly-memory (or auxly-memory / auxly memory): Call the auxly_skill_memory tool to display a consolidated markdown profile of the user's identity, preferences, and infrastructure.
-- /auxly-status (or auxly-status / auxly status): Call the auxly_skill_status tool to show live loopback daemon and diagnostics.
+- /auxly-status (or auxly-status / auxly status): Call the auxly_skill_status tool to show system diagnostics, active connections, and remote/SSH attribution.
 - /auxly-sync (or auxly-sync / auxly sync): Call the auxly_skill_sync tool with the provided content to perform an automated smart delta-merge into the preferences file.
 - /auxly-pending (or auxly-pending / auxly pending): Call the auxly_skill_pending tool with arguments list/approve/reject to manage the approval queue.
 - /auxly-max (or auxly-max / auxly max): Call the auxly_skill_max tool to obtain the dynamic Maximum Memory sync instructions block.
@@ -543,7 +533,7 @@ You must immediately invoke the 'auxly_skill_pending' MCP tool, passing the prov
 
 		"auxly-status": `---
 name: auxly-status
-description: Show real-time system diagnostics, active client connections, database sizes, and local daemon status.
+description: Show real-time system diagnostics, active connections, and remote/SSH attribution.
 ---
 # /auxly-status
 
@@ -566,5 +556,13 @@ argument-hint: "[raw context text or snippet]"
 # /auxly-learn
 
 You must immediately invoke the 'auxly_skill_learn' MCP tool, passing the provided raw context text or snippet as the 'context' argument, to parse and extract structured new facts. Simply run the tool and display the proposed facts!`,
+
+		"auxly-remote-connect": `---
+name: auxly-remote-connect
+description: Show the active Auxly remote connection (host, client IP, OS) and confirm this is a shared remote memory vault over SSH.
+---
+# /auxly-remote-connect
+
+You must immediately invoke the 'auxly_skill_remote_connect' MCP tool to report the active remote connection: the memory host, the client IP (from SSH_CONNECTION), and the remote OS, and to confirm reads/writes are central and audited on the shared host. For setting up or managing a connection, point the user to the ` + "`auxly connect`" + ` CLI wizard (run in a terminal). This is informational only — it does NOT perform key/SSH/config changes.`,
 	}
 }

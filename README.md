@@ -148,6 +148,61 @@ Launch with `auxly ui`. Screens:
 
 ---
 
+## Remote Memory over SSH
+
+Auxly lets a remote/agent machine use a memory **host** as its single source of truth — with **plain SSH as the only transport**. There is no daemon, no open listening port, no auth token, and no gzip layer. A session is just:
+
+```bash
+ssh host auxly mcp-server
+```
+
+The IDE on the remote machine spawns this over SSH and speaks MCP over stdio. The host streams its memory and writes are audited on the host exactly as if they were local.
+
+### Both machines run `auxly`
+
+| Machine | Role | Command |
+|---------|------|---------|
+| Memory **host** | Serves memory + audits every access | `auxly mcp-server` (invoked over SSH) |
+| **Remote / agent** | Holds the same skills + launches sessions | `auxly connect` (wizard) and a hidden `connect-mcp` launcher the IDE invokes |
+
+Set up a link from the remote machine with the wizard:
+
+```bash
+auxly connect          # interactive wizard to link a remote memory host over SSH
+auxly connect list     # list configured remote hosts
+auxly connect remove   # remove a configured remote host
+auxly connect test     # reachability + host-auxly dependency doctor
+auxly connect print    # print the MCP JSON block (manual fallback)
+```
+
+### VPN-agnostic, bring-your-own network
+
+Auxly **never installs or manages a VPN** and stores **no network credentials**. You bring the reachability; Auxly rides on top of it. **No public IP is required.** Any of these work:
+
+| Method | When to use |
+|--------|-------------|
+| **LAN** | Host and remote on the same local network |
+| **VPN** | Your own overlay network (e.g. Tailscale, WireGuard) — Auxly does not configure it for you |
+| **Jump host / bastion** | Reach the host through an intermediate SSH hop |
+| **Public / custom** | A reachable hostname/IP or a custom SSH config entry |
+
+Because the transport is just SSH, anything that gives you `ssh host` already gives you Auxly.
+
+### Remote agents in the Audit & Activity views
+
+Sessions opened from a remote machine show up in the **Audit / Activity** views tagged as **SSH-remote**, annotated with the connecting **client IP** and **OS**. You can see at a glance which writes came from a remote agent versus a local one.
+
+### OS-aware dependency doctor
+
+`auxly connect` runs an OS-aware doctor that auto-checks the dependency surface on the host before linking:
+
+- On a **macOS or Linux** host, it **silently installs** the `auxly` binary via the official release channel if it is missing.
+- On a **Windows** host, or when **sshd** needs to be enabled, the steps are **guided** (printed instructions you confirm) rather than performed silently.
+
+Run `auxly connect test` any time to re-run reachability checks and the host-side dependency doctor without re-linking.
+
+---
+
 ## Agent Wrapper Usage
 
 Each provider wrapper lives in `wrappers/`. Source it in your agent hook:

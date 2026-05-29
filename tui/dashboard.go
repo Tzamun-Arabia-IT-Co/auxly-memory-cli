@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
@@ -167,7 +165,7 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			// If popup is open
 			if m.selectedAgent != "" {
 				startX := 10
-				if w > 0 && startX + 82 > w {
+				if w > 0 && startX+82 > w {
 					startX = w - 82
 					if startX < 0 {
 						startX = 0
@@ -176,7 +174,7 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 
 				popupStr := m.renderPopup(m.selectedAgent)
 				popLines := strings.Split(popupStr, "\n")
-				
+
 				pStartY := contentOffsetY + 6
 				pEndY := pStartY + len(popLines)
 				pStartX := startX
@@ -188,7 +186,7 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 				}
 
 				// Tab clicking line is Y = pStartY + 5
-				if msg.Y == pStartY + 5 {
+				if msg.Y == pStartY+5 {
 					// Tab 1: [1 Info & Diagnostics] spans X: [pStartX+3, pStartX+25]
 					if msg.X >= pStartX+3 && msg.X <= pStartX+25 {
 						m.activeAgentTab = 0
@@ -305,7 +303,7 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 
 func (m dashboardModel) View() string {
 	title := StyleTitle.Render("📊 Auxly-Memory CLI Dashboard")
-	
+
 	clockStr := time.Now().Format("02/01/2006 15:04:05")
 	clockHeader := lipgloss.NewStyle().Foreground(ColorDim).Render("🕒 Time: " + clockStr)
 	headerRow := lipgloss.JoinHorizontal(lipgloss.Top, title, "         ", clockHeader)
@@ -332,12 +330,6 @@ func (m dashboardModel) View() string {
 	}
 	pendingText := lipgloss.NewStyle().Bold(true).Foreground(pendingColor).Render(fmt.Sprintf("%d", m.pendingCnt))
 
-	daemonActive, daemonConns := getDaemonState()
-	daemonText := dim.Render("○ idle")
-	if daemonActive {
-		daemonText = fmt.Sprintf("%s (Port 7357, conns: %d)", green.Render("● active"), daemonConns)
-	}
-
 	diagContent := fmt.Sprintf(
 		"💻 %s\n\n"+
 			"Writes Today:   %s\n"+
@@ -351,8 +343,8 @@ func (m dashboardModel) View() string {
 		pendingText,
 		bold.Render("Memory Store:"),
 		dim.Render(m.memoryPath),
-		bold.Render("Daemon Gateway:"),
-		daemonText,
+		bold.Render("Remote Access:"),
+		dim.Render("SSH (auxly connect)"),
 	)
 	leftCol := diagStyle.Render(diagContent)
 
@@ -461,7 +453,7 @@ func (m dashboardModel) View() string {
 			Padding(0, 1).
 			Width(28).
 			Render(rightDetails)
-		
+
 		brandCards = append(brandCards, card)
 	}
 
@@ -488,7 +480,7 @@ func (m dashboardModel) View() string {
 	if m.selectedAgent != "" {
 		popupStr := m.renderPopup(m.selectedAgent)
 		startX := 10
-		if m.width > 0 && startX + 82 > m.width {
+		if m.width > 0 && startX+82 > m.width {
 			startX = m.width - 82
 			if startX < 0 {
 				startX = 0
@@ -663,10 +655,10 @@ func visibleWidth(s string) int {
 func splitLineAtVisibleColumn(line string, col int) (string, string) {
 	var left strings.Builder
 	var right strings.Builder
-	
+
 	inEscape := false
 	visibleCol := 0
-	
+
 	runes := []rune(line)
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
@@ -690,7 +682,7 @@ func splitLineAtVisibleColumn(line string, col int) (string, string) {
 			}
 			continue
 		}
-		
+
 		rw := runewidth.RuneWidth(r)
 		if visibleCol < col {
 			left.WriteRune(r)
@@ -700,11 +692,11 @@ func splitLineAtVisibleColumn(line string, col int) (string, string) {
 			visibleCol += rw
 		}
 	}
-	
+
 	if visibleCol < col {
 		left.WriteString(strings.Repeat(" ", col-visibleCol))
 	}
-	
+
 	return left.String(), right.String()
 }
 
@@ -721,11 +713,11 @@ func overlayPopup(bg, popup string, startX, startY int) string {
 	for i, pLine := range popLines {
 		y := startY + i
 		bgLine := bgLines[y]
-		
+
 		left, right := splitLineAtVisibleColumn(bgLine, startX)
 		pWidth := visibleWidth(pLine)
 		_, farRight := splitLineAtVisibleColumn(right, pWidth)
-		
+
 		bgLines[y] = left + pLine + farRight
 	}
 
@@ -784,42 +776,6 @@ func touchClaudeConfig() error {
 	return os.WriteFile(configPath, data, 0644)
 }
 
-func getDaemonState() (bool, int) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false, 0
-	}
-	pidPath := filepath.Join(home, ".auxly", "daemon.pid")
-	pidData, err := os.ReadFile(pidPath)
-	if err != nil {
-		return false, 0
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
-	if err != nil {
-		return false, 0
-	}
-
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false, 0
-	}
-	err = process.Signal(syscall.Signal(0))
-	if err != nil {
-		return false, 0
-	}
-
-	connsPath := filepath.Join(home, ".auxly", "daemon.conns")
-	connsData, err := os.ReadFile(connsPath)
-	if err != nil {
-		return true, 0
-	}
-	conns, err := strconv.Atoi(strings.TrimSpace(string(connsData)))
-	if err != nil {
-		return true, 0
-	}
-	return true, conns
-}
-
 // shimmerPalette defines a smooth multi-stop gradient between Auxly brand colors.
 // We expand brand hex stops into a 24-step palette using linear interpolation
 // so adjacent stops look almost identical — producing a silky smooth wave.
@@ -861,7 +817,7 @@ func renderShimmerText(text string, frame int) string {
 			continue
 		}
 		// Flowing left-to-right wave
-		colorIdx := ((frame - i*2) % n + n) % n
+		colorIdx := ((frame-i*2)%n + n) % n
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color(shimmerPalette[colorIdx])).Bold(true)
 		result.WriteString(style.Render(string(r)))
 	}
@@ -907,7 +863,7 @@ func renderHoverShimmerText(text string, frame int) string {
 			continue
 		}
 		// Flowing left-to-right wave
-		colorIdx := ((frame - i*2) % n + n) % n
+		colorIdx := ((frame-i*2)%n + n) % n
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color(hoverShimmerPalette[colorIdx])).Bold(true)
 		result.WriteString(style.Render(string(r)))
 	}

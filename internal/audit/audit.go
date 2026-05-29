@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,6 +25,18 @@ type Entry struct {
 	TrustLevel string `json:"trust_level"`
 	RequestID  string `json:"request_id"`
 	Signature  string `json:"signature,omitempty"`
+	Source     string `json:"source,omitempty"`
+	RemoteIP   string `json:"remote_ip,omitempty"`
+	RemoteOS   string `json:"remote_os,omitempty"`
+	RemoteHost string `json:"remote_host,omitempty"`
+}
+
+// SourceMeta carries attribution for where a write originated.
+type SourceMeta struct {
+	Source     string // "local" | "ssh-remote"
+	RemoteIP   string
+	RemoteOS   string
+	RemoteHost string
 }
 
 // Logger handles dual-write to .audit.log and audit.db.
@@ -55,7 +68,11 @@ func NewLogger(memoryRoot string) (*Logger, error) {
 			reason TEXT,
 			trust_level TEXT NOT NULL,
 			request_id TEXT NOT NULL,
-			signature TEXT
+			signature TEXT,
+			source TEXT,
+			remote_ip TEXT,
+			remote_os TEXT,
+			remote_host TEXT
 		)
 	`)
 	if err != nil {
@@ -63,11 +80,33 @@ func NewLogger(memoryRoot string) (*Logger, error) {
 		return nil, fmt.Errorf("failed to create audit table: %w", err)
 	}
 
+	// Lightweight migration for pre-existing DBs: add the SSH-remote
+	// attribution columns. SQLite returns a "duplicate column" error if the
+	// column already exists, which we intentionally ignore.
+	for _, col := range []string{"source", "remote_ip", "remote_os", "remote_host"} {
+		_, err := db.Exec(fmt.Sprintf("ALTER TABLE audit_entries ADD COLUMN %s TEXT", col))
+		if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("failed to migrate audit table column %s: %w", col, err)
+		}
+	}
+
 	return &Logger{logPath: logPath, db: db}, nil
 }
 
-// Log writes an entry to both .audit.log and audit.db.
+// Log writes an entry to both .audit.log and audit.db. It attributes the entry
+// to the local source. For SSH-remote attribution, use LogWithSource.
 func (l *Logger) Log(agentID, provider, action, file, diff, reason, trustLevel string) (*Entry, error) {
+	return l.LogWithSource(agentID, provider, action, file, diff, reason, trustLevel, SourceMeta{Source: "local"})
+}
+
+// LogWithSource writes an entry to both .audit.log and audit.db, attributing it
+// to the origin described by meta.
+func (l *Logger) LogWithSource(agentID, provider, action, file, diff, reason, trustLevel string, meta SourceMeta) (*Entry, error) {
+	if meta.Source == "" {
+		meta.Source = "local"
+	}
+
 	entry := &Entry{
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 		AgentID:    agentID,
@@ -78,6 +117,10 @@ func (l *Logger) Log(agentID, provider, action, file, diff, reason, trustLevel s
 		Reason:     reason,
 		TrustLevel: trustLevel,
 		RequestID:  uuid.New().String(),
+		Source:     meta.Source,
+		RemoteIP:   meta.RemoteIP,
+		RemoteOS:   meta.RemoteOS,
+		RemoteHost: meta.RemoteHost,
 	}
 
 	// Write to .audit.log (append-only JSON lines)
@@ -98,9 +141,9 @@ func (l *Logger) Log(agentID, provider, action, file, diff, reason, trustLevel s
 
 	// Write to audit.db
 	_, err = l.db.Exec(`
-		INSERT INTO audit_entries (timestamp, agent_id, provider, action, file, diff, reason, trust_level, request_id, signature)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, entry.Timestamp, entry.AgentID, entry.Provider, entry.Action, entry.File, entry.Diff, entry.Reason, entry.TrustLevel, entry.RequestID, entry.Signature)
+		INSERT INTO audit_entries (timestamp, agent_id, provider, action, file, diff, reason, trust_level, request_id, signature, source, remote_ip, remote_os, remote_host)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, entry.Timestamp, entry.AgentID, entry.Provider, entry.Action, entry.File, entry.Diff, entry.Reason, entry.TrustLevel, entry.RequestID, entry.Signature, entry.Source, entry.RemoteIP, entry.RemoteOS, entry.RemoteHost)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert into audit.db: %w", err)
 	}
@@ -115,8 +158,8 @@ func (l *Logger) Tail(n int) ([]Entry, error) {
 	}
 
 	rows, err := l.db.Query(`
-		SELECT timestamp, agent_id, provider, action, file, diff, reason, trust_level, request_id, signature 
-		FROM audit_entries 
+		SELECT timestamp, agent_id, provider, action, file, diff, reason, trust_level, request_id, signature, source, remote_ip, remote_os, remote_host
+		FROM audit_entries
 		ORDER BY id DESC LIMIT ?`, n)
 	if err != nil {
 		return l.tailFileFallback(n)
@@ -126,7 +169,7 @@ func (l *Logger) Tail(n int) ([]Entry, error) {
 	var entries []Entry
 	for rows.Next() {
 		var e Entry
-		err := rows.Scan(&e.Timestamp, &e.AgentID, &e.Provider, &e.Action, &e.File, &e.Diff, &e.Reason, &e.TrustLevel, &e.RequestID, &e.Signature)
+		err := rows.Scan(&e.Timestamp, &e.AgentID, &e.Provider, &e.Action, &e.File, &e.Diff, &e.Reason, &e.TrustLevel, &e.RequestID, &e.Signature, &e.Source, &e.RemoteIP, &e.RemoteOS, &e.RemoteHost)
 		if err != nil {
 			continue
 		}
@@ -143,8 +186,8 @@ func (l *Logger) TailWrites(n int) ([]Entry, error) {
 	}
 
 	rows, err := l.db.Query(`
-		SELECT timestamp, agent_id, provider, action, file, diff, reason, trust_level, request_id, signature 
-		FROM audit_entries 
+		SELECT timestamp, agent_id, provider, action, file, diff, reason, trust_level, request_id, signature, source, remote_ip, remote_os, remote_host
+		FROM audit_entries
 		WHERE action = 'write'
 		ORDER BY id DESC LIMIT ?`, n)
 	if err != nil {
@@ -155,7 +198,7 @@ func (l *Logger) TailWrites(n int) ([]Entry, error) {
 	var entries []Entry
 	for rows.Next() {
 		var e Entry
-		err := rows.Scan(&e.Timestamp, &e.AgentID, &e.Provider, &e.Action, &e.File, &e.Diff, &e.Reason, &e.TrustLevel, &e.RequestID, &e.Signature)
+		err := rows.Scan(&e.Timestamp, &e.AgentID, &e.Provider, &e.Action, &e.File, &e.Diff, &e.Reason, &e.TrustLevel, &e.RequestID, &e.Signature, &e.Source, &e.RemoteIP, &e.RemoteOS, &e.RemoteHost)
 		if err != nil {
 			continue
 		}
@@ -180,7 +223,6 @@ func (l *Logger) tailWritesFileFallback(n int) ([]Entry, error) {
 	}
 	return writes, nil
 }
-
 
 func (l *Logger) tailFileFallback(n int) ([]Entry, error) {
 	data, err := os.ReadFile(l.logPath)
