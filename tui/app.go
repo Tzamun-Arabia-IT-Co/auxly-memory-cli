@@ -354,8 +354,7 @@ func (m model) renderFooter() string {
 			footerText = "↑/↓: Select option • ←/→: Cycle agent overrides • Enter: Toggle option/Run • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 		}
 	case screenSSH:
-		// The Remote tab is informational; manage hosts via `auxly connect` in a terminal.
-		footerText = "Run `auxly connect` in a terminal to add a host • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		footerText = "j/k: Select • c: Connect new • t: Test • p: Print config • d: Remove • Tab/[ / ]: Switch tabs • q: Quit"
 	case screenSkills:
 		footerText = "j/k: Navigate commands • d: Export Claude skills ZIP • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenAuditTrail:
