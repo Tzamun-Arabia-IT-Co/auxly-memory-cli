@@ -703,9 +703,9 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 		}
 		
 		sourceVal := "Local Stdio"
-		if e.Provider == "antigravity" || strings.Contains(e.AgentID, "ssh") || strings.Contains(e.File, ".ssh") {
+		if strings.Contains(e.AgentID, "ssh") || strings.Contains(e.File, ".ssh") {
 			sourceVal = "SSH Bridge"
-		} else if e.Provider == "claude-code" || e.Provider == "gemini" {
+		} else if e.Provider == "antigravity" || strings.HasPrefix(e.Provider, "antigravity") || e.Provider == "claude-code" || e.Provider == "gemini" {
 			sourceVal = "Local CLI"
 		}
 		
