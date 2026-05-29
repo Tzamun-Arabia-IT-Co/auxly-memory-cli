@@ -448,8 +448,9 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 // ---------------------------------------------------------------------------
 
 var connectCmd = &cobra.Command{
-	Use:   "connect [host]",
-	Short: "Link this machine to a remote Auxly memory host over SSH",
+	Use:     "connect [host]",
+	Aliases: []string{"remote"},
+	Short:   "Link this machine to a remote Auxly memory host over SSH",
 	Long: `connect links this (remote/agent) machine to a memory HOST over SSH.
 
 Run with no arguments for an interactive wizard, or pass [user@]host[:port]
