@@ -89,6 +89,8 @@ type sshModel struct {
 	progressNeeded bool               // first-time SSH key setup required
 	pendingKeyArgs []string           // non-batch `connect add …` args for the key-setup fallback
 	password       string             // transient masked SSH password (sshModePassword)
+	twoWayFailed   bool               // host can't reach back; offer [u] consumer direction
+	twoWayHost     string             // profile name to use when [u] is pressed
 
 	// editingHost drives app.go's key-routing contract: when true, ALL keys are
 	// delivered to this model (so the in-TUI add-host form can capture text). It
@@ -241,6 +243,8 @@ func (m sshModel) beginRun(title string, ch chan progressEvent) (sshModel, tea.C
 	m.progressPct = 0
 	m.spin = 0
 	m.progressTitle = title
+	m.twoWayFailed = false
+	m.twoWayHost = ""
 	m.mode = sshModeProgress
 	return m, tea.Batch(waitProgress(ch), spinTick())
 }
@@ -340,8 +344,15 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 	case progressEvent:
 		if msg.done {
 			var out []string
+			m.twoWayFailed = false
+			m.twoWayHost = ""
 			for _, l := range strings.Split(strings.TrimRight(msg.out, "\n"), "\n") {
 				if strings.Contains(l, "AUXLY_KEY_REQUIRED") {
+					continue // internal token, not for display
+				}
+				if idx := strings.Index(l, "AUXLY_TWOWAY_FAILED:"); idx >= 0 {
+					m.twoWayFailed = true
+					m.twoWayHost = strings.TrimSpace(l[idx+len("AUXLY_TWOWAY_FAILED:"):])
 					continue // internal token, not for display
 				}
 				out = append(out, l)
@@ -414,6 +425,14 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		return m, nil // ignore input while a captured run is in flight
 
 	case sshModeResult:
+		if m.twoWayFailed && m.twoWayHost != "" {
+			switch msg.String() {
+			case "u", "U":
+				name := m.twoWayHost
+				m.twoWayFailed = false
+				return m.beginCaptured("Using "+name+"'s memory", "use", name)
+			}
+		}
 		if m.progressNeeded && len(m.pendingKeyArgs) > 0 {
 			switch msg.String() {
 			case "p", "P":
@@ -747,9 +766,12 @@ func (m sshModel) View() string {
 			}
 		}
 		lines = append(lines, "")
-		if m.progressNeeded {
+		switch {
+		case m.twoWayFailed && m.twoWayHost != "":
+			lines = append(lines, accent.Render("[u]")+dim.Render(" use "+m.twoWayHost+"'s memory from this machine (works now)   ·   any other key: close"))
+		case m.progressNeeded:
 			lines = append(lines, accent.Render("[p]")+dim.Render(" enter SSH password here   ")+accent.Render("[K]")+dim.Render(" use a terminal instead   ·   any other key: close"))
-		} else {
+		default:
 			lines = append(lines, dim.Render("Press any key to close."))
 		}
 	case sshModePassword:

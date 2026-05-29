@@ -372,7 +372,9 @@ func checkTwoWay(p remoteProfile) error {
 		return nil
 	}
 	printTwoWayFailureGuidance(p, addrs)
-	return fmt.Errorf("host can't reach this machine back — pick a fix above and retry")
+	// Machine-readable token so the TUI can offer the working alternative ([u]).
+	fmt.Println("AUXLY_TWOWAY_FAILED:" + p.Name)
+	return fmt.Errorf("host can't reach this machine back — use the host's memory from here instead")
 }
 
 // localCandidateAddrs returns this machine's non-loopback IPv4 addresses — the
@@ -415,11 +417,11 @@ func hostCanReachBack(p remoteProfile, addrs []string) (string, bool) {
 }
 
 func printTwoWayFailureGuidance(p remoteProfile, addrs []string) {
-	fmt.Printf("   ✗ %s can't reach this machine back on port 22 (different network / NAT).\n", p.Host)
-	fmt.Println("     For this machine to be the host, the remote must reach it. Pick a fix, then retry:")
-	fmt.Println("     • Same LAN — put both machines on the same subnet")
-	fmt.Println("     • Tailscale on both — stable IPs that work through NAT")
-	fmt.Println("     • Or make the server the host instead (no network change)")
+	fmt.Printf("   ✗ %s can't reach this machine back (NAT) — it can't use this machine as host.\n", p.Host)
+	fmt.Println("     You can still connect right now — the other way around:")
+	fmt.Printf("     → Use %s's memory from THIS machine (this direction works).\n", p.Host)
+	fmt.Printf("        TUI: press [u]    ·    CLI: auxly connect use %s\n", p.Name)
+	fmt.Println("     To keep this machine as the host instead: same LAN, or Tailscale on both.")
 }
 
 // recordProvision logs the silent host install to the audit trail (best effort).
@@ -586,6 +588,14 @@ var connectPrintCmd = &cobra.Command{
 	RunE:  runConnectPrint,
 }
 
+var connectUseCmd = &cobra.Command{
+	Use:          "use <name>",
+	Short:        "Use a host's memory FROM this machine (consumer direction; works through NAT)",
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE:         runConnectUse,
+}
+
 // connect add — flag-driven, non-interactive add used by the TUI Remote tab.
 // The TUI collects the form natively, then runs this; the only terminal prompt
 // is the SSH password during first-time key install (ssh reads it from /dev/tty).
@@ -641,6 +651,7 @@ func init() {
 	connectCmd.AddCommand(connectRemoveCmd)
 	connectCmd.AddCommand(connectTestCmd)
 	connectCmd.AddCommand(connectPrintCmd)
+	connectCmd.AddCommand(connectUseCmd)
 	connectCmd.AddCommand(connectAddCmd)
 
 	rootCmd.AddCommand(connectCmd)
@@ -853,6 +864,32 @@ func runConnectPrint(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("remote profile %q not found", name)
 	}
 	fmt.Printf(`{"mcpServers":{"auxly-memory":{"command":"auxly","args":["connect-mcp","%s","--provider","claude-code"]}}}`+"\n", name)
+	return nil
+}
+
+// runConnectUse configures THIS machine to USE the host's memory (consumer
+// direction: this machine → host). This works even when the host can't reach
+// back (NAT), because this machine dials out. It injects the connect-mcp launcher
+// into this machine's IDE configs and installs the skills locally.
+func runConnectUse(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	p, ok := findRemote(name)
+	if !ok {
+		return fmt.Errorf("remote profile %q not found", name)
+	}
+	fmt.Printf("🔗 Configuring THIS machine to use %s's memory...\n", connTarget(p))
+	// Confirm the outbound direction works (this machine → host).
+	if _, err := runSSH(p, "auxly", "--version"); err != nil {
+		return fmt.Errorf("can't reach %s from here (`auxly --version` failed): %w", p.Host, err)
+	}
+	fmt.Println("   ✓ Reached the host (this direction works)")
+	injectRemoteConfigs(p.Name)
+	installAuxlySkills(remoteBanner())
+	fmt.Println()
+	fmt.Printf("🎉 This machine now uses %s's memory.\n", connTarget(p))
+	fmt.Println("   • connect-mcp launcher injected into your IDEs/agents")
+	fmt.Println("   • /auxly-* skills installed (shared-vault banner)")
+	fmt.Println("👉 Restart your IDE / agent; /auxly-remote-connect will show the live link.")
 	return nil
 }
 
