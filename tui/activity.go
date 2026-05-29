@@ -238,17 +238,20 @@ func (m activityModel) renderDetailPopup(e audit.Entry) string {
 	lines = append(lines, fmt.Sprintf("  %-12s %s %s (%s)", dim.Render("Agent:"), icon, styledProvider, dim.Render(e.AgentID)))
 	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Trust Level:"), green.Render(e.TrustLevel)))
 	
-	cleanReason := e.Reason
-	if visibleWidth(cleanReason) > 52 {
-		left, _ := splitLineAtVisibleColumn(cleanReason, 49)
-		cleanReason = left + "..."
+	cleanReasonLines := wrapText(e.Reason, 50)
+	for i, rl := range cleanReasonLines {
+		label := ""
+		if i == 0 {
+			label = "Reason:"
+		}
+		lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render(label), lipgloss.NewStyle().Italic(true).Render(rl)))
 	}
-	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Reason:"), lipgloss.NewStyle().Italic(true).Render(cleanReason)))
 	lines = append(lines, "")
 
 	lines = append(lines, dim.Render("  ── Diff Content ──"))
 	
-	fullDiffFormatted := formatDiff(e.Diff)
+	wrappedRawDiff := wrapRawDiffText(e.Diff, 68)
+	fullDiffFormatted := formatDiff(wrappedRawDiff)
 	diffLines := strings.Split(fullDiffFormatted, "\n")
 	
 	maxLines := 10
@@ -264,10 +267,6 @@ func (m activityModel) renderDetailPopup(e audit.Entry) string {
 	
 	for i := startLine; i < endLine; i++ {
 		line := diffLines[i]
-		if visibleWidth(line) > 68 {
-			left, _ := splitLineAtVisibleColumn(line, 65)
-			line = left + "..."
-		}
 		lines = append(lines, "  " + line)
 	}
 	
@@ -518,17 +517,20 @@ func (m auditTrailModel) renderDetailPopup(e audit.Entry) string {
 	lines = append(lines, fmt.Sprintf("  %-12s %s %s (%s)", dim.Render("Agent:"), icon, styledProvider, dim.Render(e.AgentID)))
 	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Action:"), green.Render(e.Action)))
 	
-	cleanReason := e.Reason
-	if visibleWidth(cleanReason) > 52 {
-		left, _ := splitLineAtVisibleColumn(cleanReason, 49)
-		cleanReason = left + "..."
+	cleanReasonLines := wrapText(e.Reason, 50)
+	for i, rl := range cleanReasonLines {
+		label := ""
+		if i == 0 {
+			label = "Reason:"
+		}
+		lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render(label), lipgloss.NewStyle().Italic(true).Render(rl)))
 	}
-	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Reason:"), lipgloss.NewStyle().Italic(true).Render(cleanReason)))
 	lines = append(lines, "")
 
 	lines = append(lines, dim.Render("  ── Diff Content ──"))
 	
-	fullDiffFormatted := formatDiff(e.Diff)
+	wrappedRawDiff := wrapRawDiffText(e.Diff, 68)
+	fullDiffFormatted := formatDiff(wrappedRawDiff)
 	diffLines := strings.Split(fullDiffFormatted, "\n")
 	
 	maxLines := 10
@@ -544,10 +546,6 @@ func (m auditTrailModel) renderDetailPopup(e audit.Entry) string {
 	
 	for i := startLine; i < endLine; i++ {
 		line := diffLines[i]
-		if visibleWidth(line) > 68 {
-			left, _ := splitLineAtVisibleColumn(line, 65)
-			line = left + "..."
-		}
 		lines = append(lines, "  " + line)
 	}
 	
@@ -870,4 +868,53 @@ func formatDiff(diffText string) string {
 		}
 	}
 	return strings.Join(formatted, "\n")
+}
+
+func wrapRawDiffText(diffText string, width int) string {
+	diffText = strings.ReplaceAll(diffText, " [+] ", "\n[+] ")
+	diffText = strings.ReplaceAll(diffText, " [-] ", "\n[-] ")
+	diffText = strings.ReplaceAll(diffText, " + [+] ", "\n[+] ")
+	diffText = strings.ReplaceAll(diffText, " + [-] ", "\n[-] ")
+
+	rawLines := strings.Split(diffText, "\n")
+	var wrappedLines []string
+	for _, rl := range rawLines {
+		wrappedLines = append(wrappedLines, wrapDiffLine(rl, width)...)
+	}
+	return strings.Join(wrappedLines, "\n")
+}
+
+func wrapDiffLine(line string, width int) []string {
+	if len(line) <= width {
+		return []string{line}
+	}
+	var chunks []string
+	prefix := ""
+	cleanLine := line
+	if strings.HasPrefix(line, "+") {
+		prefix = "+"
+		cleanLine = strings.TrimPrefix(line, "+")
+	} else if strings.HasPrefix(line, "-") {
+		prefix = "-"
+		cleanLine = strings.TrimPrefix(line, "-")
+	} else if strings.HasPrefix(line, " ") {
+		prefix = " "
+		cleanLine = strings.TrimPrefix(line, " ")
+	}
+
+	runes := []rune(cleanLine)
+	for len(runes) > 0 {
+		limit := width - 4
+		if limit > len(runes) {
+			limit = len(runes)
+		}
+		chunk := string(runes[:limit])
+		if len(chunks) == 0 {
+			chunks = append(chunks, prefix + chunk)
+		} else {
+			chunks = append(chunks, "   " + chunk)
+		}
+		runes = runes[limit:]
+	}
+	return chunks
 }
