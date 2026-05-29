@@ -35,6 +35,10 @@ type remoteProfile struct {
 	Port    int      `yaml:"port,omitempty"`
 	Jump    string   `yaml:"jump,omitempty"`
 	SSHArgs []string `yaml:"ssh_args,omitempty"`
+	// MemPath, when set, is passed to the host as `--path` so the remote
+	// mcp-server serves a specific vault folder instead of the host's default
+	// (~/.auxly/memory). Useful when the host stores memory outside $HOME.
+	MemPath string `yaml:"mem_path,omitempty"`
 }
 
 type remotesConfig struct {
@@ -247,6 +251,16 @@ func validateForExec(p remoteProfile) error {
 			return fmt.Errorf("refusing ssh_args entry %q: command-executing ssh options are not allowed in remote profiles", a)
 		}
 	}
+	// MemPath is interpolated into the remote command line (re-parsed by the
+	// host shell), so reject argv-flag smuggling and shell metacharacters.
+	if mp := strings.TrimSpace(p.MemPath); mp != "" {
+		if strings.HasPrefix(mp, "-") {
+			return fmt.Errorf("refusing mem_path %q: must not begin with '-'", mp)
+		}
+		if strings.ContainsAny(mp, " \t\n;|&$`<>(){}*?!\"'\\") {
+			return fmt.Errorf("refusing mem_path %q: must be a plain path with no whitespace or shell metacharacters", mp)
+		}
+	}
 	return nil
 }
 
@@ -431,6 +445,9 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 		"--remote-os", runtime.GOOS,
 		"--remote-host", localHostname(),
 	)
+	if p.MemPath != "" {
+		sshArgs = append(sshArgs, "--path", p.MemPath)
+	}
 
 	launch := exec.Command("ssh", sshArgs...)
 	launch.Stdin = os.Stdin
@@ -493,11 +510,12 @@ var connectPrintCmd = &cobra.Command{
 // The TUI collects the form natively, then runs this; the only terminal prompt
 // is the SSH password during first-time key install (ssh reads it from /dev/tty).
 var (
-	addName   string
-	addMethod string
-	addHost   string
-	addJump   string
-	addBatch  bool
+	addName    string
+	addMethod  string
+	addHost    string
+	addJump    string
+	addMemPath string
+	addBatch   bool
 )
 
 // keyAuthWorks reports whether key-based SSH auth to the host already succeeds.
@@ -520,6 +538,7 @@ func init() {
 	connectAddCmd.Flags().StringVar(&addMethod, "method", "", "reachability: lan|vpn|bastion|public")
 	connectAddCmd.Flags().StringVar(&addHost, "host", "", "[user@]host[:port] of the memory host")
 	connectAddCmd.Flags().StringVar(&addJump, "jump", "", "jump host ([user@]host) for the bastion method")
+	connectAddCmd.Flags().StringVar(&addMemPath, "mem-path", "", "host memory folder to serve (passed as --path; default: host's ~/.auxly/memory)")
 	connectAddCmd.Flags().BoolVar(&addBatch, "batch", false, "non-interactive: never prompt for an SSH password (fail fast if key auth is missing)")
 
 	connectCmd.AddCommand(connectListCmd)
@@ -551,7 +570,7 @@ func runConnectAdd(cmd *cobra.Command, args []string) error {
 			method = "lan"
 		}
 	}
-	p := remoteProfile{Name: name, Method: method, User: user, Host: host, Port: port, Jump: addJump}
+	p := remoteProfile{Name: name, Method: method, User: user, Host: host, Port: port, Jump: addJump, MemPath: addMemPath}
 
 	if addBatch {
 		// Batch mode (the TUI runs the doctor captured in-pane): never block on a
