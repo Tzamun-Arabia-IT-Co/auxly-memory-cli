@@ -257,12 +257,18 @@ func (l *Logger) tailFileFallback(n int) ([]Entry, error) {
 
 // Stats returns aggregate statistics from audit.db.
 type Stats struct {
-	TotalEntries        int
+	TotalEntries        int // writes only (kept for back-compat)
 	WritesToday         int
 	ByProvider          map[string]int
 	ByAction            map[string]int
 	PendingCount        int
 	TotalLogsByProvider map[string]int
+	// Enriched metrics for the Analytics view.
+	TotalActivity int    // all entries, any action
+	ReadCount     int    // action = 'read'
+	LocalWrites   int    // writes attributed to the local machine
+	RemoteWrites  int    // writes attributed to an ssh-remote agent
+	LastWriteTime string // RFC3339 timestamp of the most recent write ("" if none)
 }
 
 func (l *Logger) Stats() (*Stats, error) {
@@ -315,6 +321,20 @@ func (l *Logger) Stats() (*Stats, error) {
 			stats.ByAction[action] = count
 		}
 	}
+
+	// Total activity (all actions).
+	l.db.QueryRow("SELECT COUNT(*) FROM audit_entries").Scan(&stats.TotalActivity)
+
+	// Reads.
+	l.db.QueryRow("SELECT COUNT(*) FROM audit_entries WHERE action = 'read'").Scan(&stats.ReadCount)
+
+	// Local vs ssh-remote writes (uses the source attribution column; pre-migration
+	// rows have NULL/'' source and count as local).
+	l.db.QueryRow("SELECT COUNT(*) FROM audit_entries WHERE action = 'write' AND COALESCE(source,'') = 'ssh-remote'").Scan(&stats.RemoteWrites)
+	stats.LocalWrites = stats.TotalEntries - stats.RemoteWrites
+
+	// Most recent write timestamp.
+	l.db.QueryRow("SELECT COALESCE(MAX(timestamp),'') FROM audit_entries WHERE action = 'write'").Scan(&stats.LastWriteTime)
 
 	return stats, nil
 }

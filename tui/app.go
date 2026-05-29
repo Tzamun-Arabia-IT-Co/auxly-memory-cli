@@ -275,7 +275,7 @@ func (m model) View() string {
 	case screenDiff:
 		content = m.diff.View()
 	case screenAnalytics:
-		content = m.analytics.View()
+		content = m.analytics.View(m.width)
 	case screenSettings:
 		content = m.settings.View()
 	case screenSSH:
