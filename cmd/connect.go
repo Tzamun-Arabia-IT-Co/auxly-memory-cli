@@ -19,8 +19,8 @@ import (
 const (
 	defaultSSHPort     = 22
 	defaultProviderID  = "claude-code"
-	remoteInstallURL   = "https://get.auxly.io/cli"
-	remoteInstallPS    = "https://get.auxly.io/cli.ps1"
+	remoteInstallURL   = "https://auxly.io/cli"
+	remoteInstallPS    = "https://auxly.io/cli.ps1"
 	connectAuditAgent  = "auxly-connect"
 	connectMCPArgsName = "connect-mcp"
 )
@@ -340,7 +340,7 @@ func runDoctor(p remoteProfile) error {
 
 	// 5. Silent OS-aware install on darwin/linux host.
 	fmt.Println("   ⬇ auxly not found on host — installing silently (OS-aware)...")
-	if _, instErr := runSSH(p, "sh", "-c", "'curl -sSL "+remoteInstallURL+" | bash'"); instErr != nil {
+	if _, instErr := runSSH(p, "sh", "-c", "'curl -fsSL "+remoteInstallURL+" | sh'"); instErr != nil {
 		return fmt.Errorf("failed to install auxly on host %s: %w", p.Host, instErr)
 	}
 
