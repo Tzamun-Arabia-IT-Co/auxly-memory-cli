@@ -597,8 +597,7 @@ func runConnectAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("💾 Saved remote profile %q (%s)\n", p.Name, p.Method)
-	injectRemoteConfigs(p.Name)
-	installAuxlySkills(remoteBanner())
+	_ = provisionRemote(p)
 	printConnectSummary(p)
 	return nil
 }
@@ -680,8 +679,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("💾 Saved remote profile %q (%s)\n", p.Name, p.Method)
 
-	injectRemoteConfigs(p.Name)
-	installAuxlySkills(remoteBanner())
+	_ = provisionRemote(p)
 	printConnectSummary(p)
 	return nil
 }
@@ -805,16 +803,54 @@ func injectRemoteConfigs(name string) {
 	}
 }
 
+// provisionRemote turns the freshly-reachable host into a fully Auxly-enabled
+// node. The host already has the binary (the doctor installed it); this runs
+// `auxly setup` ON the host over SSH so the host's OWN binary injects the MCP
+// config and installs the skills into every agent it detects — correctly for
+// the host's own OS and home dir. Honors p.MemPath via the global --path flag
+// so the host serves a specific vault folder. (runSSH validates the profile.)
+func provisionRemote(p remoteProfile) error {
+	fmt.Println("📦 Provisioning the host (installing MCP + skills for its agents)...")
+	remoteCmd := []string{"auxly"}
+	if p.MemPath != "" {
+		remoteCmd = append(remoteCmd, "--path", p.MemPath)
+	}
+	remoteCmd = append(remoteCmd, "setup")
+
+	out, err := runSSH(p, remoteCmd...)
+	if err != nil {
+		fmt.Printf("   ⚠ remote setup failed: %v\n", err)
+		if out != "" {
+			for _, line := range strings.Split(out, "\n") {
+				fmt.Printf("     %s\n", strings.TrimRight(line, "\r"))
+			}
+		}
+		return err
+	}
+	// Echo the host's "configured" lines so the user sees which agents got wired.
+	for _, line := range strings.Split(out, "\n") {
+		l := strings.TrimRight(line, "\r")
+		if strings.Contains(l, "↳") || strings.Contains(l, "Successfully") || strings.Contains(l, "configured") {
+			fmt.Printf("   %s\n", strings.TrimSpace(l))
+		}
+	}
+	fmt.Println("   ✓ Host agents provisioned (skills + MCP installed on the host).")
+	return nil
+}
+
 func printConnectSummary(p remoteProfile) {
 	fmt.Println()
-	fmt.Println("🎉 Remote connection configured!")
+	fmt.Println("🎉 Remote host provisioned!")
 	fmt.Printf("   Profile : %s\n", p.Name)
 	fmt.Printf("   Host    : %s\n", connTarget(p))
 	fmt.Printf("   Method  : %s\n", p.Method)
-	fmt.Println("   • MCP configs injected for detected IDEs/agents")
-	fmt.Println("   • Auxly skills installed (shared-vault banner)")
+	fmt.Println("   • auxly binary installed on the host")
+	fmt.Println("   • MCP + skills installed for the host's own agents")
+	if p.MemPath != "" {
+		fmt.Printf("   • Memory vault on host: %s\n", p.MemPath)
+	}
 	fmt.Println()
-	fmt.Println("👉 Please restart your IDE / agent to load the remote memory connection.")
+	fmt.Println("👉 Restart the agents ON THE HOST to load Auxly's tools and /auxly-* skills.")
 }
 
 // ---------------------------------------------------------------------------
