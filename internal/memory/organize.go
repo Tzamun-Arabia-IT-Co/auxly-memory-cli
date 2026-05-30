@@ -157,13 +157,17 @@ Follow these strict principles:
 			model = "gemini-1.5-flash"
 		} else if os.Getenv("OLLAMA_HOST") != "" {
 			apiURL = os.Getenv("OLLAMA_HOST") + "/v1/chat/completions"
+		} else if base := strings.TrimRight(os.Getenv("AUXLY_LLM_BASE"), "/"); base != "" {
+			// Any OpenAI-compatible endpoint (vLLM, LM Studio, a gateway, etc.).
+			apiURL = base + "/v1/chat/completions"
 		} else {
-			// Try TzamunAI default local ip if running on the GCC machine network
+			// Last resort: probe a local OpenAI-compatible server on the
+			// conventional localhost port (vLLM / LM Studio default). Stays on
+			// the loopback interface — never reaches out to the network.
 			client := &http.Client{Timeout: 800 * time.Millisecond}
-			if resp, err := client.Get("http://192.168.1.141:8000/v1/models"); err == nil {
+			if resp, err := client.Get("http://localhost:8000/v1/models"); err == nil {
 				resp.Body.Close()
-				apiURL = "http://192.168.1.141:8000/v1/chat/completions"
-				model = "qwen2.5-7b-instruct"
+				apiURL = "http://localhost:8000/v1/chat/completions"
 			}
 		}
 
@@ -297,7 +301,7 @@ Follow these strict principles:
 		}
 		oldContent, _ := s.View(rf.Name)
 		_ = s.WriteScoped(cleanedName, rf.Content, scope)
-		
+
 		fileDiff := generateDiff(cleanedName, oldContent, rf.Content)
 		if fileDiff != "" {
 			diffBuilder.WriteString(fileDiff + "\n")
@@ -372,7 +376,7 @@ Follow these strict principles:
 
 	userPrompt := fmt.Sprintf("Here is the current memory vault contents to organize:\n\n%s", vaultPayload.String())
 	fullPrompt := fmt.Sprintf("%s\n\n%s", systemPrompt, userPrompt)
-	
+
 	apiURL := strings.TrimRight(endpoint, "/")
 	if !strings.HasSuffix(apiURL, "/v1/chat/completions") && !strings.HasSuffix(apiURL, "/chat/completions") {
 		apiURL = apiURL + "/v1/chat/completions"
@@ -450,7 +454,7 @@ Follow these strict principles:
 	llmJSONContent = strings.TrimPrefix(llmJSONContent, "```")
 	llmJSONContent = strings.TrimSuffix(llmJSONContent, "```")
 	jsonContent := strings.TrimSpace(llmJSONContent)
-	
+
 	tokensUsed := chatResp.Usage.TotalTokens
 	if tokensUsed == 0 {
 		tokensUsed = (len(fullPrompt) + len(jsonContent)) / 4
@@ -484,7 +488,7 @@ Follow these strict principles:
 		}
 		oldContent, _ := s.View(rf.Name)
 		_ = s.WriteScoped(cleanedName, rf.Content, scope)
-		
+
 		fileDiff := generateDiff(cleanedName, oldContent, rf.Content)
 		if fileDiff != "" {
 			diffBuilder.WriteString(fileDiff + "\n")
@@ -501,25 +505,25 @@ func generateDiff(filename, oldStr, newStr string) string {
 	}
 	oldLines := strings.Split(oldStr, "\n")
 	newLines := strings.Split(newStr, "\n")
-	
+
 	var diff strings.Builder
 	diff.WriteString(fmt.Sprintf("### 📄 %s\n", filename))
 	diff.WriteString("```diff\n")
-	
+
 	oldMap := make(map[string]bool)
 	for _, l := range oldLines {
 		if strings.TrimSpace(l) != "" {
 			oldMap[strings.TrimSpace(l)] = true
 		}
 	}
-	
+
 	newMap := make(map[string]bool)
 	for _, l := range newLines {
 		if strings.TrimSpace(l) != "" {
 			newMap[strings.TrimSpace(l)] = true
 		}
 	}
-	
+
 	deletedCount := 0
 	for _, l := range oldLines {
 		tr := strings.TrimSpace(l)
@@ -528,7 +532,7 @@ func generateDiff(filename, oldStr, newStr string) string {
 			deletedCount++
 		}
 	}
-	
+
 	addedCount := 0
 	for _, l := range newLines {
 		tr := strings.TrimSpace(l)
@@ -537,7 +541,7 @@ func generateDiff(filename, oldStr, newStr string) string {
 			addedCount++
 		}
 	}
-	
+
 	diff.WriteString("```\n")
 	if deletedCount == 0 && addedCount == 0 {
 		return ""
