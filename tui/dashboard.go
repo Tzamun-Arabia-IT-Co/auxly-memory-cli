@@ -9,6 +9,7 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/session"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/trust"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -25,6 +26,7 @@ type dashboardModel struct {
 	activeProviders  []string
 	recentWrites     []audit.Entry
 	sessions         []agentSession
+	unregistered     int // live mcp-servers running but not in the session registry
 	lastRefresh      time.Time
 	blinkCycle       int
 	animationStarted bool
@@ -47,6 +49,7 @@ type dashboardRefreshMsg struct {
 	activeProviders []string
 	recentWrites    []audit.Entry
 	sessions        []agentSession
+	unregistered    int
 	at              time.Time
 	mcpError        string
 }
@@ -106,13 +109,22 @@ func (m dashboardModel) Refresh() tea.Cmd {
 			recentWrites, _ = m.logger.TailWrites(10)
 		}
 		mcpError := getClaudeMCPError()
+		sessions := gatherSessions()
+		// Reconcile the registry against actually-running servers so the
+		// dashboard can flag agents that are live but not yet reflected
+		// (e.g. started before the session-registry feature).
+		unregistered := len(session.LiveServerPIDs()) - len(sessions)
+		if unregistered < 0 {
+			unregistered = 0
+		}
 		return dashboardRefreshMsg{
 			stats:           stats,
 			pendingCnt:      pendingCnt,
 			trustCfg:        trustCfg,
 			activeProviders: activeProviders,
 			recentWrites:    recentWrites,
-			sessions:        gatherSessions(),
+			sessions:        sessions,
+			unregistered:    unregistered,
 			at:              time.Now(),
 			mcpError:        mcpError,
 		}
@@ -132,6 +144,7 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		m.activeProviders = msg.activeProviders
 		m.recentWrites = msg.recentWrites
 		m.sessions = msg.sessions
+		m.unregistered = msg.unregistered
 		m.lastRefresh = msg.at
 		m.mcpError = msg.mcpError
 		if m.reloaded && time.Since(m.reloadedAt) > 3*time.Second {
@@ -314,7 +327,9 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 				m.activeAgentTab = 0
 			}
 		case "r", "R":
-			_ = touchClaudeConfig()
+			// Force refresh: immediately re-scan the session registry and the
+			// live process table (no waiting for the 1s tick), surfacing any
+			// agent that's running but not yet reflected.
 			m.reloaded = true
 			m.reloadedAt = time.Now()
 			return m, m.Refresh()
@@ -329,6 +344,10 @@ func (m dashboardModel) View() string {
 	clockStr := time.Now().Format("02/01/2006 15:04:05")
 	clockHeader := lipgloss.NewStyle().Foreground(ColorDim).Render("🕒 Time: " + clockStr)
 	headerRow := lipgloss.JoinHorizontal(lipgloss.Top, title, "         ", clockHeader)
+	if m.reloaded {
+		refreshed := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true).Render("   ⟳ Force refreshed")
+		headerRow = lipgloss.JoinHorizontal(lipgloss.Top, headerRow, refreshed)
+	}
 
 	if m.stats == nil {
 		return headerRow + "\n\nLoading dashboard..."
@@ -588,55 +607,72 @@ func (m dashboardModel) renderConnectionsSummary() string {
 	dim := lipgloss.NewStyle().Foreground(ColorDim)
 	teal := lipgloss.NewStyle().Foreground(lipgloss.Color("#73CBAD"))
 	cyan := lipgloss.NewStyle().Foreground(ColorPrimary)
-
-	if len(m.sessions) == 0 {
-		return dim.Render("No active agent sessions")
-	}
-
-	var remotes []agentSession
-	localCount := 0
-	for _, s := range m.sessions {
-		if s.Remote {
-			remotes = append(remotes, s)
-		} else {
-			localCount++
-		}
-	}
+	yellow := lipgloss.NewStyle().Foreground(ColorWarning)
 
 	var sb strings.Builder
-	for _, s := range remotes {
-		host := s.Host
-		if host == "" {
-			host = "remote"
+
+	if len(m.sessions) == 0 {
+		sb.WriteString(dim.Render("No active agent sessions"))
+	} else {
+		var remotes []agentSession
+		localCount := 0
+		for _, s := range m.sessions {
+			if s.Remote {
+				remotes = append(remotes, s)
+			} else {
+				localCount++
+			}
 		}
-		loc := s.IP
-		if loc == "" {
-			loc = "via tunnel"
+
+		for _, s := range remotes {
+			host := s.Host
+			if host == "" {
+				host = "remote"
+			}
+			loc := s.IP
+			if loc == "" {
+				loc = "via tunnel"
+			}
+			osLabel := s.OS
+			if osLabel == "" {
+				osLabel = "?"
+			}
+			sb.WriteString(fmt.Sprintf("%s %s\n   %s\n",
+				teal.Render("●"),
+				cyan.Render(host),
+				dim.Render(fmt.Sprintf("%s · %s · %s", loc, osLabel, s.Provider)),
+			))
 		}
-		osLabel := s.OS
-		if osLabel == "" {
-			osLabel = "?"
+
+		if localCount > 0 {
+			label := "local agent"
+			if localCount != 1 {
+				label += "s"
+			}
+			sb.WriteString(fmt.Sprintf("%s %s",
+				teal.Render("●"),
+				dim.Render(fmt.Sprintf("%d %s on this machine", localCount, label)),
+			))
+		} else {
+			// Drop the trailing newline left by the remote block.
+			trimmed := strings.TrimRight(sb.String(), "\n")
+			sb.Reset()
+			sb.WriteString(trimmed)
 		}
-		sb.WriteString(fmt.Sprintf("%s %s\n   %s",
-			teal.Render("●"),
-			cyan.Render(host),
-			dim.Render(fmt.Sprintf("%s · %s · %s", loc, osLabel, s.Provider)),
-		))
-		sb.WriteString("\n")
 	}
 
-	if localCount > 0 {
-		label := "local agent"
-		if localCount != 1 {
+	// Surface servers that are running but haven't registered a session
+	// (e.g. started before this build) so the force-refresh "shows" them.
+	if m.unregistered > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		label := "server"
+		if m.unregistered != 1 {
 			label += "s"
 		}
-		sb.WriteString(fmt.Sprintf("%s %s",
-			teal.Render("●"),
-			dim.Render(fmt.Sprintf("%d %s on this machine", localCount, label)),
-		))
-	} else {
-		// Trim trailing newline left by the remote block.
-		return strings.TrimRight(sb.String(), "\n")
+		sb.WriteString(yellow.Render(fmt.Sprintf("⚠ %d %s running, unregistered", m.unregistered, label)))
+		sb.WriteString("\n  " + dim.Render("press [r], then reconnect to attribute"))
 	}
 
 	return sb.String()

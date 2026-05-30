@@ -323,7 +323,7 @@ func (m model) renderFooter() string {
 		if m.dashboard.selectedAgent != "" {
 			footerText = "Tab: Switch popup tabs • Esc: Close popup • q: Quit"
 		} else {
-			footerText = "j/k/h/l: Navigate cards • Enter: Configure • r: Force-Restart MCP • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+			footerText = "j/k/h/l: Navigate cards • Enter: Configure • r: Force refresh (rescan agents) • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 		}
 	case screenActivity:
 		if m.activity.viewingDetail {
