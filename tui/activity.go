@@ -15,6 +15,19 @@ import (
 // 1. New Activity Model (Strictly Writes)
 // ==========================================
 
+// diffMaxScroll returns the maximum scroll offset for a diff-detail popup,
+// computed from the SAME wrapped + formatted lines the View renders (width 68,
+// 10-line window) so the scroll handler and the View never disagree. The old
+// code measured the unwrapped diff (fewer lines) minus 6, which clamped scroll
+// to 0 for long single-line entries — making arrows and the wheel do nothing.
+func diffMaxScroll(diff string) int {
+	diffLines := strings.Split(formatDiff(wrapRawDiffText(diff, 68)), "\n")
+	if max := len(diffLines) - 10; max > 0 {
+		return max
+	}
+	return 0
+}
+
 type activityModel struct {
 	logger        *audit.Logger
 	entries       []audit.Entry
@@ -123,8 +136,7 @@ func (m activityModel) Update(msg tea.Msg) (activityModel, tea.Cmd) {
 			}
 		} else if msg.Type == tea.MouseWheelDown {
 			if m.viewingDetail {
-				lines := strings.Split(formatDiff(m.entries[m.cursor].Diff), "\n")
-				maxScroll := len(lines) - 6
+				maxScroll := diffMaxScroll(m.entries[m.cursor].Diff)
 				if maxScroll < 0 {
 					maxScroll = 0
 				}
@@ -144,8 +156,7 @@ func (m activityModel) Update(msg tea.Msg) (activityModel, tea.Cmd) {
 				m.viewingDetail = false
 				m.detailScrollY = 0
 			case "j", "down":
-				lines := strings.Split(formatDiff(m.entries[m.cursor].Diff), "\n")
-				maxScroll := len(lines) - 6
+				maxScroll := diffMaxScroll(m.entries[m.cursor].Diff)
 				if maxScroll < 0 {
 					maxScroll = 0
 				}
@@ -423,8 +434,7 @@ func (m auditTrailModel) Update(msg tea.Msg) (auditTrailModel, tea.Cmd) {
 			}
 		} else if msg.Type == tea.MouseWheelDown {
 			if m.viewingDetail {
-				lines := strings.Split(formatDiff(m.entries[m.cursor].Diff), "\n")
-				maxScroll := len(lines) - 6
+				maxScroll := diffMaxScroll(m.entries[m.cursor].Diff)
 				if maxScroll < 0 {
 					maxScroll = 0
 				}
@@ -444,8 +454,7 @@ func (m auditTrailModel) Update(msg tea.Msg) (auditTrailModel, tea.Cmd) {
 				m.viewingDetail = false
 				m.detailScrollY = 0
 			case "j", "down":
-				lines := strings.Split(formatDiff(m.entries[m.cursor].Diff), "\n")
-				maxScroll := len(lines) - 6
+				maxScroll := diffMaxScroll(m.entries[m.cursor].Diff)
 				if maxScroll < 0 {
 					maxScroll = 0
 				}
