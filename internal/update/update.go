@@ -11,11 +11,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// versionRe matches a bare semver-ish string ("1", "1.2", "1.2.3", "v1.2.3",
+// "1.2.3-rc1"). It guards against an endpoint that returns HTML/JSON/404 pages
+// (e.g. a SPA serving index.html for an unknown /version path).
+var versionRe = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+){0,3}([-+][0-9A-Za-z.]+)?$`)
 
 // Current is the running build version, injected at release time via
 //
@@ -51,7 +57,20 @@ func Latest() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(body)), "v")), nil
+	v := strings.TrimSpace(string(body))
+	if !versionRe.MatchString(v) {
+		// Not a version — almost certainly an HTML/404 page from a host that
+		// doesn't serve /version yet. Treat as "no version published".
+		return "", fmt.Errorf("version check: unexpected response %q", truncate(v, 24))
+	}
+	return strings.TrimPrefix(v, "v"), nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
 
 // IsNewer reports whether version `latest` is strictly greater than `current`,
@@ -61,7 +80,9 @@ func IsNewer(latest, current string) bool {
 	la := parse(latest)
 	cu := parse(current)
 	if la == nil || cu == nil {
-		return latest != "" && latest != current
+		// Unparseable input is never treated as a newer version — prevents a
+		// stray/garbage string from triggering a false "update available".
+		return false
 	}
 	for i := 0; i < len(la) && i < len(cu); i++ {
 		if la[i] != cu[i] {

@@ -38,24 +38,24 @@ type settingsModel struct {
 	height                int
 
 	// Custom Local AI Popup State
-	configuringCustom     bool
-	customURL             string
-	customModels          []string
-	customModelIdx        int
-	fetchingModels        bool
-	customError           string
-	selectedCustomModel   string
-	selectedCustomURL     string
+	configuringCustom   bool
+	customURL           string
+	customModels        []string
+	customModelIdx      int
+	fetchingModels      bool
+	customError         string
+	selectedCustomModel string
+	selectedCustomURL   string
 
 	// Organize Diff Popup State
-	organizeDiff          string
-	showingDiff           bool
-	diffScrollY           int
+	organizeDiff string
+	showingDiff  bool
+	diffScrollY  int
 
 	// Persistent Stats State
-	lastRun               string
-	lastTokensUsed        int
-	confirmingRun         bool
+	lastRun        string
+	lastTokensUsed int
+	confirmingRun  bool
 }
 
 type organizeStats struct {
@@ -167,7 +167,10 @@ func (m settingsModel) getCLIAgents() []detect.Agent {
 	seen := make(map[string]bool)
 	for _, a := range m.agents {
 		isCLI := strings.Contains(a.Name, "CLI") || strings.Contains(a.Name, "Code") || a.Connection == "MCP+Shell" || a.Connection == "Shell"
-		if isCLI && !strings.HasSuffix(a.Path, ".json") && !strings.HasSuffix(a.Path, ".toml") {
+		// Only offer agents with a real runnable executable — organization
+		// fork/execs this, so a config dir/file (e.g. ~/.gemini/antigravity-cli)
+		// must never be selectable.
+		if isCLI && a.Command != "" {
 			if seen[a.Provider] {
 				continue
 			}
@@ -217,7 +220,7 @@ func (m settingsModel) runOrganize() tea.Cmd {
 			res = m.store.OrganizeVaultWithCustom(endpoint, model)
 		} else if m.selectedOrganizeAgent >= 0 && m.selectedOrganizeAgent < len(cliAgents) {
 			target := cliAgents[m.selectedOrganizeAgent]
-			res = m.store.OrganizeVaultWithAgent(target.Name, target.Path)
+			res = m.store.OrganizeVaultWithAgent(target.Name, target.Command)
 		} else {
 			res = m.store.OrganizeVaultWithAgent("Direct LLM", "")
 		}
@@ -369,7 +372,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 					if providerIdx != -1 {
 						m.cursor = providerIdx + 1
 					}
-					
+
 					if m.trust.Providers == nil {
 						m.trust.Providers = make(map[string]map[string]string)
 					}
@@ -568,14 +571,14 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 
 func (m *settingsModel) cycleOrganizeAgent(dir int) {
 	cliAgents := m.getCLIAgents()
-	
+
 	if len(cliAgents) == 0 {
 		m.selectedOrganizeAgent = -2
 		return
 	}
-	
+
 	m.selectedOrganizeAgent += dir
-	
+
 	if m.selectedOrganizeAgent == -1 {
 		if dir > 0 {
 			m.selectedOrganizeAgent = 0
@@ -583,7 +586,7 @@ func (m *settingsModel) cycleOrganizeAgent(dir int) {
 			m.selectedOrganizeAgent = -2
 		}
 	}
-	
+
 	if m.selectedOrganizeAgent < -2 {
 		m.selectedOrganizeAgent = len(cliAgents) - 1
 	} else if m.selectedOrganizeAgent >= len(cliAgents) {
@@ -664,7 +667,7 @@ func (m settingsModel) View() string {
 	if defaultTrust == "" {
 		defaultTrust = "require_approval"
 	}
-	
+
 	// Pad fields correctly accounting for ANSI escape sequences
 	defaultTrustRow := fmt.Sprintf("%s%-18s %s",
 		cursorDefault,
@@ -865,16 +868,16 @@ func (m settingsModel) View() string {
 		if m.fetchingModels {
 			urlColor = yellow
 		}
-		pb.WriteString(urlColor.Render("  " + m.customURL) + "\n\n")
+		pb.WriteString(urlColor.Render("  "+m.customURL) + "\n\n")
 
 		if m.fetchingModels {
 			pb.WriteString(yellow.Render(" ⏳ Querying available models from endpoint...") + "\n\n")
 		} else if m.customError != "" {
-			pb.WriteString(red.Render(" ⚠️ Error: " + m.customError) + "\n\n")
+			pb.WriteString(red.Render(" ⚠️ Error: "+m.customError) + "\n\n")
 		} else if len(m.customModels) > 0 {
 			pb.WriteString(green.Render(" ✓ Successfully loaded ") + bold.Render(fmt.Sprintf("%d models", len(m.customModels))) + ":\n")
 			pb.WriteString(dim.Render(" (Use Up/Down arrows to select model & Enter to save)") + "\n\n")
-			
+
 			start := m.customModelIdx - 1
 			if start < 0 {
 				start = 0
@@ -923,10 +926,10 @@ func (m settingsModel) View() string {
 		pb.WriteString(bold.Render("🎉 Memory Vault Organization Results") + "\n")
 		pb.WriteString(dim.Render("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n\n")
 		pb.WriteString(green.Render(" ✓ Deduplication & Consolidation Summary:") + "\n\n")
-		
+
 		lines := strings.Split(m.organizeDiff, "\n")
 		viewportHeight := 12
-		
+
 		if m.diffScrollY < 0 {
 			m.diffScrollY = 0
 		}
@@ -975,9 +978,9 @@ func (m settingsModel) View() string {
 		var pb strings.Builder
 		pb.WriteString(bold.Render("🤔 Confirm Memory Vault Organization") + "\n")
 		pb.WriteString(dim.Render("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n\n")
-		
+
 		pb.WriteString("Are you sure you want to run memory optimization?\n\n")
-		
+
 		agentStr := "[ Local LLM / Direct API ]"
 		cliAgents := m.getCLIAgents()
 		if m.selectedOrganizeAgent == -2 {
@@ -989,15 +992,15 @@ func (m settingsModel) View() string {
 		} else if m.selectedOrganizeAgent >= 0 && m.selectedOrganizeAgent < len(cliAgents) {
 			agentStr = cliAgents[m.selectedOrganizeAgent].Name
 		}
-		
+
 		pb.WriteString(fmt.Sprintf("%-18s %s\n", dim.Render("Target Agent:"), bold.Render(agentStr)))
-		
+
 		estCost := m.store.GetEstimatedTokens()
 		pb.WriteString(fmt.Sprintf("%-18s %s\n\n", dim.Render("Est. Token Cost:"), bold.Render(fmt.Sprintf("~%d tokens", estCost))))
-		
+
 		pb.WriteString(dim.Render("This will scan all files, de-duplicate chronological") + "\n")
 		pb.WriteString(dim.Render("facts, and consolidate them into structured summaries.") + "\n\n")
-		
+
 		pb.WriteString(bold.Render("  [Y] Yes, Run") + "   " + dim.Render("[N] Cancel") + "\n\n")
 		pb.WriteString(dim.Render(" Press [Y] or [Enter] to run, [N] or [Esc] to cancel"))
 

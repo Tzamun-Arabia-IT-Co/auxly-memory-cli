@@ -94,6 +94,15 @@ Follow these strict principles:
 
 	// 2. Route Execution based on agentPath presence
 	if agentPath != "" {
+		// Guard: only fork/exec an actual executable file. A config directory
+		// (e.g. ~/.gemini/antigravity-cli) would fail with a cryptic
+		// "permission denied"; fail clearly instead.
+		if fi, statErr := os.Stat(agentPath); statErr != nil {
+			return OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s is not runnable: %v", agentName, statErr)}
+		} else if fi.IsDir() {
+			return OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s path is a directory, not an executable: %s", agentName, agentPath)}
+		}
+
 		// Run via CLI command (Claude Code, Gemini CLI, etc.)
 		var cmd *exec.Cmd
 		provider := strings.ToLower(agentName)

@@ -7,9 +7,15 @@ import (
 )
 
 type Agent struct {
-	Name       string
-	Provider   string
-	Path       string
+	Name     string
+	Provider string
+	// Path is where the agent was detected: a config file/dir if one exists,
+	// otherwise the resolved binary. Use it to know an agent is installed — NOT
+	// to execute it (a config dir is not runnable).
+	Path string
+	// Command is the resolved executable on PATH (empty if none). This is the
+	// only field safe to fork/exec — e.g. for on-demand memory organization.
+	Command    string
 	Connection string
 }
 
@@ -49,35 +55,39 @@ func InstalledAgents() []Agent {
 	}
 
 	for _, c := range checks {
-		found := false
-		foundPath := ""
-
+		configPath := ""
 		for _, p := range c.paths {
 			if _, err := os.Stat(p); err == nil {
-				found = true
-				foundPath = p
+				configPath = p
 				break
 			}
 		}
 
-		if !found {
-			for _, b := range c.binaries {
-				if p, err := exec.LookPath(b); err == nil {
-					found = true
-					foundPath = p
-					break
-				}
+		// Always resolve the runnable binary too — independent of config-path
+		// detection — so an agent detected only by its config dir still exposes
+		// an executable Command (or none, if the CLI isn't on PATH).
+		command := ""
+		for _, b := range c.binaries {
+			if p, err := exec.LookPath(b); err == nil {
+				command = p
+				break
 			}
 		}
 
-		if found {
-			agents = append(agents, Agent{
-				Name:       c.name,
-				Provider:   c.provider,
-				Path:       foundPath,
-				Connection: c.connection,
-			})
+		if configPath == "" && command == "" {
+			continue
 		}
+		path := configPath
+		if path == "" {
+			path = command
+		}
+		agents = append(agents, Agent{
+			Name:       c.name,
+			Provider:   c.provider,
+			Path:       path,
+			Command:    command,
+			Connection: c.connection,
+		})
 	}
 
 	return agents
