@@ -420,10 +420,12 @@ func (m dashboardModel) View() string {
 			trustBadge = dim.Render("read-only")
 		}
 
+		// "active" = a live MCP session exists for this brand right now
+		// (ground truth from the session registry), not a stale audit guess.
 		isActive := false
-		for _, ap := range m.activeProviders {
-			if ap == b.id ||
-				(b.id == "antigravity" && (ap == "antigravity" || ap == "antigravity-ide" || ap == "antigravity-agent" || ap == "antigravity-cli")) {
+		for _, sess := range m.sessions {
+			if sess.Provider == b.id ||
+				(b.id == "antigravity" && strings.HasPrefix(sess.Provider, "antigravity")) {
 				isActive = true
 				break
 			}

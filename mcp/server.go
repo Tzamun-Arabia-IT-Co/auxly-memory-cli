@@ -19,6 +19,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/session"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/trust"
 )
 
@@ -143,11 +144,25 @@ func (s *Server) RunStream(in io.Reader, out io.Writer) error {
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
+	// Register this live session so the TUI can attribute connections exactly
+	// (the server knows its own provider/source — no external guessing needed).
+	pid := os.Getpid()
+	_ = session.Write(session.Record{
+		PID:        pid,
+		Provider:   s.resolveProvider(),
+		Source:     s.sourceMeta.Source,
+		RemoteHost: s.sourceMeta.RemoteHost,
+		RemoteOS:   s.sourceMeta.RemoteOS,
+		RemoteIP:   s.sourceMeta.RemoteIP,
+	})
+	defer session.Remove(pid)
+
 	// Set up signal channel to handle graceful shutdown and log disconnect on SIGTERM/SIGINT
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
+		session.Remove(pid)
 		s.logActivity("", "disconnect", "")
 		os.Exit(0)
 	}()
@@ -510,6 +525,19 @@ func getAncestorProcesses() []string {
 	return ancestors
 }
 
+// resolveProvider determines this server's provider from its own environment
+// first (authoritative — set by the IDE config or the --provider launcher flag),
+// then parent-process inference, defaulting to "claude".
+func (s *Server) resolveProvider() string {
+	if p := strings.TrimSpace(os.Getenv("AUXLY_PROVIDER")); p != "" {
+		return p
+	}
+	if p := getProviderFromParent(); p != "" {
+		return p
+	}
+	return "claude"
+}
+
 func getProviderFromParent() string {
 	ancestors := getAncestorProcesses()
 	if len(ancestors) == 0 {
@@ -536,7 +564,7 @@ func getProviderFromParent() string {
 		if strings.Contains(pathLower, "antigravity.app") || strings.Contains(pathLower, "/applications/antigravity") || strings.Contains(baseLower, "antigravity-agent") {
 			return "antigravity-agent"
 		}
-		if strings.Contains(pathLower, "antigravity-cli") || strings.Contains(baseLower, "antigravity-cli") || strings.Contains(baseLower, "antigravity") || strings.Contains(baseLower, "auxly") {
+		if strings.Contains(pathLower, "antigravity-cli") || strings.Contains(baseLower, "antigravity-cli") || strings.Contains(baseLower, "antigravity") {
 			return "antigravity-cli"
 		}
 		if strings.Contains(pathLower, "gemini") || strings.Contains(baseLower, "gemini") {
