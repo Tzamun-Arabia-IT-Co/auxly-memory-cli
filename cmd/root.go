@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/config"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/tui"
 	"github.com/spf13/cobra"
 )
@@ -36,10 +37,44 @@ Supports Claude, Claude Code, Codex, Gemini, Copilot, Antigravity, and any CLI-b
 }
 
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
+	err := rootCmd.Execute()
+	notifyUpdateAvailable()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// notifyUpdateAvailable prints a one-line "update available" notice to stderr
+// after an interactive command. It is suppressed for machine/stream commands
+// (mcp-server, connect-mcp) whose output must stay clean, for `update`/`version`
+// themselves, and when stderr is not a terminal.
+func notifyUpdateAvailable() {
+	if !updateNoticeEligible() {
+		return
+	}
+	latest, ok := update.Available()
+	if !ok {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"\n\033[38;5;220m⬆ auxly %s is available\033[0m (you have %s) — run \033[1mauxly update\033[0m\n",
+		latest, update.Current)
+}
+
+func updateNoticeEligible() bool {
+	for _, a := range os.Args[1:] {
+		switch a {
+		case "mcp-server", "connect-mcp", "update", "version", "completion",
+			"--version", "-v", "host", "connect":
+			return false
+		}
+	}
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 func init() {
@@ -48,8 +83,8 @@ func init() {
 	rootCmd.SilenceUsage = true
 	rootCmd.SilenceErrors = true
 	rootCmd.PersistentFlags().StringVar(&cfgPath, "path", "", "Override memory folder path (default: ~/.auxly/memory/)")
-	rootCmd.Version = "1.0.0"
-	rootCmd.SetVersionTemplate("\r\n🧠 Auxly-Memory CLI Version: 1.0.0\r\n   ↳ Platform: stdio-native\r\n   ↳ Revision: release-v1.0.0\r\n\r\n")
+	rootCmd.Version = update.Current
+	rootCmd.SetVersionTemplate("\r\n🧠 Auxly-Memory CLI Version: {{.Version}}\r\n   ↳ Platform: stdio-native\r\n   ↳ Revision: release-v{{.Version}}\r\n\r\n")
 	rootCmd.SetHelpFunc(customHelpFunc)
 	rootCmd.SetUsageFunc(func(cmd *cobra.Command) error {
 		customHelpFunc(cmd, nil)

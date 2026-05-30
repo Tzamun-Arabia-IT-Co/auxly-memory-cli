@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -211,7 +212,7 @@ func provisionConsumer(hc hostConfig) error {
 
 	// 1. Install / update auxly on the box.
 	fmt.Println("📦 Installing/updating auxly on the remote box...")
-	if out, ierr := runSSH(relay, "sh", "-c", shellQuote("curl -fsSL "+installBaseURL()+"/cli | sh")); ierr != nil {
+	if out, ierr := runSSH(relay, "sh", "-c", shellQuote("curl -fsSL "+update.BaseURL()+"/cli | sh")); ierr != nil {
 		fmt.Printf("   ⚠ remote install failed: %v\n   %s\n", ierr, firstLine(out))
 		return ierr
 	}

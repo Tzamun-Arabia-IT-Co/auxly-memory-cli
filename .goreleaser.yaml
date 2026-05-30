@@ -15,7 +15,7 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update.Current={{.Version}}
 
   # Windows host build (amd64 + arm64). go-sqlite3 needs CGO, so cross-compiling
   # to Windows requires a Windows C toolchain on the release runner. We use
@@ -42,7 +42,7 @@ builds:
         env:
           - CC=aarch64-w64-mingw32-clang
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update.Current={{.Version}}
 
 archives:
   - id: default

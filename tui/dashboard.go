@@ -11,6 +11,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/session"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/trust"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
@@ -27,6 +28,10 @@ type dashboardModel struct {
 	recentWrites     []audit.Entry
 	sessions         []agentSession
 	unregistered     int // live mcp-servers running but not in the session registry
+	updateAvail      bool
+	updateLatest     string
+	updating         bool
+	updateResult     string
 	lastRefresh      time.Time
 	blinkCycle       int
 	animationStarted bool
@@ -50,8 +55,16 @@ type dashboardRefreshMsg struct {
 	recentWrites    []audit.Entry
 	sessions        []agentSession
 	unregistered    int
+	updateAvail     bool
+	updateLatest    string
 	at              time.Time
 	mcpError        string
+}
+
+// dashboardUpdateDoneMsg carries the result of a one-click [u] self-update.
+type dashboardUpdateDoneMsg struct {
+	path string
+	err  error
 }
 
 type dashboardTickMsg struct{}
@@ -117,6 +130,7 @@ func (m dashboardModel) Refresh() tea.Cmd {
 		if unregistered < 0 {
 			unregistered = 0
 		}
+		latest, updateAvail := update.Available()
 		return dashboardRefreshMsg{
 			stats:           stats,
 			pendingCnt:      pendingCnt,
@@ -125,6 +139,8 @@ func (m dashboardModel) Refresh() tea.Cmd {
 			recentWrites:    recentWrites,
 			sessions:        sessions,
 			unregistered:    unregistered,
+			updateAvail:     updateAvail,
+			updateLatest:    latest,
 			at:              time.Now(),
 			mcpError:        mcpError,
 		}
@@ -145,6 +161,10 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		m.recentWrites = msg.recentWrites
 		m.sessions = msg.sessions
 		m.unregistered = msg.unregistered
+		if !m.updating {
+			m.updateAvail = msg.updateAvail
+			m.updateLatest = msg.updateLatest
+		}
 		m.lastRefresh = msg.at
 		m.mcpError = msg.mcpError
 		if m.reloaded && time.Since(m.reloadedAt) > 3*time.Second {
@@ -165,6 +185,15 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 	case animationTickMsg:
 		m.blinkCycle = (m.blinkCycle + 1) % 24
 		return m, animationTickCmd()
+	case dashboardUpdateDoneMsg:
+		m.updating = false
+		if msg.err != nil {
+			m.updateResult = "✗ Update failed: " + msg.err.Error()
+		} else {
+			m.updateResult = "✅ Updated to v" + m.updateLatest + " — restart auxly to use it"
+			m.updateAvail = false
+		}
+		return m, nil
 	case tea.MouseMsg:
 		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
 			w := m.width
@@ -333,6 +362,16 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			m.reloaded = true
 			m.reloadedAt = time.Now()
 			return m, m.Refresh()
+		case "u", "U":
+			// One-click self-update when a newer release is available.
+			if m.updateAvail && !m.updating {
+				m.updating = true
+				m.updateResult = ""
+				return m, func() tea.Msg {
+					path, err := update.SelfUpdate()
+					return dashboardUpdateDoneMsg{path: path, err: err}
+				}
+			}
 		}
 	}
 	return m, nil
@@ -521,17 +560,45 @@ func (m dashboardModel) View() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(headerRow + "\n\n")
+	b.WriteString(headerRow + "\n")
+	if banner := m.renderUpdateBanner(); banner != "" {
+		b.WriteString(banner + "\n")
+	}
+	b.WriteString("\n")
 	b.WriteString(dashboardContent + "\n\n")
 
-	if m.selectedAgent == "" {
-		b.WriteString(dim.Render("  Use arrow keys or Mouse Clicks to select agent boxes • Enter: open details popup • q: exit TUI"))
-	} else {
+	if m.selectedAgent != "" {
 		b.WriteString(dim.Render("  Popup active: [1/2/3] switch tabs • [Esc] or Click outside to close"))
+	} else {
+		hint := "  Use arrow keys or Mouse Clicks to select agent boxes • Enter: open details popup • q: exit TUI"
+		if m.updateAvail && !m.updating {
+			hint += " • [u] update"
+		}
+		b.WriteString(dim.Render(hint))
 	}
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+// renderUpdateBanner shows the one-click self-update prompt / progress / result.
+func (m dashboardModel) renderUpdateBanner() string {
+	switch {
+	case m.updating:
+		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).
+			Render("  ⏳ Updating auxly…")
+	case m.updateResult != "":
+		color := ColorSuccess
+		if strings.HasPrefix(m.updateResult, "✗") {
+			color = ColorDanger
+		}
+		return lipgloss.NewStyle().Foreground(color).Bold(true).Render("  " + m.updateResult)
+	case m.updateAvail:
+		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).
+			Render(fmt.Sprintf("  ⬆ Update available: v%s (you have v%s) — press [u] to update",
+				m.updateLatest, update.Current))
+	}
+	return ""
 }
 
 // renderConnectedTab writes the "Connected" popup tab for one provider: the
