@@ -221,7 +221,7 @@ func (m activityModel) View() string {
 }
 
 func (m activityModel) renderDetailPopup(e audit.Entry) string {
-	ts, _ := time.Parse(time.RFC3339, e.Timestamp)
+	ts := parseTS(e.Timestamp)
 	cyan := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
 	green := lipgloss.NewStyle().Foreground(ColorSuccess)
 	styledProvider := colorProvider(e.Provider)
@@ -237,6 +237,27 @@ func (m activityModel) renderDetailPopup(e audit.Entry) string {
 	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Timestamp:"), ts.Format("02/01/2006 15:04:05")))
 	lines = append(lines, fmt.Sprintf("  %-12s %s %s (%s)", dim.Render("Agent:"), icon, styledProvider, dim.Render(e.AgentID)))
 	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Trust Level:"), green.Render(e.TrustLevel)))
+
+	// Source line: Local, or Remote with host / IP / OS from the SSH attribution.
+	if e.Source == "ssh-remote" {
+		src := "Remote (SSH)"
+		var meta []string
+		if e.RemoteHost != "" {
+			meta = append(meta, e.RemoteHost)
+		}
+		if e.RemoteIP != "" {
+			meta = append(meta, e.RemoteIP)
+		}
+		if e.RemoteOS != "" {
+			meta = append(meta, e.RemoteOS)
+		}
+		if len(meta) > 0 {
+			src += "  " + dim.Render(strings.Join(meta, " · "))
+		}
+		lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Source:"), lipgloss.NewStyle().Foreground(ColorAccent).Render(src)))
+	} else {
+		lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Source:"), dim.Render("Local")))
+	}
 
 	cleanReasonLines := wrapText(e.Reason, 50)
 	for i, rl := range cleanReasonLines {
@@ -500,7 +521,7 @@ func (m auditTrailModel) View() string {
 }
 
 func (m auditTrailModel) renderDetailPopup(e audit.Entry) string {
-	ts, _ := time.Parse(time.RFC3339, e.Timestamp)
+	ts := parseTS(e.Timestamp)
 	cyan := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
 	green := lipgloss.NewStyle().Foreground(ColorSuccess)
 	styledProvider := colorProvider(e.Provider)
@@ -638,7 +659,7 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 
 	for i := start; i < end; i++ {
 		e := entries[i]
-		ts, _ := time.Parse(time.RFC3339, e.Timestamp)
+		ts := parseTS(e.Timestamp)
 		timeStr := ts.Format("02/01/2006 15:04:05")
 
 		styledAgent := colorProvider(e.Provider)
@@ -700,20 +721,11 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 			actCleanWidth = visibleWidth(stripANSI(summary))
 		}
 
+		// Compact column (13 wide): "Local" or "Remote". The detail popup shows
+		// the full remote host / IP / OS.
 		sourceVal := "Local"
 		if e.Source == "ssh-remote" {
-			var parts []string
-			if e.RemoteIP != "" {
-				parts = append(parts, e.RemoteIP)
-			}
-			if e.RemoteOS != "" {
-				parts = append(parts, e.RemoteOS)
-			}
-			if len(parts) > 0 {
-				sourceVal = "SSH (" + strings.Join(parts, ", ") + ")"
-			} else {
-				sourceVal = "SSH"
-			}
+			sourceVal = "Remote"
 		}
 
 		var rowLine string

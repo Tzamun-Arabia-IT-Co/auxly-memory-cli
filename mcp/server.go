@@ -993,28 +993,71 @@ func (s *Server) toolSkillRemoteConnect() toolResult {
 	sb.WriteString("🔗 **AUXLY REMOTE CONNECTION**\n\n")
 
 	if s.sourceMeta.Source == "ssh-remote" {
-		host := s.sourceMeta.RemoteHost
-		if host == "" {
-			host = "(unknown)"
+		// This handler runs ON the memory host (the machine whose vault is
+		// being served over SSH), so os.Hostname() here is the HOST. The
+		// sourceMeta fields describe the CONNECTED CLIENT (this remote box).
+		memHost, _ := os.Hostname()
+		if memHost == "" {
+			memHost = "(memory host)"
 		}
-		clientIP := s.sourceMeta.RemoteIP
-		if clientIP == "" {
-			clientIP = "(unknown)"
+		client := s.sourceMeta.RemoteHost
+		if client == "" {
+			client = "(this machine)"
 		}
 		remoteOS := s.sourceMeta.RemoteOS
 		if remoteOS == "" {
 			remoteOS = "(unknown)"
 		}
-		sb.WriteString(fmt.Sprintf("• **Host:** %s\n", host))
-		sb.WriteString(fmt.Sprintf("• **Client IP:** %s\n", clientIP))
-		sb.WriteString(fmt.Sprintf("• **Remote OS:** %s\n", remoteOS))
-		sb.WriteString("\nReads and writes are centralized and audited on the shared remote host's Auxly vault.")
+		sb.WriteString("✅ **Connected to a shared memory host over SSH.**\n\n")
+		sb.WriteString(fmt.Sprintf("• **Memory host (vault lives here):** %s\n", memHost))
+		sb.WriteString(fmt.Sprintf("• **This machine (connected client):** %s (%s)\n", client, remoteOS))
+		sb.WriteString(fmt.Sprintf("\nReads and writes are centralized and audited on **%s**'s Auxly vault, which may be shared with other agents. No memory is stored locally on this machine.", memHost))
 		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
 	}
 
 	sb.WriteString("• **Source:** local vault\n\n")
-	sb.WriteString("This session is using a LOCAL Auxly vault. To link a remote host and share a central, audited vault, run the `auxly connect` CLI wizard.")
+
+	// Detect a relay offer published on this box (the host advertised itself here).
+	// If one exists, this box can be wired to that host's memory with no flags.
+	if offers := detectRelayOfferNames(); len(offers) > 0 {
+		sb.WriteString("⚠️ This session is using a LOCAL vault, but a remote memory host is **offered on this machine** and not yet connected:\n")
+		for _, name := range offers {
+			sb.WriteString(fmt.Sprintf("• **%s**\n", name))
+		}
+		sb.WriteString("\n**ACTION — wire it up now:** run this in a shell, then tell the user to restart this agent:\n\n")
+		if len(offers) == 1 {
+			sb.WriteString("```\nauxly connect auto\n```\n")
+		} else {
+			sb.WriteString(fmt.Sprintf("```\nauxly connect auto %s\n```\n", offers[0]))
+		}
+		sb.WriteString("\nAfter the agent restarts, reads/writes go to the host's central, audited vault.")
+		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+	}
+
+	sb.WriteString("This session is using a LOCAL Auxly vault, and no remote host is offered on this machine.\n")
+	sb.WriteString("To link one, run `auxly host setup` on the memory host (it publishes an offer here), then `auxly connect auto`.")
 	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+}
+
+// detectRelayOfferNames lists the names of relay offers published in
+// ~/.auxly/offers (the offer file name is the host/profile name).
+func detectRelayOfferNames() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	entries, err := os.ReadDir(filepath.Join(home, ".auxly", "offers"))
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		names = append(names, strings.TrimSuffix(e.Name(), ".yaml"))
+	}
+	return names
 }
 
 func (s *Server) toolSkillForget(query string) toolResult {

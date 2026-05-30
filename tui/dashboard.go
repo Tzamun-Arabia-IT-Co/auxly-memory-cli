@@ -24,6 +24,7 @@ type dashboardModel struct {
 	memoryPath       string
 	activeProviders  []string
 	recentWrites     []audit.Entry
+	sessions         []agentSession
 	lastRefresh      time.Time
 	blinkCycle       int
 	animationStarted bool
@@ -45,6 +46,7 @@ type dashboardRefreshMsg struct {
 	trustCfg        *trust.Config
 	activeProviders []string
 	recentWrites    []audit.Entry
+	sessions        []agentSession
 	at              time.Time
 	mcpError        string
 }
@@ -110,6 +112,7 @@ func (m dashboardModel) Refresh() tea.Cmd {
 			trustCfg:        trustCfg,
 			activeProviders: activeProviders,
 			recentWrites:    recentWrites,
+			sessions:        gatherSessions(),
 			at:              time.Now(),
 			mcpError:        mcpError,
 		}
@@ -128,6 +131,7 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		m.trustCfg = msg.trustCfg
 		m.activeProviders = msg.activeProviders
 		m.recentWrites = msg.recentWrites
+		m.sessions = msg.sessions
 		m.lastRefresh = msg.at
 		m.mcpError = msg.mcpError
 		if m.reloaded && time.Since(m.reloadedAt) > 3*time.Second {
@@ -192,9 +196,14 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 						m.activeAgentTab = 0
 						return m, nil
 					}
-					// Tab 2: [2 Recent Writes] spans X: [pStartX+29, pStartX+46]
-					if msg.X >= pStartX+29 && msg.X <= pStartX+46 {
+					// Tab 2: [2 Recent Writes] spans X: [pStartX+29, pStartX+45]
+					if msg.X >= pStartX+29 && msg.X <= pStartX+45 {
 						m.activeAgentTab = 1
+						return m, nil
+					}
+					// Tab 3: [3 Connected] spans X: [pStartX+50, pStartX+62]
+					if msg.X >= pStartX+50 && msg.X <= pStartX+62 {
+						m.activeAgentTab = 2
 						return m, nil
 					}
 				}
@@ -255,14 +264,27 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			case "esc", "q":
 				m.selectedAgent = ""
 				return m, nil
-			case "1", "left":
+			case "1":
 				m.activeAgentTab = 0
 				return m, nil
-			case "2", "right":
+			case "2":
 				m.activeAgentTab = 1
 				return m, nil
+			case "3":
+				m.activeAgentTab = 2
+				return m, nil
+			case "left":
+				if m.activeAgentTab > 0 {
+					m.activeAgentTab--
+				}
+				return m, nil
+			case "right":
+				if m.activeAgentTab < 2 {
+					m.activeAgentTab++
+				}
+				return m, nil
 			case "tab":
-				m.activeAgentTab = (m.activeAgentTab + 1) % 2
+				m.activeAgentTab = (m.activeAgentTab + 1) % 3
 				return m, nil
 			}
 			return m, nil // Swallow keys when popup is active
@@ -336,15 +358,15 @@ func (m dashboardModel) View() string {
 			"Total Entries:  %s\n"+
 			"Pending Queue:  %s\n\n"+
 			"📂 %s\n%s\n\n"+
-			"📡 %s\n%s",
+			"🔌 %s\n%s",
 		bold.Render("System Diagnostics"),
 		green.Render(fmt.Sprintf("%d", m.stats.WritesToday)),
 		lipgloss.NewStyle().Foreground(ColorSecondary).Render(fmt.Sprintf("%d", m.stats.TotalEntries)),
 		pendingText,
 		bold.Render("Memory Store:"),
 		dim.Render(m.memoryPath),
-		bold.Render("Remote Access:"),
-		dim.Render("SSH (auxly connect)"),
+		bold.Render("Active Connections:"),
+		m.renderConnectionsSummary(),
 	)
 	leftCol := diagStyle.Render(diagContent)
 
@@ -496,11 +518,138 @@ func (m dashboardModel) View() string {
 	if m.selectedAgent == "" {
 		b.WriteString(dim.Render("  Use arrow keys or Mouse Clicks to select agent boxes • Enter: open details popup • q: exit TUI"))
 	} else {
-		b.WriteString(dim.Render("  Popup active: [1/2] switch tabs • [Esc] or Click outside to close"))
+		b.WriteString(dim.Render("  Popup active: [1/2/3] switch tabs • [Esc] or Click outside to close"))
 	}
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+// renderConnectedTab writes the "Connected" popup tab for one provider: the
+// live MCP sessions attributed to it, showing PID for local agents and the
+// originating IP/host/OS for SSH-remote agents.
+func (m dashboardModel) renderConnectedTab(pb *strings.Builder, provider string) {
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	bold := lipgloss.NewStyle().Bold(true)
+	green := lipgloss.NewStyle().Foreground(ColorSuccess)
+	teal := lipgloss.NewStyle().Foreground(lipgloss.Color("#73CBAD"))
+
+	matches := func(p string) bool {
+		if p == provider {
+			return true
+		}
+		return provider == "antigravity" && strings.HasPrefix(p, "antigravity")
+	}
+
+	var sessions []agentSession
+	for _, s := range m.sessions {
+		if matches(s.Provider) {
+			sessions = append(sessions, s)
+		}
+	}
+
+	if len(sessions) == 0 {
+		pb.WriteString("\n  " + dim.Render("No live sessions for this agent right now.") + "\n")
+		pb.WriteString("  " + dim.Render("(a session appears while the agent's MCP server is running)") + "\n")
+		return
+	}
+
+	plural := "session"
+	if len(sessions) != 1 {
+		plural = "sessions"
+	}
+	pb.WriteString(fmt.Sprintf("  %s %s connected\n\n",
+		bold.Render(fmt.Sprintf("%d", len(sessions))),
+		plural,
+	))
+
+	for _, s := range sessions {
+		if s.Remote {
+			host := s.Host
+			if host == "" {
+				host = "remote"
+			}
+			ip := s.IP
+			if ip == "" {
+				ip = "via tunnel"
+			}
+			osLabel := s.OS
+			if osLabel == "" {
+				osLabel = "?"
+			}
+			pb.WriteString(fmt.Sprintf("  %s %s  %s\n",
+				teal.Render("● remote"),
+				bold.Render(host),
+				dim.Render(fmt.Sprintf("IP %s · %s", ip, osLabel)),
+			))
+		} else {
+			pb.WriteString(fmt.Sprintf("  %s %s  %s\n",
+				green.Render("● local"),
+				bold.Render(fmt.Sprintf("PID %d", s.PID)),
+				dim.Render("this machine"),
+			))
+		}
+	}
+}
+
+// renderConnectionsSummary renders the live MCP sessions for the left
+// diagnostics column: remote boxes by host/IP/OS, then a local-agent count.
+func (m dashboardModel) renderConnectionsSummary() string {
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	teal := lipgloss.NewStyle().Foreground(lipgloss.Color("#73CBAD"))
+	cyan := lipgloss.NewStyle().Foreground(ColorPrimary)
+
+	if len(m.sessions) == 0 {
+		return dim.Render("No active agent sessions")
+	}
+
+	var remotes []agentSession
+	localCount := 0
+	for _, s := range m.sessions {
+		if s.Remote {
+			remotes = append(remotes, s)
+		} else {
+			localCount++
+		}
+	}
+
+	var sb strings.Builder
+	for _, s := range remotes {
+		host := s.Host
+		if host == "" {
+			host = "remote"
+		}
+		loc := s.IP
+		if loc == "" {
+			loc = "via tunnel"
+		}
+		osLabel := s.OS
+		if osLabel == "" {
+			osLabel = "?"
+		}
+		sb.WriteString(fmt.Sprintf("%s %s\n   %s",
+			teal.Render("●"),
+			cyan.Render(host),
+			dim.Render(fmt.Sprintf("%s · %s · %s", loc, osLabel, s.Provider)),
+		))
+		sb.WriteString("\n")
+	}
+
+	if localCount > 0 {
+		label := "local agent"
+		if localCount != 1 {
+			label += "s"
+		}
+		sb.WriteString(fmt.Sprintf("%s %s",
+			teal.Render("●"),
+			dim.Render(fmt.Sprintf("%d %s on this machine", localCount, label)),
+		))
+	} else {
+		// Trim trailing newline left by the remote block.
+		return strings.TrimRight(sb.String(), "\n")
+	}
+
+	return sb.String()
 }
 
 func (m dashboardModel) renderPopup(provider string) string {
@@ -547,12 +696,16 @@ func (m dashboardModel) renderPopup(provider string) string {
 
 	tab1 := "[1 Info & Diagnostics]"
 	tab2 := "[2 Recent Writes]"
-	if m.activeAgentTab == 0 {
+	tab3 := "[3 Connected]"
+	switch m.activeAgentTab {
+	case 0:
 		tab1 = cyan.Render(tab1)
-	} else {
+	case 1:
 		tab2 = cyan.Render(tab2)
+	case 2:
+		tab3 = cyan.Render(tab3)
 	}
-	pb.WriteString(fmt.Sprintf("  %s    %s\n\n", tab1, tab2))
+	pb.WriteString(fmt.Sprintf("  %s    %s    %s\n\n", tab1, tab2, tab3))
 
 	if m.activeAgentTab == 0 {
 		writes := 0
@@ -580,7 +733,7 @@ func (m dashboardModel) renderPopup(provider string) string {
 		pb.WriteString(fmt.Sprintf("  %-18s %s\n", dim.Render("Interface:"), bold.Render("MCP Stdio relayer")))
 		pb.WriteString(fmt.Sprintf("  %-18s %s\n\n", dim.Render("Target Scopes:"), bold.Render("Global & Workspace Override")))
 		pb.WriteString(fmt.Sprintf("  %-18s %s\n", dim.Render("Status Logs:"), green.Render(logs)))
-	} else {
+	} else if m.activeAgentTab == 1 {
 		var writes []audit.Entry
 		if m.logger != nil {
 			all, _ := m.logger.TailWrites(50)
@@ -598,7 +751,7 @@ func (m dashboardModel) renderPopup(provider string) string {
 			pb.WriteString("\n  " + dim.Render("No write operations recorded yet for this agent.") + "\n\n")
 		} else {
 			for _, e := range writes {
-				ts, _ := time.Parse(time.RFC3339, e.Timestamp)
+				ts := parseTS(e.Timestamp)
 				cleanReason := e.Reason
 				if len(cleanReason) > 40 {
 					cleanReason = cleanReason[:37] + "..."
@@ -610,10 +763,12 @@ func (m dashboardModel) renderPopup(provider string) string {
 				))
 			}
 		}
+	} else {
+		m.renderConnectedTab(&pb, provider)
 	}
 
 	pb.WriteString("\n")
-	pb.WriteString(StyleFooter.Render("  Press [Esc] to close • [1/2] Switch tabs"))
+	pb.WriteString(StyleFooter.Render("  Press [Esc] to close • [1/2/3] Switch tabs"))
 
 	popupStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

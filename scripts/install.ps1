@@ -40,3 +40,15 @@ if ($userPath -notlike "*$installDir*") {
 Write-Host ""
 Write-Host "auxly installed: $dest"
 & $dest --version
+
+# --- Optional self-provisioning (env-driven, since `irm | iex` can't pass args) ---
+# Set AUXLY_SETUP=1 for local MCP+skills, AUXLY_CONNECT=1 to wire to an advertised host:
+#   $env:AUXLY_CONNECT=1; irm https://auxly.io/cli.ps1 | iex
+if ($env:AUXLY_SETUP -eq '1') {
+  Write-Host "`nRunning local setup (MCP + skills)..."
+  & $dest setup
+}
+if ($env:AUXLY_CONNECT -eq '1') {
+  Write-Host "`nWiring this machine to an advertised memory host..."
+  & $dest connect auto
+}

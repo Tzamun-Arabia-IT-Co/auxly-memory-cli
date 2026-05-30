@@ -240,9 +240,36 @@ func writeMCPConfigEntry(t ideTarget, serverDef map[string]interface{}) string {
 		config["mcpServers"] = servers
 		// Ensure we clean up any legacy direct key at the root of mcpServers.json (Cursor)
 		delete(config, "auxly-memory")
+	} else if filepath.Base(path) == ".claude.json" {
+		// Claude Code (~/.claude.json) keeps BOTH a global "mcpServers" AND
+		// per-project "projects[<dir>].mcpServers". When launched inside a project
+		// the project-scoped entry WINS — so writing only the global one leaves a
+		// stale/local project entry overriding it (the remote-wiring bug). Write
+		// the global entry and repoint every existing project-scoped auxly-memory.
+		servers, ok := config["mcpServers"].(map[string]interface{})
+		if !ok {
+			servers = make(map[string]interface{})
+		}
+		servers["auxly-memory"] = serverDef
+		config["mcpServers"] = servers
+		if projects, ok := config["projects"].(map[string]interface{}); ok {
+			for _, pv := range projects {
+				proj, ok := pv.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				psrv, ok := proj["mcpServers"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if _, exists := psrv["auxly-memory"]; exists {
+					psrv["auxly-memory"] = serverDef
+				}
+			}
+		}
+		delete(config, "auxly-memory") // drop any stray root-level key
 	} else {
-		// Claude Code and Antigravity CLI use direct servers list or "mcpServers"
-		// Let's support both direct key or "mcpServers" depending on what already exists
+		// Antigravity CLI and others: direct key or "mcpServers" by what exists.
 		if _, ok := config["mcpServers"]; ok || filepath.Base(path) == "mcp.json" {
 			servers, ok := config["mcpServers"].(map[string]interface{})
 			if !ok {
@@ -559,10 +586,18 @@ You must immediately invoke the 'auxly_skill_learn' MCP tool, passing the provid
 
 		"auxly-remote-connect": `---
 name: auxly-remote-connect
-description: Show the active Auxly remote connection (host, client IP, OS) and confirm this is a shared remote memory vault over SSH.
+description: Detect and connect this machine to a remote Auxly memory host (or report the active link).
 ---
 # /auxly-remote-connect
 
-You must immediately invoke the 'auxly_skill_remote_connect' MCP tool to report the active remote connection: the memory host, the client IP (from SSH_CONNECTION), and the remote OS, and to confirm reads/writes are central and audited on the shared host. For setting up or managing a connection, point the user to the ` + "`auxly connect`" + ` CLI wizard (run in a terminal). This is informational only — it does NOT perform key/SSH/config changes.`,
+Immediately invoke the 'auxly_skill_remote_connect' MCP tool. Then act on what it returns:
+
+1. If it reports an ACTIVE remote connection (host, client IP from SSH_CONNECTION, remote OS), just relay that — reads/writes are central and audited on the shared host. Nothing else to do.
+
+2. If it reports a LOCAL vault but an offered host is available on this machine, it will include an ACTION block with an ` + "`auxly connect auto`" + ` command. RUN that exact command in a shell on this machine (it wires the MCP launcher + skills, no flags, no prompts). If the command reports the box's SSH key isn't authorized on the host yet, show the user the printed public key and the one-time step. On success, tell the user to RESTART this agent so it loads the remote memory — after restart, /auxly-remote-connect will show the live link.
+
+3. If it reports a LOCAL vault with no offer, tell the user to run ` + "`auxly host setup`" + ` on the memory host first (that publishes the offer here).
+
+You MAY run the ` + "`auxly connect auto`" + ` command yourself (it is non-interactive and safe). You must NOT hand-edit SSH keys or config files — connect auto handles that.`,
 	}
 }

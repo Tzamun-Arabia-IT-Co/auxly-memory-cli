@@ -10,6 +10,19 @@ set -eu
 BASE_URL="${AUXLY_INSTALL_BASE:-https://auxly.io}"
 BINARY="auxly"
 
+# --- Parse args ---------------------------------------------------------------
+# --connect : after install, run `auxly connect auto` to wire this box to a
+#             memory host advertised here (the one-command remote bootstrap).
+# --setup   : after install, run `auxly setup` (local MCP + skills).
+DO_CONNECT=0
+DO_SETUP=0
+for arg in "$@"; do
+  case "$arg" in
+    --connect) DO_CONNECT=1 ;;
+    --setup)   DO_SETUP=1 ;;
+  esac
+done
+
 # --- Detect OS / architecture -------------------------------------------------
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
@@ -64,4 +77,17 @@ fi
 
 echo ""
 echo "✅ auxly installed: ${INSTALL_DIR}/${BINARY}"
-"${INSTALL_DIR}/${BINARY}" --version 2>/dev/null || true
+BIN="${INSTALL_DIR}/${BINARY}"
+"$BIN" --version 2>/dev/null || true
+
+# --- Optional self-provisioning ----------------------------------------------
+if [ "$DO_SETUP" = "1" ]; then
+  echo ""
+  echo "🔧 Running local setup (MCP + skills)..."
+  "$BIN" setup || true
+fi
+if [ "$DO_CONNECT" = "1" ]; then
+  echo ""
+  echo "🔗 Wiring this machine to an advertised memory host..."
+  "$BIN" connect auto || true
+fi

@@ -63,6 +63,7 @@ const (
 	sshModeProgress = "progress" // a captured connect command is running
 	sshModeResult   = "result"   // showing its captured output
 	sshModePassword = "password" // masked SSH-password entry (PTY key install)
+	sshModeRename   = "rename"   // inline rename of a selected connection
 )
 
 // form steps.
@@ -76,7 +77,11 @@ const (
 
 type sshModel struct {
 	remotes []remoteEntry
+	clients []clientRow // remote boxes wired to use THIS Mac (host side) — managed list
+	host    hostInfo    // this machine's relay-host config (host.yaml)
+	hostOK  bool        // true when this machine is set up as a relay host
 	cursor  int
+	rename  string // transient buffer for the rename action (sshModeRename)
 	mode    string
 	preview string // MCP JSON shown in print mode
 	status  string // transient feedback after an action
@@ -111,9 +116,12 @@ type sshModel struct {
 	editingHost bool
 }
 
-// sshRefreshMsg carries the freshly read remotes list back into Update.
+// sshRefreshMsg carries the freshly read remotes list + host config into Update.
 type sshRefreshMsg struct {
 	remotes []remoteEntry
+	clients []clientRow
+	host    hostInfo
+	hostOK  bool
 }
 
 // sshExecDoneMsg is returned after a SUSPENDED (ExecProcess) `auxly connect …`
@@ -141,12 +149,14 @@ type sshSpinTickMsg struct{}
 // ─────────────────────────────────────────────────────────────────
 
 func newSSHModel() sshModel {
-	return sshModel{remotes: readRemotes()}
+	h, ok := readHostInfo()
+	return sshModel{remotes: readRemotes(), clients: readClients(), host: h, hostOK: ok}
 }
 
 func (m sshModel) Refresh() tea.Cmd {
 	return func() tea.Msg {
-		return sshRefreshMsg{remotes: readRemotes()}
+		h, ok := readHostInfo()
+		return sshRefreshMsg{remotes: readRemotes(), clients: readClients(), host: h, hostOK: ok}
 	}
 }
 
@@ -174,11 +184,75 @@ func readRemotes() []remoteEntry {
 	return parsed.Remotes
 }
 
+// hostInfo mirrors the host.yaml this machine writes when it acts as a memory
+// HOST served to NAT'd/remote boxes through a relay (the relay/`host setup` flow).
+type hostInfo struct {
+	Rendezvous     string `yaml:"rendezvous"`
+	RendezvousPort int    `yaml:"rendezvous_port"`
+	ReversePort    int    `yaml:"reverse_port"`
+	HostUser       string `yaml:"host_user"`
+}
+
+// clientRow mirrors an entry in ~/.auxly/clients.yaml — a remote box this Mac
+// (as a host) has wired to use its memory. These are the managed connections.
+type clientRow struct {
+	Name   string `yaml:"name"`
+	Target string `yaml:"target"`
+	Method string `yaml:"method"`
+}
+
+type clientsYAML struct {
+	Clients []clientRow `yaml:"clients"`
+}
+
+func readClients() []clientRow {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".auxly", "clients.yaml"))
+	if err != nil {
+		return nil
+	}
+	var f clientsYAML
+	if yaml.Unmarshal(data, &f) != nil {
+		return nil
+	}
+	return f.Clients
+}
+
+// readHostInfo loads ~/.auxly/host.yaml; ok is false when this machine is not
+// configured as a relay host.
+func readHostInfo() (hostInfo, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return hostInfo{}, false
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".auxly", "host.yaml"))
+	if err != nil {
+		return hostInfo{}, false
+	}
+	var h hostInfo
+	if yaml.Unmarshal(data, &h) != nil || strings.TrimSpace(h.Rendezvous) == "" {
+		return hostInfo{}, false
+	}
+	return h, true
+}
+
 func (m sshModel) selectedName() string {
 	if m.cursor >= 0 && m.cursor < len(m.remotes) {
 		return m.remotes[m.cursor].Name
 	}
 	return ""
+}
+
+// selectedClient returns the highlighted connection (host side) and whether one
+// is selected.
+func (m sshModel) selectedClient() (clientRow, bool) {
+	if m.cursor >= 0 && m.cursor < len(m.clients) {
+		return m.clients[m.cursor], true
+	}
+	return clientRow{}, false
 }
 
 func exePath() string {
@@ -201,13 +275,26 @@ func runConnect(args ...string) tea.Cmd {
 	})
 }
 
+// runHost SUSPENDS the TUI to run an interactive `auxly host …` (e.g. `host
+// setup`, which prompts for the relay). This is the relay-tunnel escape hatch
+// when the host can't dial back to a NAT'd Mac.
+func runHost(args ...string) tea.Cmd {
+	c := exec.Command(exePath(), append([]string{"host"}, args...)...)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		if err != nil {
+			return sshExecDoneMsg{status: "⚠ host " + strings.Join(args, " ") + " exited: " + err.Error()}
+		}
+		return sshExecDoneMsg{status: "✓ Relay configured. Run `auxly host remote` in a terminal to (re)print the command to paste on the server."}
+	})
+}
+
 // startCapturedRun spawns `auxly connect …` and streams its output line-by-line
 // into ch (no TUI suspend). Safe only for non-interactive runs (no password) —
 // add uses --batch to guarantee that. The PTY variant (startPTYRun) handles the
 // password case.
-func startCapturedRun(ch chan progressEvent, args ...string) {
+func startCapturedRun(ch chan progressEvent, sub string, args ...string) {
 	go func() {
-		c := exec.Command(exePath(), append([]string{"connect"}, args...)...)
+		c := exec.Command(exePath(), append([]string{sub}, args...)...)
 		pr, pw, err := os.Pipe()
 		if err != nil {
 			ch <- progressEvent{done: true, err: err, out: "pipe error: " + err.Error()}
@@ -263,8 +350,14 @@ func (m sshModel) beginRun(title string, ch chan progressEvent) (sshModel, tea.C
 }
 
 func (m sshModel) beginCaptured(title string, args ...string) (sshModel, tea.Cmd) {
+	return m.beginCapturedSub(title, "connect", args...)
+}
+
+// beginCapturedSub streams any `auxly <sub> …` subcommand (e.g. "host setup")
+// into the progress pane, so the relay flow runs natively in-TUI.
+func (m sshModel) beginCapturedSub(title, sub string, args ...string) (sshModel, tea.Cmd) {
 	ch := make(chan progressEvent, 128)
-	startCapturedRun(ch, args...)
+	startCapturedRun(ch, sub, args...)
 	return m.beginRun(title, ch)
 }
 
@@ -340,12 +433,10 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 
 	case sshRefreshMsg:
 		m.remotes = msg.remotes
-		if m.cursor >= len(m.remotes) {
-			m.cursor = len(m.remotes) - 1
-		}
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
+		m.clients = msg.clients
+		m.host = msg.host
+		m.hostOK = msg.hostOK
+		m.cursor = clampCursor(m.cursor, m.listLen())
 		m.mode = sshModeList
 		return m, nil
 
@@ -378,13 +469,10 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 			m.progressPct = 100
 			m.progressCh = nil
 			m.mode = sshModeResult
-			m.remotes = readRemotes() // reload list behind the result panel
-			if m.cursor >= len(m.remotes) {
-				m.cursor = len(m.remotes) - 1
-			}
-			if m.cursor < 0 {
-				m.cursor = 0
-			}
+			m.remotes = readRemotes() // reload lists behind the result panel
+			m.clients = readClients()
+			m.host, m.hostOK = readHostInfo()
+			m.cursor = clampCursor(m.cursor, m.listLen())
 			return m, nil
 		}
 		if line := strings.TrimRight(msg.line, "\r"); strings.TrimSpace(line) != "" {
@@ -406,8 +494,66 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 		}
 		return m, nil
 
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	}
+	return m, nil
+}
+
+// listLen is the length of the active selectable list — the connected boxes
+// (host side) when present, otherwise the consumer remotes.
+func (m sshModel) listLen() int {
+	if len(m.clients) > 0 {
+		return len(m.clients)
+	}
+	return len(m.remotes)
+}
+
+func clampCursor(c, n int) int {
+	if c >= n {
+		c = n - 1
+	}
+	if c < 0 {
+		c = 0
+	}
+	return c
+}
+
+// listAnchorY is the screen row (0-based) where the first selectable connection
+// row is drawn — used to map a mouse click to a list index. It tracks the View
+// layout: banner + tab strip + panel border/padding + the fixed header lines
+// above the list.
+func (m sshModel) listAnchorY() int {
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	// Mirror activity.go's offset model: panel top border at tabRow+4, then
+	// +2 for the border+padding, then the fixed header lines before the list.
+	contentTop := strings.Count(renderBanner(w), "\n") + 4 + 2
+	if m.hostOK {
+		// REMOTE(0) intro(1) press-c(2) blank(3) HOSThdr(4) relay(5) boxes(6)
+		// blank(7) CONNECTEDhdr(8) blank(9) firstRow(10)
+		return contentTop + 10
+	}
+	// REMOTE(0) intro(1) press-c(2) blank(3) HOSTShdr(4) blank(5) firstRow(6)
+	return contentTop + 6
+}
+
+// handleMouse lets the user click a connection row to highlight it.
+func (m sshModel) handleMouse(msg tea.MouseMsg) (sshModel, tea.Cmd) {
+	if m.mode != sshModeList {
+		return m, nil
+	}
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+	idx := msg.Y - m.listAnchorY()
+	if idx >= 0 && idx < m.listLen() {
+		m.cursor = idx
 	}
 	return m, nil
 }
@@ -422,6 +568,9 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 	case sshModeConfirm:
 		switch msg.String() {
 		case "y", "Y", "enter":
+			if c, ok := m.selectedClient(); ok && len(m.clients) > 0 {
+				return m.beginCapturedSub("Removing "+c.Name, "host", "forget", c.Name)
+			}
 			if name := m.selectedName(); name != "" {
 				return m.beginCaptured("Removing "+name, "remove", name)
 			}
@@ -430,6 +579,9 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 			m.mode = sshModeList
 		}
 		return m, nil
+
+	case sshModeRename:
+		return m.handleRenameKey(msg)
 
 	case sshModeForm:
 		return m.handleFormKey(msg)
@@ -440,6 +592,11 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 	case sshModeResult:
 		if m.twoWayFailed && m.twoWayHost != "" {
 			switch msg.String() {
+			case "h", "H":
+				// Relay tunnel — the real fix for a NAT'd Mac. Suspends the TUI to
+				// run the interactive `auxly host setup` (asks for the relay).
+				m.twoWayFailed = false
+				return m, runHost("setup")
 			case "m", "M":
 				// Re-open the method picker for this host, keeping it as the host.
 				// Pre-fill OS/host/name from the saved profile so the user only
@@ -484,9 +641,15 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		return m.handlePasswordKey(msg)
 
 	default: // list mode
+		// When this Mac has connected boxes (host side), the cursor manages THEM.
+		managingClients := len(m.clients) > 0
 		switch msg.String() {
 		case "j", "down":
-			if m.cursor < len(m.remotes)-1 {
+			max := len(m.clients)
+			if !managingClients {
+				max = len(m.remotes)
+			}
+			if m.cursor < max-1 {
 				m.cursor++
 			}
 		case "k", "up":
@@ -495,11 +658,35 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 			}
 		case "c":
 			m.mode = sshModeForm
-			m.formStep = formStepOS
+			m.formStep = formStepMethod
 			m.formOS, m.formMethod, m.formHost, m.formJump, m.formName = "", "", "", "", ""
 			m.status = ""
 			m.editingHost = true // capture all keys for the in-TUI form
 			return m, nil
+		}
+		if managingClients {
+			if c, ok := m.selectedClient(); ok {
+				switch msg.String() {
+				case "d":
+					m.status = ""
+					return m.beginCapturedSub("Disconnecting "+c.Name, "host", "disconnect", c.Name)
+				case "r":
+					m.status = ""
+					return m.beginCapturedSub("Reconnecting "+c.Name, "host", "reconnect", c.Name)
+				case "e":
+					m.rename = c.Name
+					m.mode = sshModeRename
+					m.editingHost = true
+					return m, nil
+				case "x":
+					m.mode = sshModeConfirm
+					return m, nil
+				}
+			}
+			return m, nil
+		}
+		// Consumer-remote fallback (this Mac connects TO another host).
+		switch msg.String() {
 		case "t":
 			if name := m.selectedName(); name != "" {
 				m.status = ""
@@ -537,28 +724,38 @@ func (m sshModel) handleFormKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		return m, nil
 	case tea.KeyRunes:
 		s := string(msg.Runes)
+		if m.formStep == formStepMethod {
+			// Method is the first, most important choice. 5 = relay (this Mac is the
+			// host, served to a NAT'd/shared box); the rest reach an external host.
+			switch s {
+			case "1":
+				m.formMethod = "lan"
+			case "2":
+				m.formMethod = "vpn"
+			case "3":
+				m.formMethod = "bastion"
+			case "4":
+				m.formMethod = "public"
+			case "5":
+				m.formMethod = "relay"
+			default:
+				return m, nil
+			}
+			m.formStep = formStepHost
+			return m, nil
+		}
 		if m.formStep == formStepOS {
 			switch s {
 			case "1":
-				m.formOS, m.formStep = "linux", formStepMethod
+				m.formOS = "linux"
 			case "2":
-				m.formOS, m.formStep = "darwin", formStepMethod
+				m.formOS = "darwin"
 			case "3":
-				m.formOS, m.formStep = "windows", formStepMethod
+				m.formOS = "windows"
+			default:
+				return m, nil
 			}
-			return m, nil
-		}
-		if m.formStep == formStepMethod {
-			switch s {
-			case "1":
-				m.formMethod, m.formStep = "lan", formStepHost
-			case "2":
-				m.formMethod, m.formStep = "vpn", formStepHost
-			case "3":
-				m.formMethod, m.formStep = "bastion", formStepHost
-			case "4":
-				m.formMethod, m.formStep = "public", formStepHost
-			}
+			m.formStep = formStepName
 			return m, nil
 		}
 		m.formAppend(s)
@@ -569,11 +766,6 @@ func (m sshModel) handleFormKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 
 func (m sshModel) advanceForm() (sshModel, tea.Cmd) {
 	switch m.formStep {
-	case formStepOS:
-		if m.formOS == "" {
-			m.formOS = "linux"
-		}
-		m.formStep = formStepMethod
 	case formStepMethod:
 		if m.formMethod == "" {
 			m.formMethod = "public"
@@ -581,14 +773,21 @@ func (m sshModel) advanceForm() (sshModel, tea.Cmd) {
 		m.formStep = formStepHost
 	case formStepHost:
 		if strings.TrimSpace(m.formHost) == "" {
-			return m, nil // host is required
+			return m, nil // host/relay is required
 		}
-		if m.formMethod == "bastion" {
+		if m.formMethod == "relay" {
+			m.formStep = formStepName // name the connection, then submit
+		} else if m.formMethod == "bastion" {
 			m.formStep = formStepJump
 		} else {
-			m.formStep = formStepName
+			m.formStep = formStepOS
 		}
 	case formStepJump:
+		m.formStep = formStepOS
+	case formStepOS:
+		if m.formOS == "" {
+			m.formOS = "linux"
+		}
 		m.formStep = formStepName
 	case formStepName:
 		return m.submitForm()
@@ -601,6 +800,20 @@ func (m sshModel) submitForm() (sshModel, tea.Cmd) {
 	if host == "" {
 		m.formStep = formStepHost
 		return m, nil
+	}
+	// Relay method: configure THIS Mac as a memory host reachable through a public
+	// rendezvous. Runs `auxly host setup` captured in-pane; the result pane shows
+	// the `auxly connect use --jump …` command to paste on the remote box.
+	if m.formMethod == "relay" {
+		m.editingHost = false
+		// --provision drives the FULL remote setup from here: install auxly on the
+		// box, authorize its key on this Mac, and wire its agent — nothing to run
+		// on the box.
+		args := []string{"setup", "--rendezvous", host, "--yes", "--batch", "--provision"}
+		if name := strings.TrimSpace(m.formName); name != "" {
+			args = append(args, "--name", name)
+		}
+		return m.beginCapturedSub("Setting up relay via "+host, "host", args...)
 	}
 	osTarget := m.formOS
 	if osTarget == "" {
@@ -683,6 +896,69 @@ func (m *sshModel) formTrim() {
 	}
 }
 
+// handleRenameKey captures the new friendly name and, on Enter, rewrites the
+// selected connection's label in clients.yaml.
+func (m sshModel) handleRenameKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.rename, m.editingHost, m.mode = "", false, sshModeList
+		return m, nil
+	case tea.KeyEnter:
+		newName := strings.TrimSpace(m.rename)
+		old := ""
+		if c, ok := m.selectedClient(); ok {
+			old = c.Name
+		}
+		if newName != "" && old != "" && newName != old {
+			renameClient(old, newName)
+			m.clients = readClients()
+			m.cursor = clampCursor(m.cursor, m.listLen())
+			m.status = "Renamed to " + newName
+		}
+		m.rename, m.editingHost, m.mode = "", false, sshModeList
+		return m, nil
+	case tea.KeyBackspace, tea.KeyCtrlH:
+		if r := []rune(m.rename); len(r) > 0 {
+			m.rename = string(r[:len(r)-1])
+		}
+		return m, nil
+	case tea.KeySpace:
+		m.rename += " "
+		return m, nil
+	case tea.KeyRunes:
+		m.rename += string(msg.Runes)
+		return m, nil
+	}
+	return m, nil
+}
+
+// renameClient rewrites a connection's friendly label in clients.yaml. The
+// target + the consumer-side profile name are unchanged, so disconnect/reconnect
+// keep working.
+func renameClient(old, newName string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(home, ".auxly", "clients.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var f clientsYAML
+	if yaml.Unmarshal(data, &f) != nil {
+		return
+	}
+	for i := range f.Clients {
+		if f.Clients[i].Name == old {
+			f.Clients[i].Name = newName
+		}
+	}
+	if out, merr := yaml.Marshal(f); merr == nil {
+		_ = os.WriteFile(path, out, 0644)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────
 //  View
 // ─────────────────────────────────────────────────────────────────
@@ -704,52 +980,97 @@ func (m sshModel) View() string {
 	var lines []string
 	lines = append(lines, cyan.Render("REMOTE MEMORY OVER SSH"))
 	lines = append(lines, "")
-	intro := "SSH is the transport — the HOST runs `auxly mcp-server` and this machine " +
-		"launches it on demand. No daemon, no open port, no token. VPN-agnostic: reach the " +
-		"host over a LAN, a VPN (Tailscale/WireGuard), or a jump host."
-	lines = append(lines, wrapText(intro, bodyWidth)...)
+	// Single line (deterministic height for mouse mapping; clamped by finalizer).
+	lines = append(lines, "Use your Auxly memory on another machine over SSH — no daemon, no open port, no token.")
+	lines = append(lines, dim.Render("Press ")+accent.Render("c")+dim.Render(" to connect — choose how the machines reach each other; Auxly wires the rest."))
 	lines = append(lines, "")
 
-	// ── Configured remotes (selectable) ────────────────────────────
-	lines = append(lines, cyan.Render("CONFIGURED REMOTES"))
-	lines = append(lines, "")
-	if len(m.remotes) == 0 {
-		lines = append(lines, "  "+dim.Render("No remotes configured yet — press ")+accent.Render("c")+dim.Render(" to add your first host."))
-	} else {
-		for i, r := range m.remotes {
-			name := r.Name
-			if name == "" {
-				name = "(unnamed)"
-			}
-			target := r.Host
-			if r.User != "" {
-				target = r.User + "@" + r.Host
-			}
-			if r.Port != 0 && r.Port != 22 {
-				target = fmt.Sprintf("%s:%d", target, r.Port)
-			}
-			method := r.Method
-			if method == "" {
-				method = "—"
-			}
-			row := fmt.Sprintf("%-18s %-26s %s", truncate(name, 18), truncate(target, 26), dim.Render("["+method+"]"))
-			if i == m.cursor {
-				marker := accent.Render("▸ ")
-				lines = append(lines, marker+lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render(row))
-			} else {
-				lines = append(lines, "  "+row)
+	selRow := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+	managingClients := len(m.clients) > 0
+
+	if m.hostOK {
+		// ── This machine as a HOST + the boxes connected to it ───────
+		ok := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess)
+		relay := m.host.Rendezvous
+		if m.host.RendezvousPort != 0 && m.host.RendezvousPort != 22 {
+			relay = fmt.Sprintf("%s:%d", relay, m.host.RendezvousPort)
+		}
+		lines = append(lines, cyan.Render("THIS MACHINE IS A MEMORY HOST")+"  "+ok.Render("● serving"))
+		lines = append(lines, "  "+dim.Render("Relay   ")+relay+dim.Render(fmt.Sprintf("   reverse port %d → local :22", m.host.ReversePort)))
+		lines = append(lines, "  "+dim.Render("Boxes below use your memory through it.  Down it with ")+accent.Render("auxly host down"))
+		lines = append(lines, "")
+		lines = append(lines, cyan.Render("CONNECTED BOXES")+dim.Render("   (using your memory)"))
+		lines = append(lines, "")
+		if len(m.clients) == 0 {
+			lines = append(lines, "  "+dim.Render("None yet — press ")+accent.Render("c")+dim.Render(" and pick 'relay' to connect a box."))
+		} else {
+			for i, c := range m.clients {
+				name := c.Name
+				if name == "" {
+					name = "(unnamed)"
+				}
+				row := fmt.Sprintf("%-20s %-24s %s", truncate(name, 20), truncate(c.Target, 24), dim.Render("["+c.Method+"]"))
+				if i == m.cursor {
+					lines = append(lines, accent.Render("▸ ")+selRow.Render(row))
+				} else {
+					lines = append(lines, "  "+row)
+				}
 			}
 		}
+		lines = append(lines, "")
 	}
-	lines = append(lines, "")
+
+	// ── This machine as a CONSUMER of other hosts (remotes.yaml) ───
+	if !m.hostOK || len(m.remotes) > 0 {
+		lines = append(lines, cyan.Render("HOSTS THIS MACHINE CONNECTS TO"))
+		lines = append(lines, "")
+		if len(m.remotes) == 0 {
+			lines = append(lines, "  "+dim.Render("No remotes yet — press ")+accent.Render("c")+dim.Render(" to connect to a memory host."))
+		} else {
+			for i, r := range m.remotes {
+				name := r.Name
+				if name == "" {
+					name = "(unnamed)"
+				}
+				target := r.Host
+				if r.User != "" {
+					target = r.User + "@" + r.Host
+				}
+				if r.Port != 0 && r.Port != 22 {
+					target = fmt.Sprintf("%s:%d", target, r.Port)
+				}
+				method := r.Method
+				if method == "" {
+					method = "—"
+				}
+				row := fmt.Sprintf("%-20s %-24s %s", truncate(name, 20), truncate(target, 24), dim.Render("["+method+"]"))
+				// Only the consumer list is the cursor target when there are no clients.
+				if !managingClients && i == m.cursor {
+					lines = append(lines, accent.Render("▸ ")+selRow.Render(row))
+				} else {
+					lines = append(lines, "  "+row)
+				}
+			}
+		}
+		lines = append(lines, "")
+	}
 
 	// ── Modal area: confirm / print / action bar ───────────────────
 	lines = append(lines, dim.Render(strings.Repeat("─", bodyWidth)))
 	switch m.mode {
 	case sshModeConfirm:
 		warn := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning)
-		lines = append(lines, warn.Render(fmt.Sprintf("Remove remote %q?  ", m.selectedName()))+
+		what := m.selectedName()
+		verb := "Remove remote"
+		if c, ok := m.selectedClient(); ok && len(m.clients) > 0 {
+			what, verb = c.Name, "Disconnect + remove"
+		}
+		lines = append(lines, warn.Render(fmt.Sprintf("%s %q?  ", verb, what))+
 			accent.Render("[y]")+dim.Render(" yes   ")+accent.Render("[n]")+dim.Render(" cancel"))
+	case sshModeRename:
+		lines = append(lines, cyan.Render("RENAME CONNECTION")+dim.Render("   Enter: save · esc: cancel"))
+		lines = append(lines, "")
+		lines = append(lines, "  "+dim.Render("New name:  ")+m.rename+accent.Render("▌"))
 	case sshModeProgress:
 		spin := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render(spinnerFrame(m.spin))
 		lines = append(lines, spin+"  "+cyan.Render(m.progressTitle))
@@ -796,8 +1117,9 @@ func (m sshModel) View() string {
 		lines = append(lines, "")
 		switch {
 		case m.twoWayFailed && m.twoWayHost != "":
-			lines = append(lines, accent.Render("[m]")+dim.Render(" try a different connection method (VPN / bastion / public)   ·   any other key: close"))
-		case m.progressNeeded:
+			lines = append(lines, accent.Render("[h]")+dim.Render(" set up the relay tunnel on this Mac (recommended for a NAT'd host)"))
+			lines = append(lines, accent.Render("[m]")+dim.Render(" try a different connection method   ·   any other key: close"))
+		case m.progressNeeded && len(m.pendingKeyArgs) > 0:
 			lines = append(lines, accent.Render("[p]")+dim.Render(" enter SSH password here   ")+accent.Render("[K]")+dim.Render(" use a terminal instead   ·   any other key: close"))
 		default:
 			lines = append(lines, dim.Render("Press any key to close."))
@@ -816,65 +1138,124 @@ func (m sshModel) View() string {
 		lines = append(lines, "")
 		lines = append(lines, dim.Render("  Enter: submit · esc: cancel · the password is sent to ssh and not stored"))
 	case sshModeForm:
-		hl := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
-		label := func(step, text string) string {
-			if m.formStep == step {
-				return hl.Render(text)
-			}
-			return dim.Render(text)
-		}
-		caret := func(step string) string {
-			if m.formStep == step {
-				return accent.Render("▌")
-			}
-			return ""
-		}
-		lines = append(lines, cyan.Render("ADD A REMOTE HOST")+dim.Render("    (esc cancels · Enter = next/save)"))
+		boldAccent := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+		primary := lipgloss.NewStyle().Foreground(ColorPrimary)
+		check := lipgloss.NewStyle().Foreground(ColorSuccess).Render("✓")
+		star := lipgloss.NewStyle().Foreground(ColorWarning).Render(" ★")
+		caret := accent.Render("▌")
+
+		lines = append(lines, cyan.Render("CONNECT MEMORY")+dim.Render("     esc cancels  ·  ↵ next / save"))
 		lines = append(lines, "")
 
-		osRadios := ""
-		for _, opt := range []struct{ v, lbl string }{{"linux", "Linux"}, {"darwin", "macOS"}, {"windows", "Windows"}} {
-			dot := "○"
-			if m.formOS == opt.v {
-				dot = accent.Render("●")
-			}
-			osRadios += fmt.Sprintf("%s %s   ", dot, opt.lbl)
+		// ── Step 1 · Method (the key decision, shown first) ──────────────
+		methodOpts := []struct{ key, val, desc string }{
+			{"1", "lan", "Same network — same Wi-Fi / router / subnet"},
+			{"2", "vpn", "Over a VPN you run (Tailscale, WireGuard…)"},
+			{"3", "bastion", "Through a jump host / bastion gateway"},
+			{"4", "public", "Public IP / custom host + ssh options"},
+			{"5", "relay", "Serve THIS Mac to a NAT'd / shared box"},
 		}
-		osHint := ""
-		if m.formStep == formStepOS {
-			osHint = dim.Render("  ‹press 1–3›")
-		}
-		lines = append(lines, "  "+label(formStepOS, "OS    ")+"   "+osRadios+osHint)
-
-		radios := ""
-		for _, opt := range []struct{ k, v string }{{"1", "lan"}, {"2", "vpn"}, {"3", "bastion"}, {"4", "public"}} {
-			dot := "○"
-			if m.formMethod == opt.v {
-				dot = accent.Render("●")
-			}
-			radios += fmt.Sprintf("%s %s   ", dot, opt.v)
-		}
-		methodHint := ""
 		if m.formStep == formStepMethod {
-			methodHint = dim.Render("  ‹press 1–4›")
+			lines = append(lines, "  "+boldAccent.Render("How does this machine reach the memory?")+dim.Render("   press 1–5"))
+			for _, o := range methodOpts {
+				marker, name, desc := dim.Render("○"), dim.Render(fmt.Sprintf("%-8s", o.val)), dim.Render(o.desc)
+				if m.formMethod == o.val {
+					marker, name, desc = accent.Render("●"), boldAccent.Render(fmt.Sprintf("%-8s", o.val)), primary.Render(o.desc)
+				}
+				row := "   " + marker + " " + dim.Render(o.key) + "  " + name + " " + desc
+				if o.val == "relay" {
+					row += star
+				}
+				lines = append(lines, row)
+			}
+		} else {
+			d := ""
+			for _, o := range methodOpts {
+				if o.val == m.formMethod {
+					d = o.desc
+				}
+			}
+			lines = append(lines, "  "+check+" "+dim.Render("Method   ")+boldAccent.Render(m.formMethod)+dim.Render("   "+d))
 		}
-		lines = append(lines, "  "+label(formStepMethod, "Method")+"   "+radios+methodHint)
+		lines = append(lines, "")
 
-		hostHint := ""
-		if m.formStep == formStepHost {
-			hostHint = dim.Render("  ‹user@host[:port]›")
+		// ── Step 2 · Host / Relay address ────────────────────────────────
+		isRelay := m.formMethod == "relay"
+		hostTitle, hostHintTxt := "Host address", "[user@]host[:port] — the machine to reach"
+		if isRelay {
+			hostTitle, hostHintTxt = "Relay server", "[user@]host[:port] — a public box this Mac dials out to"
 		}
-		lines = append(lines, "  "+label(formStepHost, "Host  ")+"   "+m.formHost+caret(formStepHost)+hostHint)
+		switch {
+		case m.formStep == formStepHost:
+			lines = append(lines, "  "+boldAccent.Render(hostTitle)+dim.Render("   "+hostHintTxt))
+			lines = append(lines, "   "+m.formHost+caret)
+		case strings.TrimSpace(m.formHost) != "":
+			lines = append(lines, "  "+check+" "+dim.Render(hostTitle+"   ")+m.formHost)
+		default:
+			lines = append(lines, "  "+dim.Render("· "+hostTitle))
+		}
 
+		// ── Step 2b · Jump host (bastion only) ───────────────────────────
 		if m.formMethod == "bastion" {
-			lines = append(lines, "  "+label(formStepJump, "Jump  ")+"   "+m.formJump+caret(formStepJump))
+			switch {
+			case m.formStep == formStepJump:
+				lines = append(lines, "  "+boldAccent.Render("Jump host")+dim.Render("   [user@]gateway"))
+				lines = append(lines, "   "+m.formJump+caret)
+			case m.formJump != "":
+				lines = append(lines, "  "+check+" "+dim.Render("Jump host   ")+m.formJump)
+			}
 		}
 
-		nameShown := m.formName + caret(formStepName)
-		if m.formName == "" && m.formStep != formStepName {
-			nameShown = dim.Render("(defaults to host)")
+		// ── Step 3 · Target OS (not needed for relay) ────────────────────
+		if !isRelay {
+			osOpts := []struct{ val, lbl string }{{"linux", "Linux"}, {"darwin", "macOS"}, {"windows", "Windows"}}
+			switch {
+			case m.formStep == formStepOS:
+				row := "  " + boldAccent.Render("Host OS") + dim.Render("   press 1–3    ")
+				for i, o := range osOpts {
+					if m.formOS == o.val {
+						row += accent.Render("●") + " " + boldAccent.Render(o.lbl) + "   "
+					} else {
+						row += dim.Render(fmt.Sprintf("%d ○ %s   ", i+1, o.lbl))
+					}
+				}
+				lines = append(lines, row)
+			case m.formOS != "":
+				lbl := m.formOS
+				for _, o := range osOpts {
+					if o.val == m.formOS {
+						lbl = o.lbl
+					}
+				}
+				lines = append(lines, "  "+check+" "+dim.Render("Host OS   ")+lbl)
+			default:
+				lines = append(lines, "  "+dim.Render("· Host OS"))
+			}
 		}
-		lines = append(lines, "  "+label(formStepName, "Name  ")+"   "+nameShown)
+
+		// ── Step 4 · Friendly name (all methods) ─────────────────────────
+		nameHint := "a label for this host (optional)"
+		if isRelay {
+			nameHint = "a friendly name for this connection (optional)"
+		}
+		switch {
+		case m.formStep == formStepName:
+			lines = append(lines, "  "+boldAccent.Render("Name")+dim.Render("   "+nameHint))
+			shown := m.formName
+			if shown == "" {
+				shown = dim.Render("(defaults to host)")
+			}
+			lines = append(lines, "   "+shown+caret)
+		case m.formName != "":
+			lines = append(lines, "  "+check+" "+dim.Render("Name   ")+m.formName)
+		}
+
+		// ── What the relay flow will do (set expectations) ───────────────
+		if isRelay {
+			lines = append(lines, "")
+			lines = append(lines, dim.Render("  → Opens a reverse tunnel from this Mac, then installs auxly on the"))
+			lines = append(lines, dim.Render("    relay box and wires its agent to your memory. Nothing to run there."))
+		}
 	case sshModePrint:
 		lines = append(lines, cyan.Render(fmt.Sprintf("MCP config for %q", m.selectedName()))+dim.Render("  (paste into your IDE)"))
 		for _, l := range strings.Split(m.preview, "\n") {
@@ -884,14 +1265,29 @@ func (m sshModel) View() string {
 		lines = append(lines, dim.Render("Press any key to close."))
 	default:
 		action := func(k, label string) string { return accent.Render("["+k+"]") + dim.Render(" "+label) }
-		lines = append(lines, strings.Join([]string{
-			action("c", "Connect new"),
-			action("t", "Test"),
-			action("p", "Print config"),
-			action("d", "Remove"),
-		}, dim.Render("   ")))
+		var bar []string
+		if len(m.clients) > 0 {
+			// Managing connected boxes (host side).
+			bar = []string{
+				action("c", "Connect new"),
+				action("d", "Disconnect"),
+				action("r", "Reconnect"),
+				action("e", "Rename"),
+				action("x", "Remove"),
+			}
+		} else {
+			bar = []string{
+				action("c", "Connect new"),
+				action("t", "Test"),
+				action("p", "Print config"),
+				action("d", "Remove"),
+			}
+		}
+		lines = append(lines, strings.Join(bar, dim.Render("   ")))
 		if m.status != "" {
 			lines = append(lines, lipgloss.NewStyle().Foreground(ColorWarning).Render(m.status))
+		} else if len(m.clients) > 0 {
+			lines = append(lines, dim.Render("Select a box with ")+accent.Render("↑/↓")+dim.Render(" or a click, then act. Restart that box's agent after changes."))
 		} else {
 			lines = append(lines, dim.Render("`auxly connect` in a terminal does the same — this tab is a front-end for it."))
 		}

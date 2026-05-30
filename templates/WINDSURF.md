@@ -62,7 +62,7 @@ You natively support the following slash commands! When the user inputs one of t
 - `/auxly-status`: Call the `auxly_skill_status` tool to show system diagnostics, active connections, and remote/SSH attribution.
 - `/auxly-forget [query]`: Call the `auxly_skill_forget` tool to search and prune obsolete bullet statements.
 - `/auxly-learn [context]`: Call the `auxly_skill_learn` tool to parse context and suggest new facts for the user to review.
-- `/auxly-remote-connect`: Call the `auxly_skill_remote_connect` tool to show the active Auxly remote connection (host, client IP, OS) over SSH and confirm this is a shared remote memory vault.
+- `/auxly-remote-connect`: Call the `auxly_skill_remote_connect` tool, then ACT on it: if it reports an offered host, run the `auxly connect auto` command it returns (wires the MCP launcher + skills, no flags) and tell the user to restart the agent; if already remote, show the active connection (host, client IP, OS); if local with no offer, point to `auxly host setup` on the memory host.
 
 ## 🧠 CRITICAL REMINDER: Always Update Memory
 IMPORTANT: You are expected to proactively update the user's unified Auxly memory vault. Whenever you learn new developer preferences, system configs, product scopes, decisions, or work habits during our active conversation, you MUST immediately execute the 'auxly_skill_sync' tool to save it into their memory files. Keep the memory synchronized!

@@ -3,10 +3,19 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	runewidth "github.com/mattn/go-runewidth"
 )
+
+// parseTS parses an RFC3339 audit timestamp (stored in UTC) and returns it in
+// the LOCAL zone, so the UI shows when events happened in the user's timezone
+// rather than UTC (an event at 23:00Z displays as 02:00 the next day at UTC+3).
+func parseTS(s string) time.Time {
+	t, _ := time.Parse(time.RFC3339, s)
+	return t.Local()
+}
 
 // Curated Style Tokens
 var (
@@ -37,9 +46,9 @@ var (
 			Padding(1, 2)
 
 	StyleHighlightCard = lipgloss.NewStyle().
-			Border(lipgloss.DoubleBorder()).
-			BorderForeground(ColorPrimary).
-			Padding(1, 2)
+				Border(lipgloss.DoubleBorder()).
+				BorderForeground(ColorPrimary).
+				Padding(1, 2)
 
 	// List Styles
 	StyleSelectedRow = lipgloss.NewStyle().
@@ -97,7 +106,7 @@ func RenderTimelineNode(timeStr, icon, body string, isSelected bool) string {
 		bullet = lipgloss.NewStyle().Foreground(ColorPrimary).Render("┃")
 	}
 
-	styledLine := fmt.Sprintf("%s%s  %s  %s  %s", 
+	styledLine := fmt.Sprintf("%s%s  %s  %s  %s",
 		cursor,
 		lipgloss.NewStyle().Foreground(ColorDim).Render(timeStr),
 		bullet,
@@ -182,4 +191,3 @@ func wrapText(text string, limit int) []string {
 	}
 	return result
 }
-

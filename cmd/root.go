@@ -100,6 +100,8 @@ func customHelpFunc(cmd *cobra.Command, args []string) {
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"connect remove"+reset, "Remove a configured remote host"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"connect test"+reset, "Reachability + host-auxly dependency doctor"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"connect print"+reset, "Print the MCP JSON block (manual fallback)"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"connect use"+reset, "Use a host's memory from this machine; disconnect leaves no trace"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"host"+reset, "Serve this machine's memory to a NAT'd remote via a public relay"))
 	sb.WriteString("\r\n")
 
 	sb.WriteString(bold + "Audit & Pending Queue:" + reset + "\r\n")

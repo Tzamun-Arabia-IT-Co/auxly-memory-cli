@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -30,7 +31,7 @@ const (
 // reader expects the top-level `remotes:` key with `name:` and `host:` set.
 type remoteProfile struct {
 	Name    string   `yaml:"name"`
-	Method  string   `yaml:"method"` // "lan" | "vpn" | "bastion" | "public"
+	Method  string   `yaml:"method"`       // "lan" | "vpn" | "bastion" | "public"
 	OS      string   `yaml:"os,omitempty"` // "linux" | "darwin" | "windows"
 	User    string   `yaml:"user"`
 	Host    string   `yaml:"host"`
@@ -41,6 +42,19 @@ type remoteProfile struct {
 	// mcp-server serves a specific vault folder instead of the host's default
 	// (~/.auxly/memory). Useful when the host stores memory outside $HOME.
 	MemPath string `yaml:"mem_path,omitempty"`
+	// HostBin is the absolute path to `auxly` ON THE HOST. Needed because a
+	// non-interactive SSH command runs with a minimal PATH (e.g. macOS omits
+	// /usr/local/bin), so a bare `auxly` may not resolve. Defaults to "auxly".
+	HostBin string `yaml:"host_bin,omitempty"`
+}
+
+// hostAuxlyBin returns the command used to invoke auxly on the host — the
+// profile's absolute HostBin when set, otherwise a bare "auxly" (PATH lookup).
+func hostAuxlyBin(p remoteProfile) string {
+	if strings.TrimSpace(p.HostBin) != "" {
+		return p.HostBin
+	}
+	return "auxly"
 }
 
 type remotesConfig struct {
@@ -163,6 +177,12 @@ func sshConnArgs(p remoteProfile) []string {
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=10",
+	}
+	// Through a relay/tunnel the endpoint is localhost:<reverse-port>, whose host
+	// key is first-seen. Under BatchMode an unknown key would hard-fail, so accept
+	// it on first contact (reachability is already gated by relay + key auth).
+	if p.Method == "rendezvous" || p.Jump != "" {
+		args = append(args, "-o", "StrictHostKeyChecking=accept-new")
 	}
 	if p.Jump != "" {
 		args = append(args, "-J", p.Jump)
@@ -372,9 +392,9 @@ func checkTwoWay(p remoteProfile) error {
 		return nil
 	}
 	printTwoWayFailureGuidance(p, addrs)
-	// Machine-readable token so the TUI can offer the method-retry ([m]).
+	// Machine-readable token so the TUI can offer the relay ([h]) / method-retry ([m]).
 	fmt.Println("AUXLY_TWOWAY_FAILED:" + p.Name)
-	return fmt.Errorf("no return path on '%s' — try another method ([m]) or set up Tailscale/same-LAN", p.Method)
+	return fmt.Errorf("no direct return path on '%s' — set up the relay tunnel with `auxly host setup` (recommended)", p.Method)
 }
 
 // localCandidateAddrs returns this machine's non-loopback IPv4 addresses — the
@@ -417,9 +437,11 @@ func hostCanReachBack(p remoteProfile, addrs []string) (string, bool) {
 }
 
 func printTwoWayFailureGuidance(p remoteProfile, addrs []string) {
-	fmt.Printf("   ✗ %s can't reach this machine back over '%s' (NAT) — no return path.\n", p.Host, p.Method)
-	fmt.Println("     Try a connection method that gives a return path to this machine:")
-	fmt.Printf("     TUI: press [m] to pick another method   ·   CLI: re-run with --method vpn|bastion|public\n")
+	fmt.Printf("   ✗ %s can't reach this Mac back over '%s' (NAT) — no direct return path.\n", p.Host, p.Method)
+	fmt.Println("     This Mac is your memory HOST. The fix is a relay tunnel, not another method:")
+	fmt.Println("     → Run `auxly host setup` on THIS Mac — it dials out to a public relay you")
+	fmt.Println("       control, then prints the `auxly connect use --jump …` command for the host.")
+	fmt.Println("     (Another method only helps if it gives a real return path, e.g. same-LAN/Tailscale.)")
 }
 
 // recordProvision logs the silent host install to the audit trail (best effort).
@@ -509,6 +531,12 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 	}
 
 	sshArgs := []string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-C"}
+	// Through a relay/tunnel the endpoint is localhost:<reverse-port>, whose host
+	// key is first-seen. BatchMode would otherwise hard-fail on an unknown key, so
+	// accept it on first contact (reachability is already gated by relay+key auth).
+	if p.Method == "rendezvous" || p.Jump != "" {
+		sshArgs = append(sshArgs, "-o", "StrictHostKeyChecking=accept-new")
+	}
 	if p.Jump != "" {
 		sshArgs = append(sshArgs, "-J", p.Jump)
 	}
@@ -519,7 +547,7 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 	// "--" terminates ssh option processing before the target.
 	sshArgs = append(sshArgs, "--", connTarget(p))
 	sshArgs = append(sshArgs,
-		"auxly", "mcp-server",
+		hostAuxlyBin(p), "mcp-server",
 		"--provider", provider,
 		"--source", "ssh-remote",
 		"--remote-os", runtime.GOOS,
@@ -594,6 +622,33 @@ var connectUseCmd = &cobra.Command{
 	RunE:         runConnectUse,
 }
 
+var connectDisconnectCmd = &cobra.Command{
+	Use:          "disconnect <name>",
+	Short:        "Remove a host's launcher/profile from this machine (leave no trace)",
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE:         runConnectDisconnect,
+}
+
+var connectAutoCmd = &cobra.Command{
+	Use:          "auto [name]",
+	Short:        "Connect to a host advertised on this relay — no flags (used by /auxly-remote-connect)",
+	Args:         cobra.MaximumNArgs(1),
+	SilenceUsage: true,
+	RunE:         runConnectAuto,
+}
+
+// Consumer-direction flags for `connect use` (create-on-the-fly) and the
+// `connect disconnect` purge toggle.
+var (
+	useHost         string
+	useJump         string
+	useMethod       string
+	useMemPath      string
+	useHostBin      string
+	disconnectPurge bool
+)
+
 // connect add — flag-driven, non-interactive add used by the TUI Remote tab.
 // The TUI collects the form natively, then runs this; the only terminal prompt
 // is the SSH password during first-time key install (ssh reads it from /dev/tty).
@@ -645,11 +700,20 @@ func init() {
 	connectAddCmd.Flags().StringVar(&addMemPath, "mem-path", "", "host memory folder to serve (passed as --path; default: host's ~/.auxly/memory)")
 	connectAddCmd.Flags().BoolVar(&addBatch, "batch", false, "non-interactive: never prompt for an SSH password (fail fast if key auth is missing)")
 
+	connectUseCmd.Flags().StringVar(&useHost, "host", "", "[user@]host[:port] to create the profile if it doesn't exist yet")
+	connectUseCmd.Flags().StringVar(&useJump, "jump", "", "jump/relay host ([user@]host) — for rendezvous reachability through a relay")
+	connectUseCmd.Flags().StringVar(&useMethod, "method", "", "reachability label: lan|vpn|bastion|public|rendezvous")
+	connectUseCmd.Flags().StringVar(&useMemPath, "mem-path", "", "host memory folder to serve (passed as --path)")
+	connectUseCmd.Flags().StringVar(&useHostBin, "host-bin", "", "absolute path to auxly ON THE HOST (when not on the host's SSH PATH, e.g. macOS /usr/local/bin)")
+	connectDisconnectCmd.Flags().BoolVar(&disconnectPurge, "purge", false, "also remove the installed /auxly-* skills from this machine")
+
 	connectCmd.AddCommand(connectListCmd)
 	connectCmd.AddCommand(connectRemoveCmd)
 	connectCmd.AddCommand(connectTestCmd)
 	connectCmd.AddCommand(connectPrintCmd)
 	connectCmd.AddCommand(connectUseCmd)
+	connectCmd.AddCommand(connectDisconnectCmd)
+	connectCmd.AddCommand(connectAutoCmd)
 	connectCmd.AddCommand(connectAddCmd)
 
 	rootCmd.AddCommand(connectCmd)
@@ -875,12 +939,18 @@ func runConnectUse(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	p, ok := findRemote(name)
 	if !ok {
-		return fmt.Errorf("remote profile %q not found", name)
+		var err error
+		p, err = createConsumerProfile(name)
+		if err != nil {
+			return err
+		}
 	}
 	fmt.Printf("🔗 Configuring THIS machine to use %s's memory...\n", connTarget(p))
-	// Confirm the outbound direction works (this machine → host).
-	if _, err := runSSH(p, "auxly", "--version"); err != nil {
-		return fmt.Errorf("can't reach %s from here (`auxly --version` failed): %w", p.Host, err)
+	// Confirm the outbound direction works (this machine → host), using the host's
+	// absolute auxly path when known (a bare `auxly` may not be on the host's
+	// minimal non-interactive SSH PATH).
+	if _, err := runSSH(p, hostAuxlyBin(p), "--version"); err != nil {
+		return fmt.Errorf("can't reach %s from here (`%s --version` failed): %w", p.Host, hostAuxlyBin(p), err)
 	}
 	fmt.Println("   ✓ Reached the host (this direction works)")
 	injectRemoteConfigs(p.Name)
@@ -891,6 +961,360 @@ func runConnectUse(cmd *cobra.Command, args []string) error {
 	fmt.Println("   • /auxly-* skills installed (shared-vault banner)")
 	fmt.Println("👉 Restart your IDE / agent; /auxly-remote-connect will show the live link.")
 	return nil
+}
+
+// createConsumerProfile builds and saves a consumer-direction profile from the
+// `connect use` flags when no profile with that name exists yet. For the
+// rendezvous flow it bootstraps this machine's key onto BOTH the relay (the
+// jump) and the host (the final hop through the relay) — the one-time setup.
+func createConsumerProfile(name string) (remoteProfile, error) {
+	if strings.TrimSpace(useHost) == "" {
+		return remoteProfile{}, fmt.Errorf("remote profile %q not found (pass --host [user@]host[:port] to create it)", name)
+	}
+	user, host, port, err := parseHostSpec(useHost)
+	if err != nil {
+		return remoteProfile{}, fmt.Errorf("invalid --host: %w", err)
+	}
+	method := useMethod
+	if method == "" {
+		if useJump != "" {
+			method = "rendezvous"
+		} else if isPrivateHost(host) {
+			method = "lan"
+		} else {
+			method = "public"
+		}
+	}
+	p := remoteProfile{
+		Name:    name,
+		Method:  method,
+		User:    user,
+		Host:    host,
+		Port:    port,
+		Jump:    useJump,
+		MemPath: useMemPath,
+		HostBin: strings.TrimSpace(useHostBin),
+	}
+
+	// One-time key bootstrap. The relay must trust this machine's key BEFORE we
+	// can jump through it to the host, so install onto the relay first.
+	if p.Jump != "" {
+		if ju, jh, jp, jerr := parseHostSpec(p.Jump); jerr == nil {
+			relay := remoteProfile{Name: "relay", Method: "public", User: ju, Host: jh, Port: jp}
+			if err := bootstrapKeyAuth(relay); err != nil {
+				fmt.Printf("⚠️  Key setup to the relay failed: %v\n", err)
+			}
+		}
+	}
+	if err := bootstrapKeyAuth(p); err != nil {
+		fmt.Printf("⚠️  Key setup to the host failed: %v\n", err)
+	}
+	if err := upsertRemote(p); err != nil {
+		return remoteProfile{}, err
+	}
+	fmt.Printf("💾 Saved remote profile %q (%s)\n", p.Name, p.Method)
+	return p, nil
+}
+
+// offersDir returns ~/.auxly/offers (where the host publishes relayOffers).
+func offersDir() (string, error) {
+	dir, err := auxlyDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "offers"), nil
+}
+
+// loadLocalOffers reads every relayOffer descriptor the host published locally.
+func loadLocalOffers() ([]relayOffer, error) {
+	dir, err := offersDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var offers []relayOffer
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var o relayOffer
+		if yaml.Unmarshal(data, &o) == nil && o.Name != "" && o.ReversePort != 0 {
+			offers = append(offers, o)
+		}
+	}
+	return offers, nil
+}
+
+// localPubKey ensures this machine has an ed25519 key and returns its public
+// half (generating one non-interactively if absent).
+func localPubKey() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	keyPath := filepath.Join(home, ".ssh", "id_ed25519")
+	pubPath := keyPath + ".pub"
+	if _, statErr := os.Stat(keyPath); os.IsNotExist(statErr) {
+		if mkErr := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); mkErr != nil {
+			return "", mkErr
+		}
+		gen := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", keyPath)
+		if genErr := gen.Run(); genErr != nil {
+			return "", fmt.Errorf("ssh-keygen failed: %w", genErr)
+		}
+	}
+	data, err := os.ReadFile(pubPath)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// runConnectAuto wires this box to a host advertised in a local relayOffer — the
+// flag-free path. It never prompts: if the box's key isn't authorized on the host
+// yet, it prints the key to add and stops (so it's safe to run from an agent).
+func runConnectAuto(cmd *cobra.Command, args []string) error {
+	offers, err := loadLocalOffers()
+	if err != nil {
+		return err
+	}
+	if len(offers) == 0 {
+		return fmt.Errorf("no connect offers found in ~/.auxly/offers — run `auxly host setup` on the memory host first")
+	}
+
+	// Select the offer: by name if given, else the only one, else list and stop.
+	offer := offers[0]
+	if len(args) > 0 {
+		matched := false
+		for _, o := range offers {
+			if o.Name == args[0] {
+				offer, matched = o, true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("no offer named %q (available: %s)", args[0], offerNames(offers))
+		}
+	} else if len(offers) > 1 {
+		return fmt.Errorf("multiple hosts offered (%s) — run `auxly connect auto <name>`", offerNames(offers))
+	}
+
+	p := remoteProfile{
+		Name:    offer.Name,
+		Method:  "rendezvous",
+		User:    offer.HostUser,
+		Host:    "localhost",
+		Port:    offer.ReversePort,
+		HostBin: offer.HostBin,
+	}
+	fmt.Printf("🔗 Connecting this machine to %s's memory (via the relay tunnel)...\n", offer.Name)
+
+	// Reachability + key check — never prompt. If auth fails, guide and stop.
+	if _, err := runSSH(p, "true"); err != nil {
+		pub, perr := localPubKey()
+		if perr != nil {
+			return fmt.Errorf("can't reach the host and couldn't read this box's public key: %w", perr)
+		}
+		fmt.Println("⚠️  This machine isn't authorized on the host yet (one-time step).")
+		fmt.Println("   Add this box's public key to the host's ~/.ssh/authorized_keys:")
+		fmt.Printf("   %s\n", pub)
+		fmt.Println("   Then run `auxly connect auto` again.")
+		return fmt.Errorf("ssh key not yet authorized on the host")
+	}
+
+	if _, err := runSSH(p, hostAuxlyBin(p), "--version"); err != nil {
+		return fmt.Errorf("reached the host but `%s --version` failed (is auxly installed there?): %w", hostAuxlyBin(p), err)
+	}
+	if err := upsertRemote(p); err != nil {
+		return err
+	}
+	fmt.Printf("   ✓ Reached %s and saved the profile\n", offer.Name)
+
+	injectRemoteConfigs(p.Name)
+	installAuxlySkills(remoteBanner())
+	fmt.Println()
+	fmt.Printf("🎉 This machine now uses %s's memory.\n", offer.Name)
+	fmt.Println("👉 RESTART your IDE / agent to load it — then /auxly-remote-connect shows the live link.")
+	return nil
+}
+
+// offerNames renders a comma-separated list of offer names for messages.
+func offerNames(offers []relayOffer) string {
+	names := make([]string, 0, len(offers))
+	for _, o := range offers {
+		names = append(names, o.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
+// runConnectDisconnect removes a host's launcher (and optionally skills + the
+// saved profile) from THIS machine so a shared box is left with no trace of the
+// connection. No memory is ever copied locally, so there is nothing else to wipe.
+func runConnectDisconnect(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	fmt.Printf("🧹 Disconnecting %q from this machine...\n", name)
+
+	removed := removeRemoteConfigs(name)
+	if len(removed) > 0 {
+		fmt.Println("   ✓ Removed the MCP launcher from:")
+		for _, app := range removed {
+			fmt.Printf("     ↳ %s\n", app)
+		}
+	} else {
+		fmt.Println("   • No injected MCP launcher found for this host")
+	}
+
+	if disconnectPurge {
+		n := removeAuxlySkills()
+		fmt.Printf("   ✓ Removed Auxly skills from %d location(s)\n", n)
+	}
+
+	if _, ok := findRemote(name); ok {
+		if err := deleteRemoteProfile(name); err != nil {
+			fmt.Printf("   ⚠ Could not remove saved profile: %v\n", err)
+		} else {
+			fmt.Printf("   ✓ Removed saved profile %q (relay/host coordinates)\n", name)
+		}
+	}
+
+	fmt.Println("👉 Restart your IDE/agent to drop the connection. No memory was stored on this machine.")
+	return nil
+}
+
+// deleteRemoteProfile drops a profile from remotes.yaml by name.
+func deleteRemoteProfile(name string) error {
+	cfg, err := loadRemotes()
+	if err != nil {
+		return err
+	}
+	out := make([]remoteProfile, 0, len(cfg.Remotes))
+	for _, p := range cfg.Remotes {
+		if p.Name != name {
+			out = append(out, p)
+		}
+	}
+	return saveRemotes(remotesConfig{Remotes: out})
+}
+
+// removeRemoteConfigs strips the auxly-memory launcher entry (matching this
+// host's connect-mcp profile) from every known IDE/agent config on this machine.
+func removeRemoteConfigs(name string) []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	var removed []string
+	seen := map[string]bool{}
+	for _, t := range knownIDETargets(home) {
+		if seen[t.Path] {
+			continue
+		}
+		seen[t.Path] = true
+		if removeAuxlyEntry(t.Path, name) {
+			removed = append(removed, t.AppName)
+		}
+	}
+	return removed
+}
+
+// removeAuxlyEntry deletes the "auxly-memory" server from a single JSON config
+// file when it is OUR connect-mcp launcher for the given profile name. Returns
+// true if the file was modified.
+func removeAuxlyEntry(path, name string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var cfg map[string]interface{}
+	if json.Unmarshal(data, &cfg) != nil || cfg == nil {
+		return false
+	}
+	changed := false
+	if servers, ok := cfg["mcpServers"].(map[string]interface{}); ok {
+		if def, ok := servers["auxly-memory"]; ok && launcherMatches(def, name) {
+			delete(servers, "auxly-memory")
+			changed = true
+		}
+	}
+	if def, ok := cfg["auxly-memory"]; ok && launcherMatches(def, name) {
+		delete(cfg, "auxly-memory")
+		changed = true
+	}
+	if !changed {
+		return false
+	}
+	newData, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return false
+	}
+	return os.WriteFile(path, newData, 0644) == nil
+}
+
+// launcherMatches reports whether a server definition is our connect-mcp
+// launcher for the given profile name (guards against nuking a local
+// mcp-server entry or a different host's launcher).
+func launcherMatches(def interface{}, name string) bool {
+	m, ok := def.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	rawArgs, ok := m["args"].([]interface{})
+	if !ok {
+		return false
+	}
+	hasLauncher, hasName := false, false
+	for _, a := range rawArgs {
+		s, _ := a.(string)
+		if s == connectMCPArgsName {
+			hasLauncher = true
+		}
+		if s == name {
+			hasName = true
+		}
+	}
+	return hasLauncher && hasName
+}
+
+// removeAuxlySkills deletes the installed /auxly-* skill folders from every
+// agent skills dir. Returns the count of locations touched.
+func removeAuxlySkills() int {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 0
+	}
+	skillDirs := []string{
+		filepath.Join(home, ".claude", "skills"),
+		".claude/skills",
+		filepath.Join(home, ".codex", "skills"),
+		".codex/skills",
+		filepath.Join(home, ".gemini", "config", "skills"),
+	}
+	count := 0
+	for _, base := range skillDirs {
+		touched := false
+		for skillName := range getSkillsMap() {
+			dir := filepath.Join(base, skillName)
+			if _, statErr := os.Stat(dir); statErr == nil {
+				if os.RemoveAll(dir) == nil {
+					touched = true
+				}
+			}
+		}
+		if touched {
+			count++
+		}
+	}
+	return count
 }
 
 // connectTest runs the lightweight `auxly --version` reachability check.
@@ -1218,6 +1642,11 @@ func installPubKey(p remoteProfile, pubPath string) error {
 		// accept-new so a first-time host key never adds a yes/no prompt — the only
 		// interactive prompt is then the password (important for the TUI's PTY flow).
 		args := []string{"-o", "StrictHostKeyChecking=accept-new", "-i", pubPath}
+		// ssh-copy-id has no -J flag; pass the jump as an -o ProxyJump option so the
+		// rendezvous flow (key onto the host through the relay) still works.
+		if p.Jump != "" {
+			args = append(args, "-o", "ProxyJump="+p.Jump)
+		}
 		if p.Port != 0 && p.Port != defaultSSHPort {
 			args = append(args, "-p", strconv.Itoa(p.Port))
 		}
