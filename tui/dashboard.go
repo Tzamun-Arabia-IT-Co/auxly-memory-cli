@@ -387,18 +387,6 @@ func (m dashboardModel) View() string {
 
 	var brandCards []string
 	for idx, b := range brands {
-		writes := 0
-		if m.stats.ByProvider != nil {
-			if b.id == "antigravity" {
-				writes = m.stats.ByProvider["antigravity"] +
-					m.stats.ByProvider["antigravity-ide"] +
-					m.stats.ByProvider["antigravity-agent"] +
-					m.stats.ByProvider["antigravity-cli"]
-			} else {
-				writes = m.stats.ByProvider[b.id]
-			}
-		}
-
 		trustLevel := "auto"
 		if m.trustCfg != nil {
 			trustLevel = m.trustCfg.GetTrustLevel(b.id)
@@ -420,16 +408,16 @@ func (m dashboardModel) View() string {
 			trustBadge = dim.Render("read-only")
 		}
 
-		// "active" = a live MCP session exists for this brand right now
-		// (ground truth from the session registry), not a stale audit guess.
-		isActive := false
+		// Count live MCP sessions for this brand from the session registry
+		// (ground truth). "active" = at least one connection right now.
+		connCount := 0
 		for _, sess := range m.sessions {
 			if sess.Provider == b.id ||
 				(b.id == "antigravity" && strings.HasPrefix(sess.Provider, "antigravity")) {
-				isActive = true
-				break
+				connCount++
 			}
 		}
+		isActive := connCount > 0
 
 		var cardName string
 		var cardBorderColor lipgloss.Color
@@ -463,11 +451,11 @@ func (m dashboardModel) View() string {
 			cardName = bold.Render(b.name)
 		}
 
-		rightDetails := fmt.Sprintf(" %s %s\n   %s · W:%d · %s",
+		rightDetails := fmt.Sprintf(" %s %s\n   %s · C:%d · %s",
 			b.icon,
 			cardName,
 			statusDot,
-			writes,
+			connCount,
 			trustBadge,
 		)
 
