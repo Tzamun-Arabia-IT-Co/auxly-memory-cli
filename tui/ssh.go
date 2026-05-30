@@ -105,7 +105,8 @@ type sshModel struct {
 	spin           int                // spinner frame counter
 	progressCh     chan progressEvent // live line stream from the running command
 	progressNeeded bool               // first-time SSH key setup required
-	pendingKeyArgs []string           // non-batch `connect add …` args for the key-setup fallback
+	pendingKeySub  string             // subcommand for the key re-run ("connect" or "host")
+	pendingKeyArgs []string           // non-batch args for the key-setup fallback ([p]/[K])
 	password       string             // transient masked SSH password (sshModePassword)
 	twoWayFailed   bool               // host can't reach back; offer [u] consumer direction
 	twoWayHost     string             // profile name to use when [u] is pressed
@@ -196,9 +197,10 @@ type hostInfo struct {
 // clientRow mirrors an entry in ~/.auxly/clients.yaml — a remote box this Mac
 // (as a host) has wired to use its memory. These are the managed connections.
 type clientRow struct {
-	Name   string `yaml:"name"`
-	Target string `yaml:"target"`
-	Method string `yaml:"method"`
+	Name     string `yaml:"name"`
+	Target   string `yaml:"target"`
+	Method   string `yaml:"method"`
+	Hostname string `yaml:"hostname"` // box's self-reported hostname (matches session RemoteHost)
 }
 
 type clientsYAML struct {
@@ -266,10 +268,19 @@ func exePath() string {
 // the real terminal — used only when an SSH password prompt is unavoidable
 // (first-time key install).
 func runConnect(args ...string) tea.Cmd {
-	c := exec.Command(exePath(), append([]string{"connect"}, args...)...)
+	return runSub("connect", args...)
+}
+
+// runSub suspends the TUI and runs `auxly <sub> <args…>` attached to the real
+// terminal, so an interactive password prompt (e.g. relay `host setup`) works.
+func runSub(sub string, args ...string) tea.Cmd {
+	if sub == "" {
+		sub = "connect"
+	}
+	c := exec.Command(exePath(), append([]string{sub}, args...)...)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		if err != nil {
-			return sshExecDoneMsg{status: "⚠ connect " + strings.Join(args, " ") + " exited: " + err.Error()}
+			return sshExecDoneMsg{status: "⚠ " + sub + " " + strings.Join(args, " ") + " exited: " + err.Error()}
 		}
 		return sshExecDoneMsg{status: ""}
 	})
@@ -361,9 +372,12 @@ func (m sshModel) beginCapturedSub(title, sub string, args ...string) (sshModel,
 	return m.beginRun(title, ch)
 }
 
-func (m sshModel) beginPTY(title, password string, args ...string) (sshModel, tea.Cmd) {
+func (m sshModel) beginPTY(title, password, sub string, args ...string) (sshModel, tea.Cmd) {
+	if sub == "" {
+		sub = "connect"
+	}
 	ch := make(chan progressEvent, 128)
-	startPTYRun(ch, password, args...)
+	startPTYRun(ch, password, sub, args...)
 	return m.beginRun(title, ch)
 }
 
@@ -629,9 +643,10 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 			case "k", "K":
 				// Fallback: finish key setup in a real terminal.
 				args := m.pendingKeyArgs
+				sub := m.pendingKeySub
 				m.mode = sshModeList
 				m.progressNeeded = false
-				return m, runConnect(args...)
+				return m, runSub(sub, args...)
 			}
 		}
 		m.mode = sshModeList // any other key closes the result panel
@@ -810,9 +825,16 @@ func (m sshModel) submitForm() (sshModel, tea.Cmd) {
 		// box, authorize its key on this Mac, and wire its agent — nothing to run
 		// on the box.
 		args := []string{"setup", "--rendezvous", host, "--yes", "--batch", "--provision"}
+		// Stash the interactive (non-batch) variant so that if the relay key
+		// isn't installed yet, the result panel can offer [p] to enter the relay
+		// password right here instead of dropping to a terminal.
+		keyArgs := []string{"setup", "--rendezvous", host, "--yes", "--provision"}
 		if name := strings.TrimSpace(m.formName); name != "" {
 			args = append(args, "--name", name)
+			keyArgs = append(keyArgs, "--name", name)
 		}
+		m.pendingKeySub = "host"
+		m.pendingKeyArgs = keyArgs
 		return m.beginCapturedSub("Setting up relay via "+host, "host", args...)
 	}
 	osTarget := m.formOS
@@ -826,8 +848,9 @@ func (m sshModel) submitForm() (sshModel, tea.Cmd) {
 	if jump := strings.TrimSpace(m.formJump); jump != "" {
 		base = append(base, "--jump", jump)
 	}
-	// Stash the non-batch args for the key-setup fallback ([K] on the result panel),
-	// then stream the doctor/setup in-pane via --batch (never prompts here).
+	// Stash the non-batch args for the key-setup fallback ([p]/[K] on the result
+	// panel), then stream the doctor/setup in-pane via --batch (never prompts here).
+	m.pendingKeySub = "connect"
 	m.pendingKeyArgs = append([]string{}, base...)
 	m.editingHost = false
 	return m.beginCaptured("Connecting to "+host, append(base, "--batch")...)
@@ -859,10 +882,15 @@ func (m sshModel) handlePasswordKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		}
 		pw := m.password
 		args := m.pendingKeyArgs
+		sub := m.pendingKeySub
 		m.password = "" // drop it from the model immediately
 		m.editingHost = false
 		m.progressNeeded = false
-		return m.beginPTY("Installing key & connecting", pw, args...)
+		title := "Installing key & connecting"
+		if sub == "host" {
+			title = "Installing relay key & connecting"
+		}
+		return m.beginPTY(title, pw, sub, args...)
 	case tea.KeyBackspace, tea.KeyCtrlH:
 		if r := []rune(m.password); len(r) > 0 {
 			m.password = string(r[:len(r)-1])
@@ -1004,17 +1032,52 @@ func (m sshModel) View() string {
 		if len(m.clients) == 0 {
 			lines = append(lines, "  "+dim.Render("None yet — press ")+accent.Render("c")+dim.Render(" and pick 'relay' to connect a box."))
 		} else {
+			// A box is "live" when one of its agents currently holds an SSH-remote
+			// session through this host (ground truth from the session registry).
+			green := lipgloss.NewStyle().Foreground(ColorSuccess)
+			liveBox := map[string]bool{}
+			type liveRemote struct{ host, provider string }
+			var lives []liveRemote
+			for _, s := range gatherSessions() {
+				if s.Remote && s.Host != "" {
+					liveBox[strings.ToLower(s.Host)] = true
+					lives = append(lives, liveRemote{s.Host, s.Provider})
+				}
+			}
+			boxKeys := map[string]bool{}
+			for _, c := range m.clients {
+				boxKeys[strings.ToLower(c.Name)] = true
+				boxKeys[strings.ToLower(targetHost(c.Target))] = true
+				if c.Hostname != "" {
+					boxKeys[strings.ToLower(c.Hostname)] = true
+				}
+			}
 			for i, c := range m.clients {
 				name := c.Name
 				if name == "" {
 					name = "(unnamed)"
 				}
-				row := fmt.Sprintf("%-20s %-24s %s", truncate(name, 20), truncate(c.Target, 24), dim.Render("["+c.Method+"]"))
+				dot := dim.Render("○")
+				// Pad the status as plain text BEFORE styling so columns align.
+				status := dim.Render(fmt.Sprintf("%-9s", "idle"))
+				if boxIsLive(liveBox, c) {
+					dot = green.Render("●")
+					status = green.Render(fmt.Sprintf("%-9s", "connected"))
+				}
+				row := fmt.Sprintf("%s %-18s %-22s %s %s", dot, truncate(name, 18), truncate(c.Target, 22), status, dim.Render("["+c.Method+"]"))
 				if i == m.cursor {
 					lines = append(lines, accent.Render("▸ ")+selRow.Render(row))
 				} else {
 					lines = append(lines, "  "+row)
 				}
+			}
+			// Live SSH-remote sessions whose self-reported hostname doesn't match a
+			// configured box name (e.g. box "OC" connecting as "open.claw").
+			for _, lr := range lives {
+				if boxKeys[strings.ToLower(lr.host)] {
+					continue
+				}
+				lines = append(lines, "  "+green.Render("● ")+lipgloss.NewStyle().Bold(true).Render(truncate(lr.host, 18))+"  "+dim.Render(lr.provider+" · connected"))
 			}
 		}
 		lines = append(lines, "")
@@ -1098,9 +1161,24 @@ func (m sshModel) View() string {
 			}
 		}
 	case sshModeResult:
+		// The relay/host setup can exit 0 having only *saved config* while still
+		// needing a manual key-install step. Detect that so we don't claim "Done"
+		// when the connection isn't actually live yet.
+		actionNeeded := false
+		for _, l := range m.progressOut {
+			if strings.Contains(l, "isn't set up yet") ||
+				strings.Contains(l, "host setup`") ||
+				strings.Contains(l, "host setup' ") {
+				actionNeeded = true
+				break
+			}
+		}
 		head := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess).Render("✓ Done")
-		if !m.progressOK {
+		switch {
+		case !m.progressOK:
 			head = lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render("Finished with issues")
+		case actionNeeded:
+			head = lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render("⚠ One more step — not connected yet")
 		}
 		lines = append(lines, head+dim.Render("  ("+m.progressTitle+")"))
 		out := m.progressOut
@@ -1120,7 +1198,14 @@ func (m sshModel) View() string {
 			lines = append(lines, accent.Render("[h]")+dim.Render(" set up the relay tunnel on this Mac (recommended for a NAT'd host)"))
 			lines = append(lines, accent.Render("[m]")+dim.Render(" try a different connection method   ·   any other key: close"))
 		case m.progressNeeded && len(m.pendingKeyArgs) > 0:
-			lines = append(lines, accent.Render("[p]")+dim.Render(" enter SSH password here   ")+accent.Render("[K]")+dim.Render(" use a terminal instead   ·   any other key: close"))
+			pwLabel := " enter SSH password here   "
+			if m.pendingKeySub == "host" {
+				pwLabel = " enter the relay password here   "
+			}
+			lines = append(lines, accent.Render("[p]")+dim.Render(pwLabel)+accent.Render("[K]")+dim.Render(" use a terminal instead   ·   any other key: close"))
+		case actionNeeded:
+			lines = append(lines, accent.Render("Next:")+dim.Render(" run ")+accent.Render("auxly host setup")+dim.Render(" in a terminal to install the relay key, then reconnect."))
+			lines = append(lines, dim.Render("Press any key to close."))
 		default:
 			lines = append(lines, dim.Render("Press any key to close."))
 		}

@@ -896,7 +896,7 @@ func runConnectList(cmd *cobra.Command, args []string) error {
 	} else {
 		for _, c := range clients {
 			status := "○ idle"
-			if liveHosts[strings.ToLower(c.Name)] {
+			if clientIsLive(liveHosts, c) {
 				status = "● live"
 			}
 			fmt.Printf("   • %-20s %-22s [%s]  %s\n", c.Name, c.Target, c.Method, status)

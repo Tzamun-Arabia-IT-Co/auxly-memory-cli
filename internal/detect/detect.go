@@ -34,8 +34,16 @@ func InstalledAgents() []Agent {
 			[]string{filepath.Join(home, "Library/Application Support/Claude/claude_desktop_config.json")}, nil},
 		{"Claude Code / CLI", "claude-code", "MCP+Shell",
 			nil, []string{"claude"}},
+		// Cursor ships two distinct surfaces that each take their own MCP config:
+		// the IDE (globalStorage mcpServers.json, launched by the `cursor` binary)
+		// and the Agent CLI (`cursor-agent`, reads ~/.cursor/mcp.json). Detect them
+		// separately so init shows both and onboards each correctly.
+		{"Cursor IDE", "cursor", "MCP",
+			[]string{filepath.Join(home, "Library/Application Support/Cursor/User/globalStorage/co.heron.cursor/mcpServers.json")},
+			[]string{"cursor"}},
 		{"Cursor CLI", "cursor", "MCP",
-			nil, []string{"cursor"}},
+			[]string{filepath.Join(home, ".cursor/mcp.json")},
+			[]string{"cursor-agent"}},
 		{"Codex IDE Desktop", "codex", "MCP",
 			[]string{filepath.Join(home, ".codex/config.toml")}, nil},
 		{"Gemini CLI", "gemini", "MCP",

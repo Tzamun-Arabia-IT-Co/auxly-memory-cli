@@ -104,7 +104,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		if m.screen == screenDashboard && m.dashboard.selectedAgent != "" {
-			if msg.String() == "1" || msg.String() == "2" {
+			// While the agent popup is open, its tab keys (1/2/3) must reach the
+			// dashboard rather than the parent's screen switcher. "3" was missing,
+			// so it fell through and jumped to the Files screen.
+			switch msg.String() {
+			case "1", "2", "3":
 				var cmd tea.Cmd
 				m.dashboard, cmd = m.dashboard.Update(msg)
 				return m, cmd

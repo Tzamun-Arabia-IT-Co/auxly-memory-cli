@@ -162,7 +162,7 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			name := a.agent.Name
-			if name == "Claude Code / CLI" || name == "Gemini CLI" || name == "Codex CLI" || name == "Antigravity CLI" {
+			if name == "Claude Code / CLI" || name == "Gemini CLI" || name == "Codex CLI" || name == "Antigravity CLI" || name == "Cursor CLI" {
 				continue
 			}
 			m.onboardStatuses = append(m.onboardStatuses, agentOnboardStatus{
@@ -205,6 +205,15 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.onboardAntigravityCmd())
 			m.onboardStatuses = append(m.onboardStatuses, agentOnboardStatus{
 				name:    "Antigravity CLI",
+				isCLI:   true,
+				status:  "pending",
+				message: "✓ Connecting...",
+			})
+		}
+		if isSelected("Cursor CLI") {
+			cmds = append(cmds, m.onboardCursorCmd())
+			m.onboardStatuses = append(m.onboardStatuses, agentOnboardStatus{
+				name:    "Cursor CLI",
 				isCLI:   true,
 				status:  "pending",
 				message: "✓ Connecting...",
@@ -586,6 +595,55 @@ func (m wizardModel) onboardAntigravityCmd() tea.Cmd {
 		if isAuthError {
 			status.status = "auth_needed"
 			status.message = "Open Antigravity CLI and authenticate, then run '/auxly-init'"
+		} else if runErr != nil {
+			status.status = "success"
+			status.message = "✓ MCP registered! Type '/auxly-init' in active chat to sync."
+		} else {
+			status.status = "success"
+			status.message = "✓ Synced successfully! (auto-migrated)"
+		}
+
+		return onboardAgentProgressMsg{status: status}
+	}
+}
+
+// onboardCursorCmd drives the Cursor Agent CLI (`cursor-agent`) headlessly. The
+// MCP server is already written to ~/.cursor/mcp.json and approved by `auxly
+// setup`; --approve-mcps makes the headless run load it too, and -p runs the
+// /auxly-init sync non-interactively.
+func (m wizardModel) onboardCursorCmd() tea.Cmd {
+	return func() tea.Msg {
+		memPath, _ := filepath.Abs(m.memoryPath)
+		status := agentOnboardStatus{name: "Cursor CLI", isCLI: true}
+		cursorPath, err := lookPath("cursor-agent")
+		if err != nil {
+			status.status = "success"
+			status.message = "✓ MCP registered! Type '/auxly-init' in active chat to sync."
+			return onboardAgentProgressMsg{status: status}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// -f trusts the workspace (headless runs otherwise stop at a "Workspace
+		// Trust Required" gate and exit non-zero); --approve-mcps loads the server
+		// for this run even if the persistent allowlist write hasn't landed.
+		cmd := exec.CommandContext(ctx, cursorPath, "-p", "-f", "--approve-mcps", "/auxly-init")
+		cmd.Stdin = strings.NewReader("")
+		cmd.Env = append(os.Environ(), "AUXLY_MEMORY_PATH="+memPath)
+		outBytes, runErr := cmd.CombinedOutput()
+		output := strings.ToLower(string(outBytes))
+
+		isAuthError := strings.Contains(output, "login") ||
+			strings.Contains(output, "auth") ||
+			strings.Contains(output, "sign in") ||
+			strings.Contains(output, "api key") ||
+			strings.Contains(output, "unauthorized") ||
+			strings.Contains(output, "credentials")
+
+		if isAuthError {
+			status.status = "auth_needed"
+			status.message = "Open Cursor CLI and auth (run 'cursor-agent login') then run '/auxly-init'"
 		} else if runErr != nil {
 			status.status = "success"
 			status.message = "✓ MCP registered! Type '/auxly-init' in active chat to sync."

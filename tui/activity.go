@@ -252,17 +252,7 @@ func (m activityModel) renderDetailPopup(e audit.Entry) string {
 	// Source line: Local, or Remote with host / IP / OS from the SSH attribution.
 	if e.Source == "ssh-remote" {
 		src := "Remote (SSH)"
-		var meta []string
-		if e.RemoteHost != "" {
-			meta = append(meta, e.RemoteHost)
-		}
-		if e.RemoteIP != "" {
-			meta = append(meta, e.RemoteIP)
-		}
-		if e.RemoteOS != "" {
-			meta = append(meta, e.RemoteOS)
-		}
-		if len(meta) > 0 {
+		if meta := remoteSourceMeta(e); len(meta) > 0 {
 			src += "  " + dim.Render(strings.Join(meta, " · "))
 		}
 		lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Source:"), lipgloss.NewStyle().Foreground(ColorAccent).Render(src)))
@@ -547,6 +537,17 @@ func (m auditTrailModel) renderDetailPopup(e audit.Entry) string {
 	lines = append(lines, fmt.Sprintf("  %-12s %s %s (%s)", dim.Render("Agent:"), icon, styledProvider, dim.Render(e.AgentID)))
 	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Action:"), green.Render(e.Action)))
 
+	// Source line: Local, or Remote enriched with friendly box name · host · IP · OS.
+	if e.Source == "ssh-remote" {
+		src := "Remote (SSH)"
+		if meta := remoteSourceMeta(e); len(meta) > 0 {
+			src += "  " + dim.Render(strings.Join(meta, " · "))
+		}
+		lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Source:"), lipgloss.NewStyle().Foreground(ColorAccent).Render(src)))
+	} else {
+		lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Source:"), dim.Render("Local")))
+	}
+
 	cleanReasonLines := wrapText(e.Reason, 50)
 	for i, rl := range cleanReasonLines {
 		label := ""
@@ -597,6 +598,67 @@ func (m auditTrailModel) renderDetailPopup(e audit.Entry) string {
 		Padding(1, 2)
 
 	return popupStyle.Render(strings.Join(paddedLines, "\n"))
+}
+
+// remoteSourceMeta builds the human-facing remote attribution for an audit
+// entry: the friendly box name (from clients.yaml), the reporting hostname, the
+// real box IP, and the OS — whatever is available, deduped. The raw SSH metadata
+// only carries the hostname/IP the agent reported; this enriches it with the
+// box's configured name and resolves the real IP when the entry lacks one.
+func remoteSourceMeta(e audit.Entry) []string {
+	clients := readClients()
+	name := friendlyClientName(e.RemoteHost, clients)
+	// The stored RemoteIP is the tunnel's localhost (::1 / 127.0.0.1) for relayed
+	// boxes — meaningless. Prefer the real box IP from clients.yaml whenever the
+	// stored value is empty or loopback.
+	ip := e.RemoteIP
+	if ip == "" || isLoopbackIP(ip) {
+		if real := remoteIPForHost(e.RemoteHost, clients); real != "" {
+			ip = real
+		}
+	}
+
+	var meta []string
+	if name != "" {
+		meta = append(meta, name)
+	}
+	if e.RemoteHost != "" && !strings.EqualFold(e.RemoteHost, name) {
+		meta = append(meta, e.RemoteHost)
+	}
+	if ip != "" {
+		meta = append(meta, ip)
+	}
+	if e.RemoteOS != "" {
+		meta = append(meta, e.RemoteOS)
+	}
+	return meta
+}
+
+// isLoopbackIP reports whether an IP string is a loopback address — the value a
+// relayed/tunnelled box reports for its connection (the host side sees the
+// tunnel's localhost), which is not a useful identifier.
+func isLoopbackIP(ip string) bool {
+	switch strings.ToLower(strings.TrimSpace(ip)) {
+	case "::1", "127.0.0.1", "localhost", "0.0.0.0":
+		return true
+	}
+	return strings.HasPrefix(ip, "127.")
+}
+
+// friendlyClientName resolves a session's reporting hostname to a configured
+// box's friendly name, matching by name, captured hostname, or target host.
+func friendlyClientName(host string, clients []clientRow) string {
+	if host == "" {
+		return ""
+	}
+	for _, c := range clients {
+		if strings.EqualFold(c.Name, host) ||
+			strings.EqualFold(c.Hostname, host) ||
+			strings.EqualFold(targetHost(c.Target), host) {
+			return c.Name
+		}
+	}
+	return ""
 }
 
 func padSpace(w int) string {
@@ -730,8 +792,8 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 			actCleanWidth = visibleWidth(stripANSI(summary))
 		}
 
-		// Compact column (13 wide): "Local" or "Remote". The detail popup shows
-		// the full remote host / IP / OS.
+		// Compact column (13 wide): "Local" or "Remote". The detail popup shows the
+		// full remote attribution (friendly name · host · IP · OS).
 		sourceVal := "Local"
 		if e.Source == "ssh-remote" {
 			sourceVal = "Remote"

@@ -105,7 +105,13 @@ func knownIDETargets(home string) []ideTarget {
 		cursorBaseDir = filepath.Join(os.Getenv("APPDATA"), "Cursor")
 		cursorConfigPath = filepath.Join(cursorBaseDir, "User", "globalStorage", "co.heron.cursor", "mcpServers.json")
 	}
-	targets = append(targets, ideTarget{cursorConfigPath, "Cursor", cursorBaseDir, false, "cursor"})
+	targets = append(targets, ideTarget{cursorConfigPath, "Cursor IDE", cursorBaseDir, false, "cursor"})
+
+	// 2b. Cursor CLI (cursor-agent) reads ~/.cursor/mcp.json (separate from the
+	// IDE's globalStorage config). Without this, `cursor-agent` never sees the server.
+	cursorCLIBase := filepath.Join(home, ".cursor")
+	cursorCLIConfig := filepath.Join(cursorCLIBase, "mcp.json")
+	targets = append(targets, ideTarget{cursorCLIConfig, "Cursor CLI", cursorCLIBase, false, "cursor"})
 
 	// 4. Antigravity CLI
 	antigravityBaseDir := filepath.Join(home, ".gemini/antigravity-cli")
@@ -300,6 +306,71 @@ func writeMCPConfigEntry(t ideTarget, serverDef map[string]interface{}) string {
 	return appName
 }
 
+// findCursorAgent returns the Cursor Agent CLI path, preferring the canonical
+// `cursor-agent` name and only accepting a bare `agent` when it actually
+// responds as Cursor's MCP-capable CLI — so we never poke ssh-agent or similar.
+func findCursorAgent() string {
+	if p, err := exec.LookPath("cursor-agent"); err == nil {
+		return p
+	}
+	if p, err := exec.LookPath("agent"); err == nil {
+		out, _ := exec.Command(p, "mcp", "--help").CombinedOutput()
+		if strings.Contains(strings.ToLower(string(out)), "mcp server") {
+			return p
+		}
+	}
+	return ""
+}
+
+// approveCursorAllowlist adds a server-level allow token to cursor-agent's
+// ~/.cursor/cli-config.json so the INTERACTIVE `agent` UI loads auxly-memory's
+// tools. cursor-agent gates local stdio MCP servers behind a per-machine
+// allowlist (permissions.allow) using "Mcp(<server>)" / "Mcp(<server>:<tool>)"
+// tokens. `mcp enable` only flips the server's enabled flag — it never writes
+// this allowlist — which is why a live `agent` session showed "needs approval /
+// 0 tools" despite the server being enabled. The whole config is round-tripped
+// through a map so every existing setting (auth, model, other allows) is kept.
+func approveCursorAllowlist() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	cfgPath := filepath.Join(home, ".cursor", "cli-config.json")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		// No cli-config.json → cursor-agent isn't set up / logged in yet. The
+		// allowlist will be created on first interactive use; nothing to do.
+		return err
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return err
+	}
+
+	perms, _ := cfg["permissions"].(map[string]interface{})
+	if perms == nil {
+		perms = map[string]interface{}{}
+		cfg["permissions"] = perms
+	}
+	allow, _ := perms["allow"].([]interface{})
+
+	const token = "Mcp(auxly-memory)"
+	for _, v := range allow {
+		if s, ok := v.(string); ok && s == token {
+			return nil // already allowed — leave the file untouched
+		}
+	}
+	perms["allow"] = append(allow, token)
+
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	// cli-config.json holds auth tokens (authInfo, authCacheKey) — keep it
+	// owner-only readable rather than the world-readable 0644 a naive write picks.
+	return os.WriteFile(cfgPath, out, 0600)
+}
+
 func printAl(text string) {
 	text = strings.ReplaceAll(text, "\n", "\r\n")
 	fmt.Print(text + "\r\n")
@@ -363,7 +434,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	codexPath, err := exec.LookPath("codex")
 	if err == nil {
 		printAl("🤖 Codex CLI detected. Registering auxly-memory MCP server automatically...")
-		cCmd := exec.Command(codexPath, "mcp", "add", "auxly-memory", "--env", "AUXLY_MEMORY_PATH="+memPath, "--", binaryPath, "--path", memPath, "mcp-server")
+		cCmd := exec.Command(codexPath, "mcp", "add", "auxly-memory", "--env", "AUXLY_MEMORY_PATH="+memPath, "--env", "AUXLY_PROVIDER=codex", "--", binaryPath, "--path", memPath, "mcp-server")
 		cCmd.Stdin = strings.NewReader("")
 		cCmd.Stdout = os.Stdout
 		cCmd.Stderr = os.Stderr
@@ -371,6 +442,28 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			printAlf("⚠️  Failed to register with Codex CLI: %v\r\n", err)
 		} else {
 			printAl("✅ Successfully registered auxly-memory MCP server with Codex CLI!")
+		}
+		printAl("")
+	}
+
+	// 7b. Cursor Agent CLI: approve the server so its tools load without the
+	// manual "needs approval" prompt. We just wrote ~/.cursor/mcp.json above; the
+	// `mcp enable` step marks the server enabled, and the cli-config.json allowlist
+	// write makes the INTERACTIVE `agent` UI actually load its tools (enable alone
+	// leaves the live session showing "needs approval / 0 tools").
+	if agentBin := findCursorAgent(); agentBin != "" {
+		printAl("🤖 Cursor Agent CLI detected. Approving auxly-memory MCP server...")
+		eCmd := exec.Command(agentBin, "mcp", "enable", "auxly-memory")
+		eCmd.Stdin = strings.NewReader("")
+		if err := eCmd.Run(); err != nil {
+			printAlf("⚠️  Could not auto-approve in Cursor Agent: %v (run `cursor-agent mcp enable auxly-memory`)\r\n", err)
+		} else {
+			printAl("✅ Approved auxly-memory in Cursor Agent CLI (tools will load).")
+		}
+		if err := approveCursorAllowlist(); err != nil {
+			printAlf("⚠️  Could not update Cursor allowlist: %v (open `agent` and press Enable on auxly-memory)\r\n", err)
+		} else {
+			printAl("✅ Allowed auxly-memory tools in the interactive Cursor agent.")
 		}
 		printAl("")
 	}

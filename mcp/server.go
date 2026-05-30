@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -192,8 +190,20 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 	switch req.Method {
 	case "initialize":
 		s.logActivity("", "initialize", "")
+		// Echo the client's requested protocol version when present. Our tools
+		// are version-agnostic, and strict clients (e.g. cursor-agent) hide all
+		// tools when the server answers a newer request with an older version.
+		protocol := "2024-11-05"
+		if len(req.Params) > 0 {
+			var p struct {
+				ProtocolVersion string `json:"protocolVersion"`
+			}
+			if json.Unmarshal(req.Params, &p) == nil && p.ProtocolVersion != "" {
+				protocol = p.ProtocolVersion
+			}
+		}
 		s.sendResult(req.ID, initializeResult{
-			ProtocolVersion: "2024-11-05",
+			ProtocolVersion: protocol,
 			Capabilities: map[string]interface{}{
 				"tools":   map[string]interface{}{},
 				"prompts": map[string]interface{}{},
@@ -468,61 +478,11 @@ func (s *Server) handleToolCall(req *jsonRPCRequest) {
 	s.sendResult(req.ID, result)
 }
 
-func getParentProcessName() string {
-	ppid := os.Getppid()
-	cmd := exec.Command("ps", "-p", strconv.Itoa(ppid), "-o", "comm=")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func getAncestorProcesses() []string {
-	var ancestors []string
-	pid := os.Getppid() // Start from parent process to avoid self-matching
-
-	for i := 0; i < 10; i++ {
-		cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "ppid=,comm=")
-		out, err := cmd.Output()
-		if err != nil {
-			break
-		}
-
-		line := strings.TrimSpace(string(out))
-		if line == "" {
-			break
-		}
-
-		parts := strings.Fields(line)
-		if len(parts) < 2 {
-			break
-		}
-
-		ppidStr := parts[0]
-		comm := strings.Join(parts[1:], " ")
-
-		baseLower := strings.ToLower(filepath.Base(comm))
-
-		ppid, err := strconv.Atoi(ppidStr)
-		if err != nil || ppid <= 1 {
-			if !strings.Contains(baseLower, "auxly") {
-				ancestors = append(ancestors, comm)
-			}
-			break
-		}
-
-		// Skip self/auxly binary processes to avoid self-matching bug
-		if strings.Contains(baseLower, "auxly") {
-			pid = ppid
-			continue
-		}
-
-		ancestors = append(ancestors, comm)
-		pid = ppid
-	}
-
-	return ancestors
+// getProviderFromParent infers this server's provider from its own process
+// ancestry, delegating to the shared session attribution helpers so the server
+// and the dashboard always agree on which agent a process belongs to.
+func getProviderFromParent() string {
+	return session.InferProvider(session.AncestorCommands(os.Getpid()))
 }
 
 // resolveProvider determines this server's provider from its own environment
@@ -536,49 +496,6 @@ func (s *Server) resolveProvider() string {
 		return p
 	}
 	return "claude"
-}
-
-func getProviderFromParent() string {
-	ancestors := getAncestorProcesses()
-	if len(ancestors) == 0 {
-		return ""
-	}
-
-	for _, parentPath := range ancestors {
-		base := filepath.Base(parentPath)
-		baseLower := strings.ToLower(base)
-		pathLower := strings.ToLower(parentPath)
-
-		if strings.Contains(pathLower, "cursor.app") || strings.Contains(baseLower, "cursor") {
-			return "cursor"
-		}
-		if strings.Contains(pathLower, "codex.app") || strings.Contains(baseLower, "codex") {
-			return "codex"
-		}
-		if strings.Contains(pathLower, "kimi") || strings.Contains(baseLower, "kimi") {
-			return "kimi"
-		}
-		if strings.Contains(pathLower, "antigravity ide.app") || strings.Contains(pathLower, "antigravityide.app") || strings.Contains(pathLower, "/applications/antigravity ide") {
-			return "antigravity-ide"
-		}
-		if strings.Contains(pathLower, "antigravity.app") || strings.Contains(pathLower, "/applications/antigravity") || strings.Contains(baseLower, "antigravity-agent") {
-			return "antigravity-agent"
-		}
-		if strings.Contains(pathLower, "antigravity-cli") || strings.Contains(baseLower, "antigravity-cli") || strings.Contains(baseLower, "antigravity") {
-			return "antigravity-cli"
-		}
-		if strings.Contains(pathLower, "gemini") || strings.Contains(baseLower, "gemini") {
-			return "gemini"
-		}
-		if strings.Contains(pathLower, "claude.app") || strings.Contains(pathLower, "/applications/claude") {
-			return "claude"
-		}
-		if strings.Contains(baseLower, "claude-code") || strings.Contains(baseLower, "claudecode") || strings.Contains(baseLower, "claude") {
-			return "claude-code"
-		}
-	}
-
-	return ""
 }
 
 func (s *Server) logActivity(provider, action, file string) {

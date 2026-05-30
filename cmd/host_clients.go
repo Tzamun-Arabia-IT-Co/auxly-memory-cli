@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -19,6 +20,28 @@ type clientEntry struct {
 	Name   string `yaml:"name"`             // friendly label
 	Target string `yaml:"target"`           // [user@]host[:port] of the box
 	Method string `yaml:"method,omitempty"` // relay
+	// Hostname is the box's own self-reported hostname, captured at provision
+	// time. A box wired by IP/target (e.g. "OC147" → root@192.168.1.147) reports
+	// a different string as its session RemoteHost (e.g. "open.claw"); storing it
+	// here lets the live-status match the box to its session instead of surfacing
+	// a phantom duplicate row.
+	Hostname string `yaml:"hostname,omitempty"`
+}
+
+// clientIsLive reports whether a configured box currently holds a live
+// ssh-remote session, matching the live-host set against the box name, its
+// captured hostname, or the host part of its target.
+func clientIsLive(live map[string]bool, c clientEntry) bool {
+	if c.Name != "" && live[strings.ToLower(c.Name)] {
+		return true
+	}
+	if c.Hostname != "" && live[strings.ToLower(c.Hostname)] {
+		return true
+	}
+	if _, h, _, err := parseHostSpec(c.Target); err == nil && h != "" {
+		return live[strings.ToLower(h)]
+	}
+	return false
 }
 
 type clientsFile struct {

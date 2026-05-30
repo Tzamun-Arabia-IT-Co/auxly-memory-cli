@@ -9,7 +9,6 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/pending"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/session"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/trust"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update"
 	tea "github.com/charmbracelet/bubbletea"
@@ -123,12 +122,14 @@ func (m dashboardModel) Refresh() tea.Cmd {
 		}
 		mcpError := getClaudeMCPError()
 		sessions := gatherSessions()
-		// Reconcile the registry against actually-running servers so the
-		// dashboard can flag agents that are live but not yet reflected
-		// (e.g. started before the session-registry feature).
-		unregistered := len(session.LiveServerPIDs()) - len(sessions)
-		if unregistered < 0 {
-			unregistered = 0
+		// gatherSessions already reconciles the registry against live servers;
+		// count how many are connected via inference only (older builds that
+		// never registered) so the dashboard can hint that they need a reconnect.
+		unregistered := 0
+		for _, s := range sessions {
+			if s.Unregistered {
+				unregistered++
+			}
 		}
 		latest, updateAvail := update.Available()
 		return dashboardRefreshMsg{
@@ -210,93 +211,76 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 
 			// If popup is open
 			if m.selectedAgent != "" {
-				startX := 10
-				if w > 0 && startX+82 > w {
-					startX = w - 82
-					if startX < 0 {
-						startX = 0
-					}
-				}
-
 				popupStr := m.renderPopup(m.selectedAgent)
 				popLines := strings.Split(popupStr, "\n")
 
-				pStartY := contentOffsetY + 6
+				// Mirror the renderer's geometry exactly (see View): the popup is
+				// overlaid at startX, three rows into dashboardContent, which
+				// itself begins after the header row, the optional update banner,
+				// and one blank line.
+				pStartX := 10
+				popWidth := popupVisibleWidth(popLines)
+				if w > 0 && pStartX+popWidth > w {
+					pStartX = w - popWidth
+					if pStartX < 0 {
+						pStartX = 0
+					}
+				}
+				contentLocalStart := 2
+				if m.renderUpdateBanner() != "" {
+					contentLocalStart = 3
+				}
+				pStartY := contentOffsetY + contentLocalStart + 3
 				pEndY := pStartY + len(popLines)
-				pStartX := startX
-				pEndX := startX + 82
+				pEndX := pStartX + popWidth
 
 				if msg.X < pStartX || msg.X > pEndX || msg.Y < pStartY || msg.Y > pEndY {
 					m.selectedAgent = "" // Clicked outside, close popup!
 					return m, nil
 				}
 
-				// Tab clicking line is Y = pStartY + 5
-				if msg.Y == pStartY+5 {
-					// Tab 1: [1 Info & Diagnostics] spans X: [pStartX+3, pStartX+25]
-					if msg.X >= pStartX+3 && msg.X <= pStartX+25 {
-						m.activeAgentTab = 0
-						return m, nil
+				// Tab row: find the rendered line carrying the tab markers and
+				// partition it by the markers' actual columns, so clicking
+				// anywhere on a tab selects it regardless of label width.
+				for i, line := range popLines {
+					clean := stripANSI(line)
+					if !strings.Contains(clean, "[1 ") {
+						continue
 					}
-					// Tab 2: [2 Recent Writes] spans X: [pStartX+29, pStartX+45]
-					if msg.X >= pStartX+29 && msg.X <= pStartX+45 {
-						m.activeAgentTab = 1
-						return m, nil
+					if msg.Y != pStartY+i {
+						break
 					}
-					// Tab 3: [3 Connected] spans X: [pStartX+50, pStartX+62]
-					if msg.X >= pStartX+50 && msg.X <= pStartX+62 {
-						m.activeAgentTab = 2
-						return m, nil
+					if tab := tabAtColumn(clean, pStartX, msg.X); tab >= 0 {
+						m.activeAgentTab = tab
 					}
+					break
 				}
 				return m, nil // Swallow clicks inside the popup
 			}
 
-			// Popup closed: check click on agent cards grid by scanning viewLines dynamically
-			brandLines := make(map[string]int)
-			for idx, line := range viewLines {
-				clean := stripANSI(line)
-				if strings.Contains(clean, "Claude Desktop") {
-					brandLines["claude"] = idx
-				} else if strings.Contains(clean, "Claude Code CLI") {
-					brandLines["claude-code"] = idx
-				} else if strings.Contains(clean, "Antigravity Agent") {
-					brandLines["antigravity"] = idx
-				} else if strings.Contains(clean, "Cursor") && !strings.Contains(clean, "Use arrow") {
-					brandLines["cursor"] = idx
-				} else if strings.Contains(clean, "Codex") {
-					brandLines["codex"] = idx
-				} else if strings.Contains(clean, "Gemini") {
-					brandLines["gemini"] = idx
-				}
-			}
-
+			// Popup closed: locate each agent card by scanning the rendered view
+			// for its exact name, deriving the hit rectangle from where the name
+			// actually sits (column + card width) rather than hardcoded splits —
+			// so two-up cards and any future layout shift still hit-test cleanly.
+			const cardWidth = 30 // card content width; border/padding add a small margin
 			clickLineIdx := msg.Y - contentOffsetY
-			stacked := m.width > 0 && m.width < 95
-
-			for brand, lineY := range brandLines {
-				if clickLineIdx >= lineY-1 && clickLineIdx <= lineY+2 {
-					if !stacked {
-						// Side-by-side
-						if brand == "claude" || brand == "antigravity" || brand == "codex" {
-							if msg.X <= 75 {
-								m.selectedAgent = brand
-								m.activeAgentTab = 0
-								return m, nil
-							}
-						} else {
-							if msg.X >= 76 {
-								m.selectedAgent = brand
-								m.activeAgentTab = 0
-								return m, nil
-							}
-						}
-					} else {
-						// Stacked
-						m.selectedAgent = brand
+			for _, b := range agentCardOrder() {
+				for idx, line := range viewLines {
+					clean := stripANSI(line)
+					col := visibleColumnOf(clean, b.name)
+					if col < 0 {
+						continue
+					}
+					// The name sits right of the emblem (~8 cols in); the card spans a
+					// row above and below it. Bound the hit box to that rectangle so
+					// adjacent cards don't overlap.
+					x0, x1 := col-8, col-8+cardWidth+2
+					if clickLineIdx >= idx-1 && clickLineIdx <= idx+2 && msg.X >= x0 && msg.X <= x1 {
+						m.selectedAgent = b.id
 						m.activeAgentTab = 0
 						return m, nil
 					}
+					break // first occurrence of this name is its card
 				}
 			}
 		}
@@ -428,20 +412,8 @@ func (m dashboardModel) View() string {
 	)
 	leftCol := diagStyle.Render(diagContent)
 
-	// Right Column: Connected Agent Grid
-	brands := []struct {
-		id    string
-		name  string
-		icon  string
-		color string
-	}{
-		{"claude", "Claude Desktop", "🧠", "99"},
-		{"claude-code", "Claude Code CLI", "💻", "39"},
-		{"antigravity", "Antigravity", "🌌", "205"},
-		{"cursor", "Cursor", "🎯", "39"},
-		{"codex", "Codex IDE", "💻", "34"},
-		{"gemini", "Gemini CLI", "✨", "220"},
-	}
+	// Right Column: Connected Agent Grid (shared order/names with the hit-tester)
+	brands := agentCardOrder()
 
 	var brandCards []string
 	for idx, b := range brands {
@@ -509,20 +481,18 @@ func (m dashboardModel) View() string {
 			cardName = bold.Render(b.name)
 		}
 
-		rightDetails := fmt.Sprintf(" %s %s\n   %s · 🔌%d · %s",
-			b.icon,
-			cardName,
-			statusDot,
-			connCount,
-			trustBadge,
-		)
+		// Clean brand-colored emblem (2 lines) centered beside the text.
+		icon := strings.Join(brandMark(b.id), "\n")
+		connInfo := dim.Render(fmt.Sprintf("⇄%d", connCount))
+		textBlock := fmt.Sprintf("%s\n%s · %s · %s", cardName, statusDot, connInfo, trustBadge)
+		body := lipgloss.JoinHorizontal(lipgloss.Center, icon, "  ", textBlock)
 
 		card := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(cardBorderColor).
 			Padding(0, 1).
-			Width(28).
-			Render(rightDetails)
+			Width(30).
+			Render(body)
 
 		brandCards = append(brandCards, card)
 	}
@@ -540,7 +510,7 @@ func (m dashboardModel) View() string {
 	rightCol := fmt.Sprintf("%s\n%s", StyleHeader.Render("📡 Connected Agent Brands"), gridSection)
 
 	var dashboardContent string
-	if m.width > 0 && m.width < 95 {
+	if m.width > 0 && m.width < 116 {
 		dashboardContent = lipgloss.JoinVertical(lipgloss.Left, leftCol, "", rightCol)
 	} else {
 		dashboardContent = lipgloss.JoinHorizontal(lipgloss.Top, leftCol, "    ", rightCol)
@@ -738,8 +708,8 @@ func (m dashboardModel) renderConnectionsSummary() string {
 		if m.unregistered != 1 {
 			label += "s"
 		}
-		sb.WriteString(yellow.Render(fmt.Sprintf("⚠ %d %s running, unregistered", m.unregistered, label)))
-		sb.WriteString("\n  " + dim.Render("press [r], then reconnect to attribute"))
+		sb.WriteString(yellow.Render(fmt.Sprintf("⚠ %d %s on an older build", m.unregistered, label)))
+		sb.WriteString("\n  " + dim.Render("provider inferred — reconnect to confirm"))
 	}
 
 	return sb.String()
@@ -760,27 +730,27 @@ func (m dashboardModel) renderPopup(provider string) string {
 	case "claude":
 		name = "Claude Desktop"
 		icon = "🧠"
-		logs = "Connected over Stdio protocol. Read-write active."
+		logs = "Configured via claude_desktop_config.json."
 	case "claude-code":
 		name = "Claude Code CLI"
 		icon = "💻"
-		logs = "Auto-registered with npm global package. Ready."
+		logs = "Registered through the Claude Code MCP config."
 	case "antigravity":
-		name = "Antigravity Agent"
+		name = "Antigravity"
 		icon = "🌌"
-		logs = "Antigravity CLI relayer active. 100% verified."
+		logs = "Antigravity / Gemini surface configured under ~/.gemini."
 	case "cursor":
 		name = "Cursor"
 		icon = "🎯"
-		logs = "Configured in globalStorage/mcpServers.json. Active."
+		logs = "Configured in Cursor's MCP settings."
 	case "codex":
-		name = "Codex IDE"
+		name = "Codex"
 		icon = "💻"
-		logs = "Configured in .codex/config.toml. Active."
+		logs = "Configured in ~/.codex/config.toml."
 	case "gemini":
-		name = "Gemini CLI"
+		name = "Gemini"
 		icon = "✨"
-		logs = "Connected over local settings.json channel. Active."
+		logs = "Gemini CLI / Code Assist configured under ~/.gemini."
 	}
 
 	var pb strings.Builder
@@ -801,12 +771,26 @@ func (m dashboardModel) renderPopup(provider string) string {
 	pb.WriteString(fmt.Sprintf("  %s    %s    %s\n\n", tab1, tab2, tab3))
 
 	if m.activeAgentTab == 0 {
+		matchesProvider := func(p string) bool {
+			return p == provider || (provider == "antigravity" && strings.HasPrefix(p, "antigravity"))
+		}
+
 		writes := 0
 		if m.stats != nil && m.stats.ByProvider != nil {
 			if provider == "antigravity" {
 				writes = m.stats.ByProvider["antigravity"] + m.stats.ByProvider["antigravity-ide"] + m.stats.ByProvider["antigravity-agent"] + m.stats.ByProvider["antigravity-cli"]
 			} else {
 				writes = m.stats.ByProvider[provider]
+			}
+		}
+
+		// Real live-session facts for this brand (from the reconciled registry).
+		liveCount, inferred, remote := 0, false, false
+		for _, s := range m.sessions {
+			if matchesProvider(s.Provider) {
+				liveCount++
+				inferred = inferred || s.Unregistered
+				remote = remote || s.Remote
 			}
 		}
 
@@ -821,11 +805,30 @@ func (m dashboardModel) renderPopup(provider string) string {
 			trustBadge = red.Render("● read_only")
 		}
 
-		pb.WriteString(fmt.Sprintf("  %-18s %s\n", dim.Render("Trust Level:"), trustBadge))
-		pb.WriteString(fmt.Sprintf("  %-18s %s\n", dim.Render("Total Writes:"), bold.Render(fmt.Sprintf("%d writes", writes))))
-		pb.WriteString(fmt.Sprintf("  %-18s %s\n", dim.Render("Interface:"), bold.Render("MCP Stdio relayer")))
-		pb.WriteString(fmt.Sprintf("  %-18s %s\n\n", dim.Render("Target Scopes:"), bold.Render("Global & Workspace Override")))
-		pb.WriteString(fmt.Sprintf("  %-18s %s\n", dim.Render("Status Logs:"), green.Render(logs)))
+		statusVal := green.Render("● connected")
+		if liveCount == 0 {
+			statusVal = dim.Render("○ idle — no live session")
+		}
+		sessVal := bold.Render(fmt.Sprintf("%d", liveCount))
+		if inferred {
+			sessVal += "  " + yellow.Render("(provider inferred — reconnect to confirm)")
+		}
+		connVal := bold.Render("MCP · stdio")
+		if remote {
+			connVal = bold.Render("MCP · stdio (SSH-remote)")
+		}
+
+		// Pad the label as plain text BEFORE styling so columns line up — the
+		// previous %-18s counted ANSI escape bytes and never aligned visibly.
+		row := func(label, value string) {
+			pb.WriteString("  " + dim.Render(fmt.Sprintf("%-15s", label)) + " " + value + "\n")
+		}
+		row("Status", statusVal)
+		row("Trust level", trustBadge)
+		row("Live sessions", sessVal)
+		row("Total writes", bold.Render(fmt.Sprintf("%d", writes)))
+		row("Connection", connVal)
+		pb.WriteString("\n  " + dim.Render(logs) + "\n")
 	} else if m.activeAgentTab == 1 {
 		var writes []audit.Entry
 		if m.logger != nil {
@@ -870,6 +873,80 @@ func (m dashboardModel) renderPopup(provider string) string {
 		Width(82)
 
 	return popupStyle.Render(pb.String())
+}
+
+// agentCard describes one brand tile on the dashboard grid. Used by both the
+// renderer and the mouse hit-tester so they share one ordering and naming.
+type agentCard struct {
+	id    string
+	name  string
+	icon  string
+	color string
+}
+
+// agentCardOrder is the single source of truth for the agent grid: its order,
+// ids, display names, icons, and accent colors.
+func agentCardOrder() []agentCard {
+	return []agentCard{
+		{"claude", "Claude Desktop", "🧠", "99"},
+		{"claude-code", "Claude Code CLI", "💻", "39"},
+		{"antigravity", "Antigravity", "🌌", "205"},
+		{"cursor", "Cursor", "🎯", "39"},
+		{"codex", "Codex", "💻", "34"},
+		{"gemini", "Gemini", "✨", "220"},
+	}
+}
+
+// visibleColumnOf returns the visible (terminal cell) column at which substr
+// begins in a plain, ANSI-stripped line, or -1 when substr is absent.
+func visibleColumnOf(clean, substr string) int {
+	idx := strings.Index(clean, substr)
+	if idx < 0 {
+		return -1
+	}
+	return runewidth.StringWidth(clean[:idx])
+}
+
+// popupVisibleWidth returns the widest visible line in a rendered popup box.
+func popupVisibleWidth(lines []string) int {
+	w := 0
+	for _, l := range lines {
+		if vw := visibleWidth(l); vw > w {
+			w = vw
+		}
+	}
+	return w
+}
+
+// tabAtColumn partitions the popup tab row by the actual columns of its "[1 ",
+// "[2 ", "[3 " markers and returns the 0-based tab index containing clickX (an
+// absolute terminal column), or -1 if the row carries no markers. originX is
+// the popup box's left edge. The first tab also catches clicks in the left
+// margin so the row hit-tests as three contiguous zones.
+func tabAtColumn(cleanRow string, originX, clickX int) int {
+	markers := []string{"[1 ", "[2 ", "[3 "}
+	cols := make([]int, 0, len(markers))
+	for _, mk := range markers {
+		c := visibleColumnOf(cleanRow, mk)
+		if c < 0 {
+			return -1
+		}
+		cols = append(cols, originX+c)
+	}
+	for i := range cols {
+		start := cols[i]
+		if i == 0 {
+			start = originX
+		}
+		end := 1 << 30
+		if i+1 < len(cols) {
+			end = cols[i+1]
+		}
+		if clickX >= start && clickX < end {
+			return i
+		}
+	}
+	return -1
 }
 
 // stripANSI strips ANSI escape codes from a string for accurate column calculations.

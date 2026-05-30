@@ -236,13 +236,22 @@ func provisionConsumer(hc hostConfig) error {
 	}
 	fmt.Println("   ✓ MCP launcher + skills wired on the box")
 
+	// Capture the box's own hostname so its live ssh-remote session (which reports
+	// that hostname as RemoteHost) maps back to this box row instead of surfacing
+	// as a phantom duplicate. Best-effort — an empty result just falls back to
+	// name/target matching.
+	boxHostname := ""
+	if out, herr := runSSH(relay, "hostname"); herr == nil {
+		boxHostname = strings.TrimSpace(firstLine(out))
+	}
+
 	// Record the connection so the user can manage it (disconnect / reconnect /
 	// rename / remove) from `auxly host clients` or the TUI.
 	clientName := strings.TrimSpace(hostClientName)
 	if clientName == "" {
 		clientName = host
 	}
-	if err := upsertClient(clientEntry{Name: clientName, Target: hc.Rendezvous, Method: "relay"}); err == nil {
+	if err := upsertClient(clientEntry{Name: clientName, Target: hc.Rendezvous, Method: "relay", Hostname: boxHostname}); err == nil {
 		fmt.Printf("   ✓ Saved connection \"%s\" (manage with `auxly host clients`)\n", clientName)
 	}
 	fmt.Println("👉 RESTART the agent on the box to load its memory link.")

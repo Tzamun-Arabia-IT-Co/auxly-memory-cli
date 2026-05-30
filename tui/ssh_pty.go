@@ -16,9 +16,12 @@ import (
 // from INSIDE the TUI. It streams output lines into ch (for live progress), watches
 // for "password:" and writes the user's password (ssh disables echo, so it never
 // appears in the stream).
-func startPTYRun(ch chan progressEvent, password string, args ...string) {
+func startPTYRun(ch chan progressEvent, password, sub string, args ...string) {
+	if sub == "" {
+		sub = "connect"
+	}
 	go func() {
-		c := exec.Command(exePath(), append([]string{"connect"}, args...)...)
+		c := exec.Command(exePath(), append([]string{sub}, args...)...)
 		ptmx, err := pty.Start(c)
 		if err != nil {
 			ch <- progressEvent{done: true, err: err, out: "Could not allocate a PTY: " + err.Error()}
