@@ -14,6 +14,7 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/config"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/session"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -862,23 +863,66 @@ func runConnect(cmd *cobra.Command, args []string) error {
 }
 
 func runConnectList(cmd *cobra.Command, args []string) error {
-	cfg, err := loadRemotes()
-	if err != nil {
-		return err
-	}
-	if len(cfg.Remotes) == 0 {
-		fmt.Println("No remote memory hosts configured. Run `auxly connect` to add one.")
+	cfg, _ := loadRemotes()        // outbound: this machine -> memory hosts
+	clients, _ := loadClients()    // inbound: boxes using this machine's memory
+	liveHosts := liveRemoteHosts() // hosts with a live ssh-remote session now
+
+	if len(cfg.Remotes) == 0 && len(clients) == 0 {
+		fmt.Println("No connections yet.")
+		fmt.Println("  • Connect to a memory host:        auxly connect")
+		fmt.Println("  • Serve your memory to other boxes: auxly host setup")
 		return nil
 	}
-	fmt.Println("🌐 Configured remote memory hosts:")
-	for _, p := range cfg.Remotes {
-		target := connTarget(p)
-		if p.Port != 0 && p.Port != defaultSSHPort {
-			target = fmt.Sprintf("%s:%d", target, p.Port)
+
+	// Outbound — memory hosts this machine reads/writes through.
+	fmt.Println("🌐 Memory hosts (this machine → host):")
+	if len(cfg.Remotes) == 0 {
+		fmt.Println("   (none — run `auxly connect` to add one)")
+	} else {
+		for _, p := range cfg.Remotes {
+			target := connTarget(p)
+			if p.Port != 0 && p.Port != defaultSSHPort {
+				target = fmt.Sprintf("%s:%d", target, p.Port)
+			}
+			fmt.Printf("   • %-20s %-30s [%s]\n", p.Name, target, p.Method)
 		}
-		fmt.Printf("   • %-20s %-30s [%s]\n", p.Name, target, p.Method)
+	}
+
+	// Inbound — boxes wired to use THIS machine's memory (host side). Mirrors
+	// the TUI Remote tab / `auxly host clients`, so the CLI and TUI agree.
+	fmt.Println("\n🖥  Connected boxes (using this machine's memory):")
+	if len(clients) == 0 {
+		fmt.Println("   (none — run `auxly host setup` to share your memory)")
+	} else {
+		for _, c := range clients {
+			status := "○ idle"
+			if liveHosts[strings.ToLower(c.Name)] {
+				status = "● live"
+			}
+			fmt.Printf("   • %-20s %-22s [%s]  %s\n", c.Name, c.Target, c.Method, status)
+		}
 	}
 	return nil
+}
+
+// liveRemoteHosts returns the set of client hostnames (lowercased) that have a
+// live ssh-remote MCP session right now, from the session registry (pruning
+// records whose process has died).
+func liveRemoteHosts() map[string]bool {
+	records := session.List()
+	pids := make([]int, 0, len(records))
+	for _, r := range records {
+		pids = append(pids, r.PID)
+	}
+	alive := session.PidsAlive(pids)
+
+	live := map[string]bool{}
+	for _, r := range records {
+		if r.Source == "ssh-remote" && r.RemoteHost != "" && alive[r.PID] {
+			live[strings.ToLower(r.RemoteHost)] = true
+		}
+	}
+	return live
 }
 
 func runConnectRemove(cmd *cobra.Command, args []string) error {
