@@ -99,6 +99,7 @@ const (
 	defaultReversePort = 2222
 	launchdLabel       = "io.auxly.host"
 	systemdUnitName    = "auxly-host.service"
+	windowsTaskName    = "Auxly-Host"
 )
 
 // hostConfig is persisted at ~/.auxly/host.yaml. It is NOT secret (no keys,
@@ -798,7 +799,7 @@ func installKeepAlive() error {
 	case "linux":
 		return installSystemdUser(exe)
 	case "windows":
-		return guideWindowsKeepAlive(exe)
+		return installWindowsTask(exe)
 	default:
 		return fmt.Errorf("keep-alive not supported on %s; run `auxly host tunnel` manually", runtime.GOOS)
 	}
@@ -811,8 +812,7 @@ func uninstallKeepAlive() error {
 	case "linux":
 		return uninstallSystemdUser()
 	case "windows":
-		fmt.Println("Windows: delete the scheduled task you created (schtasks /Delete /TN Auxly-Host).")
-		return nil
+		return uninstallWindowsTask()
 	default:
 		return nil
 	}
@@ -838,6 +838,15 @@ func keepAliveStatus() (bool, string) {
 			return false, state + " (start with `auxly host up`)"
 		}
 		return true, "active (systemd --user)"
+	case "windows":
+		out, err := exec.Command("schtasks", "/Query", "/TN", windowsTaskName).CombinedOutput()
+		if err != nil {
+			return false, "not registered (start with `auxly host up`)"
+		}
+		if strings.Contains(string(out), "Running") {
+			return true, "running (Task Scheduler)"
+		}
+		return true, "registered (Task Scheduler)"
 	default:
 		return false, "unmanaged on this OS"
 	}
@@ -960,11 +969,39 @@ func uninstallSystemdUser() error {
 	return nil
 }
 
-// --- Windows: guided (Task Scheduler) ---
+// --- Windows: Task Scheduler ---
 
-func guideWindowsKeepAlive(exe string) error {
-	fmt.Println("Windows keep-alive (run in an elevated PowerShell, one time):")
-	fmt.Printf("   schtasks /Create /SC ONLOGON /TN Auxly-Host /TR \"%s host tunnel\" /RL HIGHEST /F\n", exe)
-	fmt.Printf("   schtasks /Run /TN Auxly-Host\n")
+// installWindowsTask registers a per-user logon task that keeps the reverse
+// tunnel up, then starts it immediately. A current-user ONLOGON task does not
+// require elevation (unlike /RL HIGHEST), so this runs without admin.
+func installWindowsTask(exe string) error {
+	// /TR must be a single argument: the quoted exe path followed by its args.
+	action := fmt.Sprintf(`"%s" host tunnel`, exe)
+	create := exec.Command("schtasks", "/Create",
+		"/SC", "ONLOGON",
+		"/TN", windowsTaskName,
+		"/TR", action,
+		"/F", // overwrite an existing task of the same name
+	)
+	if out, err := create.CombinedOutput(); err != nil {
+		return fmt.Errorf("schtasks create failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	// Start it now so the tunnel is live without waiting for the next logon.
+	if out, err := exec.Command("schtasks", "/Run", "/TN", windowsTaskName).CombinedOutput(); err != nil {
+		return fmt.Errorf("schtasks run failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func uninstallWindowsTask() error {
+	out, err := exec.Command("schtasks", "/Delete", "/TN", windowsTaskName, "/F").CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		// Deleting a task that doesn't exist is not an error for our purposes.
+		if strings.Contains(strings.ToLower(msg), "cannot find") || strings.Contains(strings.ToLower(msg), "does not exist") {
+			return nil
+		}
+		return fmt.Errorf("schtasks delete failed: %w: %s", err, msg)
+	}
 	return nil
 }

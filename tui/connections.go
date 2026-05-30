@@ -1,10 +1,9 @@
 package tui
 
 import (
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
+	"sort"
 	"strings"
 )
 
@@ -36,37 +35,27 @@ type procInfo struct {
 // gatherSessions lists every live `auxly mcp-server` process as a connected
 // agent session. Remote sessions are fully attributed from the server's argv
 // (--source ssh-remote --provider --remote-host --remote-os); local sessions
-// fall back to parent-process inference because macOS hides their environment.
+// fall back to parent-process inference because the OS hides their environment.
+//
+// The process snapshot is gathered per-OS (see scanProcs in connections_unix.go
+// and connections_windows.go); everything below is platform-independent.
 func gatherSessions() []agentSession {
-	out, err := exec.Command("ps", "-axww", "-o", "pid=,ppid=,command=").Output()
-	if err != nil {
+	procs := scanProcs()
+	if len(procs) == 0 {
 		return nil
 	}
 
-	procs := make(map[int]procInfo)
+	// A server session is an `auxly ... mcp-server` invocation where the binary
+	// itself (argv[0]) is auxly — this excludes the macOS Gatekeeper "disclaimer"
+	// wrapper that re-launches it (a duplicate), the node-based legacy server,
+	// and any shell/scan lines that merely mention mcp-server.
 	var servers []int
-
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
-		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-		ppid, _ := strconv.Atoi(fields[1])
-		command := strings.TrimSpace(line[strings.Index(line, fields[2]):])
-		procs[pid] = procInfo{ppid: ppid, command: command}
-
-		// A server session is an `auxly ... mcp-server` invocation where the
-		// binary itself (argv[0]) is auxly — this excludes the macOS Gatekeeper
-		// "disclaimer" wrapper that re-launches it (a duplicate), the node-based
-		// legacy server, and our own shell/ps scan lines.
-		if strings.Contains(command, "mcp-server") && isAuxlyBinary(fields[2]) {
+	for pid, p := range procs {
+		if strings.Contains(p.command, "mcp-server") && isAuxlyBinary(firstToken(p.command)) {
 			servers = append(servers, pid)
 		}
 	}
+	sort.Ints(servers) // stable display order (map iteration is random)
 
 	clients := readClients() // name -> target lookup for real box IPs
 
@@ -75,6 +64,25 @@ func gatherSessions() []agentSession {
 		sessions = append(sessions, parseSession(pid, procs[pid].command, procs, clients))
 	}
 	return sessions
+}
+
+// firstToken extracts argv[0] from a full command line, handling a quoted
+// leading path (common on Windows, e.g. "C:\Program Files\auxly\auxly.exe").
+func firstToken(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	if command[0] == '"' {
+		if end := strings.IndexByte(command[1:], '"'); end >= 0 {
+			return command[1 : 1+end]
+		}
+		return command[1:]
+	}
+	if i := strings.IndexByte(command, ' '); i >= 0 {
+		return command[:i]
+	}
+	return command
 }
 
 // parseSession turns one live `auxly mcp-server` process into an agentSession.
@@ -137,7 +145,9 @@ func remoteIPForHost(host string, clients []clientRow) string {
 }
 
 // inferProviderFromAncestors walks a local server's parent chain looking for a
-// recognizable IDE/agent app signature, since macOS hides the AUXLY_PROVIDER env.
+// recognizable IDE/agent app signature, used when the AUXLY_PROVIDER env is not
+// visible in the command line (macOS hides process env; Windows CommandLine
+// carries args but not env).
 func inferProviderFromAncestors(pid int, procs map[int]procInfo) string {
 	cur := pid
 	for depth := 0; depth < 8; depth++ {
