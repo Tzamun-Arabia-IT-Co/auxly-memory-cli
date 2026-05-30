@@ -451,7 +451,7 @@ func (m dashboardModel) View() string {
 			cardName = bold.Render(b.name)
 		}
 
-		rightDetails := fmt.Sprintf(" %s %s\n   %s · C:%d · %s",
+		rightDetails := fmt.Sprintf(" %s %s\n   %s · 🔌%d · %s",
 			b.icon,
 			cardName,
 			statusDot,
