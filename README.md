@@ -177,6 +177,7 @@ Your memory lives in `~/.auxly/memory/` as human-readable Markdown, organized by
 ```
 ~/.auxly/memory/
 ├── identity.md        # who you are, role, expertise
+├── personal.md        # private life facts (family, health, finances) — never shared to a remote unless you grant it
 ├── preferences.md     # how you like your agents to work
 ├── infra.md           # machines, networks, environments
 ├── products.md        # products & services you build
@@ -335,6 +336,12 @@ auxly host down        # stop serving
 ```
 
 **Multiple boxes stay connected at the same time** — each gets its own independent, self-healing tunnel, supervised by a single keep-alive. Connecting one box never disconnects another.
+
+### Choose what each box can see
+
+A remote never gets your whole vault by default — every served box carries its **own** per-remote file-sharing allow-list. In the dashboard's **Remote** tab, highlight a connected box and press **`s`** to open its **Share files** checklist (listed in taxonomy order), then toggle individual files and set **read** vs. **write** access for that box specifically.
+
+It's **fail-closed**: `personal.md` (and the aggregate profile) are **never** shared unless you explicitly check them, and the default for a newly connected box is *all non-personal files, read-only*. So a trusted laptop can read everything while a CI box sees only `projects.md` — and your private life facts stay on your machine.
 
 ### See where writes come from
 
