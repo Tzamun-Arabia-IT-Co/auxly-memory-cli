@@ -20,11 +20,15 @@ import (
 // "antigravity" card we make a best-effort attempt with the Gemini credential
 // against Antigravity's daily- host; if Google rejects it, the card shows "—".
 
-// geminiOAuthClient is the public installed-app client the Gemini CLI ships, used
+// geminiClientID/Secret are the Gemini CLI's public installed-app client, used
 // only to refresh the user's own stored token — the same exchange the CLI does.
-const (
-	geminiClientID     = "REDACTED_GEMINI_CLIENT_ID"
-	geminiClientSecret = "REDACTED_GEMINI_CLIENT_SECRET"
+// They are injected at release time via -ldflags and are EMPTY in plain
+// `go build` / `go install` source builds (the Gemini Live Usage meter then
+// reports "unavailable" — it's an opt-in, off-by-default feature). Kept out of
+// source so the public repo carries no OAuth client material.
+var (
+	geminiClientID     = ""
+	geminiClientSecret = ""
 )
 
 type googleFetcher struct{ id string }
@@ -50,6 +54,14 @@ func (f googleFetcher) fetch(ctx context.Context) Report {
 			r.Err = "no token — sign in to Gemini CLI"
 			return r
 		}
+	}
+
+	// Source/`go install` builds carry no OAuth client (it's injected only into
+	// official release binaries) — degrade the meter cleanly instead of erroring
+	// out against Google with an empty client.
+	if clientID == "" {
+		r.Err = "usage unavailable in this build"
+		return r
 	}
 
 	r.Account = googleEmail(creds)

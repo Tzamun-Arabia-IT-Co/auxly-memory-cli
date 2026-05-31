@@ -33,3 +33,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # PAT (repo scope): lets goreleaser push the formula to the tap repo.
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # Gemini/Antigravity Live Usage OAuth clients — injected into release
+          # binaries via ldflags (see .goreleaser.yaml). Absent → empty → those two
+          # usage meters report "unavailable"; everything else still builds.
+          GEMINI_CLIENT_ID: ${{ secrets.GEMINI_CLIENT_ID }}
+          GEMINI_CLIENT_SECRET: ${{ secrets.GEMINI_CLIENT_SECRET }}
+          ANTIGRAVITY_CLIENT_ID: ${{ secrets.ANTIGRAVITY_CLIENT_ID }}
+          ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.ANTIGRAVITY_CLIENT_SECRET }}

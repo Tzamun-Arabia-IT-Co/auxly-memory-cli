@@ -24,9 +24,12 @@ import (
 // under ~/.auxly/. The token is only ever used to call Google's own Code Assist
 // endpoint for this user's account.
 
-const (
-	antigravityClientID     = "REDACTED_ANTIGRAVITY_CLIENT_ID"
-	antigravityClientSecret = "REDACTED_ANTIGRAVITY_CLIENT_SECRET"
+// Injected at release time via -ldflags; EMPTY in plain `go build` / `go install`
+// source builds (Antigravity Live Usage then reports "unavailable"). Kept out of
+// source so the public repo carries no OAuth client material.
+var (
+	antigravityClientID     = ""
+	antigravityClientSecret = ""
 )
 
 var antigravityScopes = []string{
@@ -54,6 +57,9 @@ func antigravityCreds() (googleCreds, bool) {
 // blocks until consent completes or ctx is cancelled. Returns the signed-in
 // email on success.
 func AntigravityLogin(ctx context.Context) (string, error) {
+	if antigravityClientID == "" {
+		return "", fmt.Errorf("Antigravity Live Usage isn't available in this build — install an official release binary from https://auxly.io")
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", fmt.Errorf("start loopback listener: %w", err)

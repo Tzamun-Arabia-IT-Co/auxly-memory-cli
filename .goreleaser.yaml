@@ -23,7 +23,14 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update.Current={{ .Version }}
+      - -s -w
+      - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update.Current={{ .Version }}
+      # Gemini/Antigravity Live Usage OAuth clients — injected from CI secrets so
+      # the public source carries none. Empty (envOrDefault) on local/source builds.
+      - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage.geminiClientID={{ envOrDefault "GEMINI_CLIENT_ID" "" }}
+      - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage.geminiClientSecret={{ envOrDefault "GEMINI_CLIENT_SECRET" "" }}
+      - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage.antigravityClientID={{ envOrDefault "ANTIGRAVITY_CLIENT_ID" "" }}
+      - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage.antigravityClientSecret={{ envOrDefault "ANTIGRAVITY_CLIENT_SECRET" "" }}
 
 archives:
   # 1) tar.gz / zip archives — consumed by Homebrew, the deb/rpm packages, and
