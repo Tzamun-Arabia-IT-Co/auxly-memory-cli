@@ -1,0 +1,21 @@
+default: auto
+
+providers:
+  claude:
+    trust_level: auto
+  auxly:
+    trust_level: auto
+  cursor:
+    trust_level: auto
+  windsurf:
+    trust_level: auto
+  chatgpt:
+    trust_level: auto
+  codex:
+    trust_level: auto
+  gemini:
+    trust_level: auto
+  copilot:
+    trust_level: auto
+  antigravity:
+    trust_level: auto

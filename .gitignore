@@ -1,0 +1,66 @@
+# Binaries and executable files
+auxly
+auxly-cli
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and coverage artifacts
+*.test
+*.out
+*.prof
+*.cov
+
+# Build directories
+dist/
+build/
+
+# Runtime and temporary directories
+.bg-shell/
+.gsd/
+.tempmediaStorage/
+.system_generated/
+*.bak
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs and local configurations
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local runtime state and research scratch
+.auxly/
+.tmp-usage-research/
+
+# Local agent dirs + dev tooling — not shipped (the binary writes its own skills
+# from internal/skills via `auxly setup`; brand-logos are generator-only inputs
+# whose base64 output is already committed in tui/brandlogos.go).
+.claude/
+.codex/
+brand-logos/
+
+# Internal planning doc kept locally, not shipped in the public repo.
+docs/memory-rework-plan.md
+
+# Generated workspace agent rules (written by `auxly setup`/`init`, create-if-missing).
+# Not source — keep them out of the tree so setup never dirties the repo.
+.cursorrules
+.antigravityrules
+.windsurfrules
+.geminirules
+.clauderules
+.codexrules
