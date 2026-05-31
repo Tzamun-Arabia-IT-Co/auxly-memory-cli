@@ -172,7 +172,7 @@ From here on, anything any agent learns about you can be saved with `/auxly-sync
 
 ## The memory vault
 
-Your memory lives in `~/.auxly/memory/` as human-readable Markdown, organized by topic. Auxly's smart sync auto-routes new facts to the right file based on content:
+Your memory lives in `~/.auxly/memory/` as human-readable Markdown, organized by topic. Smart sync files each new fact under the right category — the agent picks the best-fit category from the taxonomy, with a keyword router as fallback when it's unsure:
 
 ```
 ~/.auxly/memory/
@@ -219,18 +219,20 @@ Pending writes show up as reviewable diffs in the dashboard's **Approvals** tab 
 
 ## Skills (slash commands)
 
-`auxly setup` installs **8 slash commands** into every agent it configures. They work natively inside the agent's chat:
+`auxly setup` installs **10 slash commands** into every agent it configures. They work natively inside the agent's chat:
 
 | Skill | What it does |
 |-------|--------------|
-| `/auxly-init` | Onboards you — scans the current conversation/context and seeds your memory with what's already known. |
-| `/auxly-sync` `<fact>` | Saves a new fact, preference, or detail with a smart delta-merge that auto-routes it to the right memory file. |
-| `/auxly-memory` | Prints the consolidated profile (identity + preferences + infra) every agent currently shares. |
-| `/auxly-learn` `[context]` | Inspects recent edits/context and proposes structured facts to save. |
-| `/auxly-forget` `[query]` | Finds and cleanly prunes obsolete or outdated lines from memory. |
+| `/auxly-init` | Onboards you — runs the training, scans the current conversation/context, and seeds your memory with what's already known. |
+| `/auxly-sync` `<fact>` | Saves a new fact, preference, or detail with a smart delta-merge — the agent files it under the best-fit category (with a keyword router as fallback). |
+| `/auxly-memory` | Prints the consolidated profile (identity + preferences + infrastructure) every agent currently shares. |
+| `/auxly-learn` `[folder] [topic]` | Reads the memory vault — optionally a single folder, optionally focused on a topic — and grounds the agent in it for the session. No args = learn everything. |
+| `/auxly-max` | Exhaustive self-harvest — scans the whole session and writes every fact up into the vault, one category at a time (private facts go to `personal.md`). Push-only. |
+| `/auxly-forget` `[query]` | Searches memory and cleanly prunes obsolete or outdated lines. |
 | `/auxly-pending` `[list\|approve\|reject]` | Manages the approval queue from inside the chat panel. |
-| `/auxly-status` | Shows live diagnostics — connected clients, database sizes, tunnel info. |
-| `/auxly-max` | Emits the "maximum memory" sync block to bootstrap additional local agents end-to-end. |
+| `/auxly-status` | Shows whether the agent is connected and the MCP link is live, plus diagnostics. |
+| `/auxly-bootstrap` | Generates a copyable onboarding block to paste into a tool that doesn't have Auxly installed (e.g. ChatGPT). |
+| `/auxly-remote-connect` | Detects and connects this machine to a remote Auxly memory host (or reports the active link). |
 
 Under the hood these map to MCP tools (`auxly_skill_sync`, `auxly_memory_read`, `auxly_memory_write`, `auxly_memory_search`, `auxly_pending_list`, …) that any MCP client can call directly.
 

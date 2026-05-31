@@ -591,7 +591,7 @@ You natively support the following slash commands! When the user inputs one of t
 - /auxly-init (or auxly-init / auxly init): Call the auxly_skill_init tool to run the onboarding and training setup, scan current chat context/system prompt, and sync all existing preferences to Auxly.
 - /auxly-memory (or auxly-memory / auxly memory): Call the auxly_skill_memory tool to display a consolidated markdown profile of the user's identity, preferences, and infrastructure.
 - /auxly-status (or auxly-status / auxly status): Call the auxly_skill_status tool to show system diagnostics, active connections, and remote/SSH attribution.
-- /auxly-sync (or auxly-sync / auxly sync): Call the auxly_skill_sync tool with the provided content to perform an automated smart delta-merge into the preferences file.
+- /auxly-sync (or auxly-sync / auxly sync): Call the auxly_skill_sync tool with the provided content AND the best-fit category (identity, personal, preferences, infra, products, projects, daily, business, agents) to perform an automated smart delta-merge into the correct memory file.
 - /auxly-pending (or auxly-pending / auxly pending): Call the auxly_skill_pending tool with arguments list/approve/reject to manage the approval queue.
 - /auxly-max (or auxly-max / auxly max): Call the auxly_skill_max tool, then exhaustively self-harvest your entire session — write every fact up via auxly_skill_sync, one category slice at a time (personal facts into personal.md). This pushes memory up; it does NOT pull.
 - /auxly-forget (or auxly-forget / auxly forget): Call the auxly_skill_forget tool to search and prune outdated bullet statements.
@@ -655,7 +655,7 @@ argument-hint: "<fact or preference statement to sync>"
 ---
 # /auxly-sync
 
-You must immediately invoke the 'auxly_skill_sync' MCP tool, passing the user's provided input statement as the 'content' argument. This performs a smart automated delta-merge to update the memory files. Simply run the tool and display the confirmation output!`,
+You must immediately invoke the 'auxly_skill_sync' MCP tool. Pass the user's statement as the 'content' argument AND set the 'category' argument to the best-fit category from the taxonomy shown in the tool's footer (identity, personal, preferences, infra, products, projects, daily, business, agents) — you understand the fact, so you pick the file; only omit 'category' if you are genuinely unsure, in which case the router will guess. Route private life facts (family, health, finances, legal) to category 'personal'. This performs a smart automated delta-merge into the chosen memory file. Run the tool and display the confirmation output!`,
 
 		"auxly-pending": `---
 name: auxly-pending
