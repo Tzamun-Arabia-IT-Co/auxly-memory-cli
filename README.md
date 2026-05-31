@@ -27,6 +27,7 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 - [Trust & access control](#trust--access-control)
 - [Skills (slash commands)](#skills-slash-commands)
 - [Supported agents](#supported-agents)
+- [Setup guide](#setup-guide)
 - [The dashboard](#the-dashboard)
 - [Remote memory over SSH](#remote-memory-over-ssh)
 - [Live Usage](#live-usage)
@@ -245,17 +246,69 @@ Under the hood these map to MCP tools (`auxly_skill_sync`, `auxly_memory_read`, 
 
 | Agent | Integration |
 |-------|-------------|
-| **Claude Desktop** | MCP server entry |
+| **Claude Desktop** | MCP server entry (+ importable skills — see [Setup guide](#setup-guide)) |
 | **Claude Code** (CLI) | `claude mcp add` + skills |
 | **Codex** (IDE & CLI) | MCP + `codex mcp add` |
 | **Cursor** (IDE & Agent CLI) | MCP + auto-approved tool allowlist |
 | **Gemini CLI** | MCP server entry + skills |
 | **Antigravity** (CLI / Agent / IDE) | MCP server entries |
 | **GitHub Copilot** | shared memory via MCP/skills |
+| **Warp** (terminal) | MCP — `~/.warp/.mcp.json` |
+| **Void** (editor) | MCP — `~/.void-editor/mcp.json` |
 | **Windsurf**, **Kimi Code**, **Trae** | MCP + workspace rules |
-| **Any CLI agent** | shell commands (`auxly read/write/search`) |
+| **Android Studio** | MCP via the Gemini Agent or JetBrains AI Assistant — [manual setup](#manual-setup-agents-auxly-cant-auto-wire) |
+| **Any MCP client / CLI agent** | paste an MCP entry ([manual setup](#manual-setup-agents-auxly-cant-auto-wire)) or call `auxly read/write/search` |
 
 For each agent, Auxly also drops a workspace rules file (`.clauderules`, `.cursorrules`, `.geminirules`, …) so the agent knows to keep your memory in sync.
+
+---
+
+## Setup guide
+
+### Automatic setup (recommended)
+
+```bash
+auxly setup
+```
+
+This detects every supported agent on your machine, writes each one's MCP configuration, installs the `/auxly-*` slash commands, and drops a workspace rules file so the agent keeps your memory in sync. Re-run it any time you install a new agent — it's idempotent and only updates what's needed.
+
+**Verify a connection** from inside the agent's chat:
+
+```
+/auxly-status
+```
+
+…or just open the dashboard (`auxly`): every connected agent appears on the grid, and its reads/writes show live in the **Activity** tab.
+
+### Claude Desktop skills
+
+Claude Desktop doesn't load skills from disk automatically — only the MCP connection is wired for you. `auxly setup` exports the slash commands to `~/Downloads/auxly-skills-v<version>/` as ready-to-import `.zip` files; add each one in Claude Desktop once (**Settings → Skills**). The export folder carries the version number, so when a release updates the skills you'll know to re-import. (Every other agent picks up skills automatically — this step is Claude-Desktop-only.)
+
+### Manual setup (agents Auxly can't auto-wire)
+
+Some agents keep their MCP config somewhere Auxly can't write — for example **Android Studio** (whose Gemini settings sync to your Google account), or any MCP-capable tool not yet auto-detected. Add the server by hand. Auxly is a **stdio** MCP server, and the entry is the standard `mcpServers` shape:
+
+```json
+{
+  "mcpServers": {
+    "auxly-memory": {
+      "command": "/absolute/path/to/auxly",
+      "args": ["--path", "/Users/you/.auxly/memory", "mcp-server"],
+      "env": {
+        "AUXLY_MEMORY_PATH": "/Users/you/.auxly/memory",
+        "AUXLY_PROVIDER": "android-studio"
+      }
+    }
+  }
+}
+```
+
+- Find the binary path with `which auxly`; the default memory path is `~/.auxly/memory` (or whatever `AUXLY_MEMORY_PATH` is set to).
+- **Set `AUXLY_PROVIDER` to a short id for that agent** (e.g. `android-studio`). This is the name the audit trail and dashboard attribute its writes by — give each tool its own id so writes are labeled correctly, not lumped under another agent.
+- Paste it where that agent reads MCP config. For **Android Studio**: the Gemini **"Configure MCP servers"** dialog, or **JetBrains AI Assistant → Settings → MCP** (it can also *Import from Claude* if you've run `auxly setup`).
+
+Once the agent connects and writes, it shows up on the dashboard automatically — and you can hide or re-show it under **Settings → Agents**.
 
 ---
 
@@ -265,15 +318,17 @@ For each agent, Auxly also drops a workspace rules file (`.clauderules`, `.curso
 
 | # | Tab | What you see |
 |---|-----|--------------|
-| 1 | **Dashboard** | Today's writes, pending approvals, per-agent activity |
+| 1 | **Dashboard** | Today's writes, pending approvals, and a live grid of your connected agents |
 | 2 | **Activity** | Live audit feed, color-coded by provider, local vs. SSH-remote |
-| 3 | **Files** | Browse and view your memory files |
+| 3 | **Files** | Browse, view, edit, and download your memory files |
 | 4 | **Approvals** | Review pending diffs — approve or reject |
 | 5 | **Analytics** | Writes per agent + (opt-in) live usage meters |
-| 6 | **Settings** | Toggle features like Live Usage |
+| 6 | **Settings** | Trust levels, on-demand memory organization, and Live Usage — plus an **Agents** sub-tab to show/hide which agents appear on the dashboard |
 | 7 | **Remote** | Manage memory hosts and connected boxes over SSH |
 | 8 | **Skills** | The installed slash commands at a glance |
 | 9 | **Audit Trail** | Full, queryable history |
+
+The agent grid is **dynamic** — it shows only the agents detected or active on this machine, so it stays readable whether you run two agents or twenty. Any agent that connects and writes appears automatically (even one wired by hand); hide the ones you don't want to see under **Settings → Agents**.
 
 Keyboard-driven throughout: `1–9` jump tabs, `↑/↓` or `j/k` navigate, `Tab`/`[`/`]` cycle, `q` quits. Press `[u]` anywhere for the live usage popup.
 
