@@ -34,6 +34,12 @@ type Settings struct {
 	// provider with its stored login token. Off by default to preserve Auxly's
 	// local-first, zero-network behavior.
 	LiveUsage bool `json:"liveUsage"`
+
+	// HiddenAgents lists canonical provider/brand ids the user has chosen to hide
+	// from the dashboard grid (Settings → Agents). Empty (the default) shows every
+	// detected or active agent. Hiding only affects the dashboard display — it
+	// never stops an agent from connecting or writing.
+	HiddenAgents []string `json:"hiddenAgents,omitempty"`
 }
 
 // settingsPath returns ~/.auxly/settings.json.

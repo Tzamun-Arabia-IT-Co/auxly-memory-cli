@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
@@ -64,6 +66,17 @@ type settingsModel struct {
 	// Live Usage opt-in (calls each agent's provider with its stored login —
 	// off keeps Auxly fully local). Persisted via config.SaveSettings.
 	liveUsage bool
+
+	// Sub-tab state: 0 = General (trust + organize), 1 = Agents (dashboard
+	// show/hide). Switched with ←/→ when not on the organize selector.
+	subTab int
+
+	// Agents sub-tab: the toggleable brand list (mirrors the dashboard's
+	// candidate set — detected + active + currently-hidden) and its cursor.
+	logger       *audit.Logger
+	agentBrands  []agentCard
+	agentCursor  int
+	hiddenAgents map[string]bool
 }
 
 type organizeStats struct {
@@ -72,9 +85,10 @@ type organizeStats struct {
 }
 
 type settingsRefreshMsg struct {
-	agents []detect.Agent
-	trust  trustConfig
-	stats  organizeStats
+	agents      []detect.Agent
+	trust       trustConfig
+	stats       organizeStats
+	agentBrands []agentCard
 }
 
 type settingsOrganizeResultMsg struct {
@@ -153,7 +167,7 @@ func (m settingsModel) fetchCustomModels(url string) tea.Cmd {
 	}
 }
 
-func newSettingsModel(memPath string) settingsModel {
+func newSettingsModel(memPath string, logger *audit.Logger) settingsModel {
 	store := memory.NewStore(memPath)
 	return settingsModel{
 		memoryPath:            memPath,
@@ -162,7 +176,20 @@ func newSettingsModel(memPath string) settingsModel {
 		selectedOrganizeAgent: -2,
 		customURL:             "http://localhost:11434",
 		liveUsage:             config.LoadSettings().LiveUsage,
+		logger:                logger,
+		hiddenAgents:          loadHiddenAgentSet(),
 	}
+}
+
+// loadHiddenAgentSet reads the persisted hide list into a set of canonical ids.
+func loadHiddenAgentSet() map[string]bool {
+	set := map[string]bool{}
+	for _, h := range config.LoadSettings().HiddenAgents {
+		if c := canonicalProvider(h); c != "" {
+			set[c] = true
+		}
+	}
+	return set
 }
 
 func (m settingsModel) getUniqueAgents() []detect.Agent {
@@ -199,6 +226,7 @@ func (m settingsModel) getCLIAgents() []detect.Agent {
 
 func (m settingsModel) Refresh() tea.Cmd {
 	memPath := m.memoryPath
+	logger := m.logger
 	return func() tea.Msg {
 		agents := detect.InstalledAgents()
 
@@ -216,8 +244,31 @@ func (m settingsModel) Refresh() tea.Cmd {
 			json.Unmarshal(sData, &stats)
 		}
 
-		return settingsRefreshMsg{agents: agents, trust: trust, stats: stats}
+		return settingsRefreshMsg{
+			agents:      agents,
+			trust:       trust,
+			stats:       stats,
+			agentBrands: buildAgentSettingsBrands(agents, logger),
+		}
 	}
+}
+
+// buildAgentSettingsBrands returns every brand the dashboard could show — the
+// union of detected agents, providers with audit activity, and the currently
+// hidden ones (so a hidden agent stays in the list to toggle back on). Reuses
+// buildAgentCards (without the hidden filter) for canonical order + metadata.
+func buildAgentSettingsBrands(agents []detect.Agent, logger *audit.Logger) []agentCard {
+	var provs []string
+	for _, a := range agents {
+		provs = append(provs, a.Provider)
+	}
+	if logger != nil {
+		if s, err := logger.Stats(); err == nil && s != nil {
+			provs = append(provs, providersWithActivity(s)...)
+		}
+	}
+	provs = append(provs, config.LoadSettings().HiddenAgents...)
+	return buildAgentCards(provs)
 }
 
 func (m settingsModel) runOrganize() tea.Cmd {
@@ -324,6 +375,10 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		m.trust = msg.trust
 		m.lastRun = msg.stats.LastRun
 		m.lastTokensUsed = msg.stats.TokensUsed
+		m.agentBrands = msg.agentBrands
+		if m.agentCursor >= len(m.agentBrands) {
+			m.agentCursor = 0
+		}
 	case settingsOrganizeResultMsg:
 		m.organizing = false
 		m.organizeResult = msg.msg
@@ -378,7 +433,53 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		if m.configuringCustom {
 			return m, nil
 		}
+		// Sub-tab bar + Agents-tab clicks (handled before the General hit-test).
 		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+			w := m.width
+			if w <= 0 {
+				w = 80
+			}
+			banner := renderBanner(w)
+			tabRow := strings.Count(banner, "\n")
+			contentOffsetY := tabRow + 4
+			viewLines := strings.Split(m.View(), "\n")
+			clickedY := msg.Y - contentOffsetY
+
+			// The sub-tab bar is the only row carrying both section labels.
+			for idx, line := range viewLines {
+				clean := stripANSI(line)
+				if strings.Contains(clean, subTabGeneralLabel) && strings.Contains(clean, subTabAgentsLabel) {
+					if clickedY == idx {
+						if msg.X >= strings.Index(clean, subTabAgentsLabel) {
+							m.subTab = 1
+						} else {
+							m.subTab = 0
+						}
+						return m, nil
+					}
+					break
+				}
+			}
+
+			if m.subTab == 1 {
+				for idx, line := range viewLines {
+					clean := stripANSI(line)
+					if clickedY != idx {
+						continue
+					}
+					for ai, b := range m.agentBrands {
+						if b.name != "" && strings.Contains(clean, b.name) &&
+							(strings.Contains(clean, "Shown") || strings.Contains(clean, "Hidden")) {
+							m.agentCursor = ai
+							m.toggleAgentHidden(b.id)
+							return m, nil
+						}
+					}
+				}
+				return m, nil
+			}
+		}
+		if m.subTab == 0 && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
 			w := m.width
 			if w <= 0 {
 				w = 80
@@ -575,6 +676,27 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			}
 		}
 
+		// Agents sub-tab: navigate the brand list and toggle dashboard visibility.
+		if m.subTab == 1 {
+			switch msg.String() {
+			case "j", "down":
+				if m.agentCursor < len(m.agentBrands)-1 {
+					m.agentCursor++
+				}
+			case "k", "up":
+				if m.agentCursor > 0 {
+					m.agentCursor--
+				}
+			case "h", "left", "l", "right":
+				m.subTab = 0
+			case "enter", " ":
+				if m.agentCursor < len(m.agentBrands) {
+					m.toggleAgentHidden(m.agentBrands[m.agentCursor].id)
+				}
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "j", "down":
 			max := len(uniqueAgents) + 3
@@ -588,10 +710,14 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		case "h", "left":
 			if m.cursor == len(uniqueAgents)+2 {
 				m.cycleOrganizeAgent(-1)
+			} else {
+				m.subTab = 1
 			}
 		case "l", "right":
 			if m.cursor == len(uniqueAgents)+2 {
 				m.cycleOrganizeAgent(1)
+			} else {
+				m.subTab = 1
 			}
 		case "enter", " ":
 			if m.cursor == 0 {
@@ -656,6 +782,30 @@ func (m *settingsModel) toggleLiveUsage() tea.Cmd {
 	return nil
 }
 
+// toggleAgentHidden flips a brand's dashboard visibility and persists the hide
+// list to settings.json. The dashboard re-reads it on its next refresh tick.
+func (m *settingsModel) toggleAgentHidden(id string) {
+	if id == "" {
+		return
+	}
+	if m.hiddenAgents == nil {
+		m.hiddenAgents = map[string]bool{}
+	}
+	if m.hiddenAgents[id] {
+		delete(m.hiddenAgents, id)
+	} else {
+		m.hiddenAgents[id] = true
+	}
+	list := make([]string, 0, len(m.hiddenAgents))
+	for k := range m.hiddenAgents {
+		list = append(list, k)
+	}
+	sort.Strings(list)
+	next := config.LoadSettings()
+	next.HiddenAgents = list
+	_ = config.SaveSettings(next)
+}
+
 func (m *settingsModel) cycleOrganizeAgent(dir int) {
 	cliAgents := m.getCLIAgents()
 
@@ -707,7 +857,118 @@ func (m settingsModel) saveTrust() tea.Cmd {
 	}
 }
 
+// settingsModel sub-tab labels. Kept as literals so the mouse hit-test can
+// locate the sub-tab bar by scanning the rendered (ANSI-stripped) lines.
+const (
+	subTabGeneralLabel = "General"
+	subTabAgentsLabel  = "Agents"
+)
+
+// renderSubTabBar draws the "General | Agents" section switcher, highlighting
+// the active sub-tab. The active label is underlined so the row reads clearly
+// even on terminals without bold support.
+func (m settingsModel) renderSubTabBar() string {
+	active := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Underline(true)
+	inactive := StyleSubtitle
+	gen, ag := inactive.Render(subTabGeneralLabel), inactive.Render(subTabAgentsLabel)
+	if m.subTab == 1 {
+		ag = active.Render(subTabAgentsLabel)
+	} else {
+		gen = active.Render(subTabGeneralLabel)
+	}
+	sep := StyleSubtitle.Render("    ")
+	hint := StyleSubtitle.Render("   ←/→ switch section")
+	return "  " + gen + sep + ag + hint
+}
+
+// agentsView renders the Agents sub-tab: a toggleable list controlling which
+// agents appear on the dashboard grid.
+func (m settingsModel) agentsView() string {
+	cyan := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
+	dim := StyleSubtitle
+	green := lipgloss.NewStyle().Foreground(ColorSuccess)
+	red := lipgloss.NewStyle().Foreground(ColorDanger)
+	bold := lipgloss.NewStyle().Bold(true)
+
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	innerW := w - 10
+	if innerW < 44 {
+		innerW = 44
+	}
+	if innerW > 70 {
+		innerW = 70
+	}
+
+	var lines []string
+	lines = append(lines, bold.Render("Dashboard Agents"))
+	lines = append(lines, dim.Render("Choose which agents appear on the dashboard grid."))
+	lines = append(lines, dim.Render("Hiding only affects display — it never blocks an agent"))
+	lines = append(lines, dim.Render("from connecting, writing, or being audited."))
+	lines = append(lines, "")
+
+	if len(m.agentBrands) == 0 {
+		lines = append(lines, dim.Render("No agents detected or active yet."))
+		lines = append(lines, dim.Render("Run  auxly setup  to wire one up."))
+	}
+
+	shownCount := 0
+	for i, b := range m.agentBrands {
+		hidden := m.hiddenAgents[b.id]
+		if !hidden {
+			shownCount++
+		}
+		cursor := "  "
+		if i == m.agentCursor {
+			cursor = cyan.Render("▸ ")
+		}
+		state := green.Render("[Shown] ")
+		if hidden {
+			state = red.Render("[Hidden]")
+		}
+		label := fmt.Sprintf("%s %-20s", b.icon, b.name)
+		switch {
+		case hidden:
+			label = dim.Render(label)
+		case i == m.agentCursor:
+			label = bold.Render(label)
+		}
+		lines = append(lines, fmt.Sprintf("%s%s  %s", cursor, label, state))
+	}
+
+	if len(m.agentBrands) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, dim.Render(fmt.Sprintf("%d of %d shown on dashboard", shownCount, len(m.agentBrands))))
+	}
+	lines = append(lines, "")
+	lines = append(lines, dim.Render("↑/↓ move • Enter/Space toggle • ←/→ back to General"))
+
+	var padded []string
+	for _, line := range lines {
+		padded = append(padded, padLine(line, innerW))
+	}
+	panel := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Padding(1, 2).
+		Render(strings.Join(padded, "\n"))
+
+	var sb strings.Builder
+	sb.WriteString(StyleTitle.Render("Settings & Access Configuration"))
+	sb.WriteString("\n\n")
+	sb.WriteString(m.renderSubTabBar())
+	sb.WriteString("\n\n")
+	sb.WriteString(panel)
+	return sb.String()
+}
+
 func (m settingsModel) View() string {
+	if m.subTab == 1 {
+		return m.agentsView()
+	}
+
 	cyan := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
 	purple := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary)
 	dim := StyleSubtitle
@@ -962,6 +1223,8 @@ func (m settingsModel) View() string {
 
 	var sb strings.Builder
 	sb.WriteString(StyleTitle.Render("Settings & Access Configuration"))
+	sb.WriteString("\n\n")
+	sb.WriteString(m.renderSubTabBar())
 	sb.WriteString("\n\n")
 	sb.WriteString(content)
 

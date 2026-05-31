@@ -122,6 +122,25 @@ func TestBuildAgentCards(t *testing.T) {
 	}
 }
 
+func TestFilterHiddenProviders(t *testing.T) {
+	// Empty hide set is a pass-through.
+	if got := filterHiddenProviders([]string{"claude", "cursor"}, nil); len(got) != 2 {
+		t.Fatalf("nil hide set = %v, want pass-through", got)
+	}
+	// Hiding is by canonical brand: the stray "AS" folds to android-studio and a
+	// hidden android-studio removes it; antigravity-ide stays (brand not hidden).
+	hidden := map[string]bool{"claude": true, "android-studio": true}
+	got := filterHiddenProviders([]string{"claude", "cursor", "AS", "antigravity-ide"}, hidden)
+	if len(got) != 2 || got[0] != "cursor" || got[1] != "antigravity-ide" {
+		t.Fatalf("filterHiddenProviders = %v, want [cursor antigravity-ide]", got)
+	}
+	// End-to-end: a hidden brand never produces a dashboard card.
+	cards := buildAgentCards(filterHiddenProviders([]string{"claude", "cursor"}, map[string]bool{"claude": true}))
+	if got := ids(cards); len(got) != 1 || got[0] != "cursor" {
+		t.Fatalf("hidden claude still carded: %v", got)
+	}
+}
+
 func TestCanonicalProvider(t *testing.T) {
 	cases := map[string]string{
 		"antigravity-ide": "antigravity",

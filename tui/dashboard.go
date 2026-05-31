@@ -1211,12 +1211,44 @@ var brandOrder = []string{"claude", "claude-code", "antigravity", "cursor", "cod
 // Deduped, in canonical order. This keeps the dashboard showing only relevant
 // agents: with 100 supported, it still shows only the ones installed or active.
 func agentCardOrder(activity []string) []agentCard {
+	hidden := hiddenAgentSet()
 	var providers []string
 	for _, a := range detect.InstalledAgents() {
 		providers = append(providers, a.Provider)
 	}
 	providers = append(providers, activity...)
-	return buildAgentCards(providers)
+	return buildAgentCards(filterHiddenProviders(providers, hidden))
+}
+
+// filterHiddenProviders drops any provider whose canonical brand is in the hide
+// set. Pure (no config/detect access) so the dashboard hide behavior is testable.
+func filterHiddenProviders(providers []string, hidden map[string]bool) []string {
+	if len(hidden) == 0 {
+		return providers
+	}
+	kept := make([]string, 0, len(providers))
+	for _, p := range providers {
+		if !hidden[canonicalProvider(p)] {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
+// hiddenAgentSet loads the user's Settings → Agents hide list as a set of
+// canonical brand ids. Read fresh each refresh so toggles apply on the next tick.
+func hiddenAgentSet() map[string]bool {
+	hidden := config.LoadSettings().HiddenAgents
+	if len(hidden) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(hidden))
+	for _, h := range hidden {
+		if c := canonicalProvider(h); c != "" {
+			set[c] = true
+		}
+	}
+	return set
 }
 
 // providersWithActivity returns every provider that has ANY audit history (writes

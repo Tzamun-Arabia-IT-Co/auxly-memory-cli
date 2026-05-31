@@ -87,7 +87,7 @@ func NewApp(memoryPath string) *model {
 		diff:       newDiffModel(pendingMgr),
 		analytics:  newAnalyticsModel(logger, usageMgr),
 		search:     newSearchModel(store),
-		settings:   newSettingsModel(memoryPath),
+		settings:   newSettingsModel(memoryPath, logger),
 		ssh:        newSSHModel(),
 		skills:     newSkillsModel(),
 		viewer:     newViewerModel(store),
