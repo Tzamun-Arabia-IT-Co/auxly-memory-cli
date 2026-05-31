@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/tui"
 	"github.com/spf13/cobra"
 )
@@ -391,6 +392,12 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	printAlf("📍 Binary: %s\r\n", binaryPath)
 	printAlf("📂 Memory: %s\r\n\r\n", memPath)
 
+	// Ensure the vault has all default files (create-if-missing). Back-fills new
+	// default files like personal.md for existing users; harmless for new ones.
+	if created, _ := memory.SeedDefaultFiles(memPath); len(created) > 0 {
+		printAlf("📂 Seeded memory files: %s\r\n\r\n", strings.Join(created, ", "))
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -565,6 +572,7 @@ func cleanupGeminiSlashCommands() {
 		"auxly-status.toml",
 		"auxly-forget.toml",
 		"auxly-learn.toml",
+		"auxly-bootstrap.toml",
 	}
 
 	for _, cmdFile := range commands {
@@ -585,9 +593,10 @@ You natively support the following slash commands! When the user inputs one of t
 - /auxly-status (or auxly-status / auxly status): Call the auxly_skill_status tool to show system diagnostics, active connections, and remote/SSH attribution.
 - /auxly-sync (or auxly-sync / auxly sync): Call the auxly_skill_sync tool with the provided content to perform an automated smart delta-merge into the preferences file.
 - /auxly-pending (or auxly-pending / auxly pending): Call the auxly_skill_pending tool with arguments list/approve/reject to manage the approval queue.
-- /auxly-max (or auxly-max / auxly max): Call the auxly_skill_max tool to obtain the dynamic Maximum Memory sync instructions block.
+- /auxly-max (or auxly-max / auxly max): Call the auxly_skill_max tool, then exhaustively self-harvest your entire session — write every fact up via auxly_skill_sync, one category slice at a time (personal facts into personal.md). This pushes memory up; it does NOT pull.
 - /auxly-forget (or auxly-forget / auxly forget): Call the auxly_skill_forget tool to search and prune outdated bullet statements.
-- /auxly-learn (or auxly-learn / auxly learn): Call the auxly_skill_learn tool to parse raw context/snippets and extract new facts.
+- /auxly-learn (or auxly-learn / auxly learn): Call the auxly_skill_learn tool to read the memory vault (optionally a single [folder], optionally focused on a [topic]) and ground yourself in it. No args = learn everything.
+- /auxly-bootstrap (or auxly-bootstrap / auxly bootstrap): Call the auxly_skill_bootstrap tool to get a copyable onboarding block to paste into a tool that does NOT have Auxly installed (e.g. ChatGPT), then present that block to the user.
 
 ## 🧠 CRITICAL REMINDER: Always Update Memory
 IMPORTANT: You are expected to proactively update the user's unified Auxly memory vault. Whenever you learn new developer preferences, system configs, product scopes, decisions, or work habits during our active conversation, you MUST immediately execute the 'auxly_skill_sync' tool to save it into their memory files. Keep the memory synchronized!
@@ -602,7 +611,13 @@ IMPORTANT: You are expected to proactively update the user's unified Auxly memor
 		".codexrules",
 	}
 
+	// Create-if-missing only: never overwrite an existing workspace rules file.
+	// This stops setup/init from clobbering a project's own (possibly customized)
+	// rules on every run — and keeps the Auxly source repo clean.
 	for _, filename := range ruleFiles {
+		if _, err := os.Stat(filename); err == nil {
+			continue // already present — leave it untouched
+		}
 		_ = os.WriteFile(filename, []byte(rulesContent), 0644)
 	}
 }
@@ -627,11 +642,11 @@ You must immediately invoke the 'auxly_skill_memory' MCP tool to retrieve and di
 
 		"auxly-max": `---
 name: auxly-max
-description: Obtain the dynamic Maximum Memory sync instructions block to sync other local agents (e.g. Cursor, Codex) E2E.
+description: Exhaustive self-harvest — scan your whole session and write every fact up into the memory vault, slice by category.
 ---
 # /auxly-max
 
-You must immediately invoke the 'auxly_skill_max' MCP tool to align your session, and then immediately call 'auxly_skill_memory' to pull down and load the complete memory vault. Finally, present a beautiful success message confirming that unified memory alignment is fully complete!`,
+You must immediately invoke the 'auxly_skill_max' MCP tool to load the harvest directive. Then perform an EXHAUSTIVE SELF-HARVEST of your entire session: scan everything you have learned and write it ALL up via the 'auxly_skill_sync' tool, working ONE category at a time (collect all infra facts, then all project facts, etc.), reconciling each slice against what is already saved so you never duplicate. Route genuinely-private life facts (family, relationships, health, personal legal/financial matters) into personal.md. This pushes memory UP only — do NOT pull or read the vault. Finally, present a beautiful success message confirming the full session has been harvested into unified memory!`,
 
 		"auxly-sync": `---
 name: auxly-sync
@@ -676,12 +691,20 @@ You must immediately invoke the 'auxly_skill_forget' MCP tool, passing the user'
 
 		"auxly-learn": `---
 name: auxly-learn
-description: Intercept recent edits or context to extract and propose structured new facts to save into memory files.
-argument-hint: "[raw context text or snippet]"
+description: Read the memory vault (optionally a single folder, optionally focused on a topic) and ground yourself in it for the rest of the session.
+argument-hint: "[folder] [topic]"
 ---
 # /auxly-learn
 
-You must immediately invoke the 'auxly_skill_learn' MCP tool, passing the provided raw context text or snippet as the 'context' argument, to parse and extract structured new facts. Simply run the tool and display the proposed facts!`,
+You must immediately invoke the 'auxly_skill_learn' MCP tool to read the unified memory vault and internalize it — learn everything already known about the user and operate from it for the rest of the session. Pass the optional first argument as 'folder' to read only that category/file (e.g. 'infra', 'projects'), and the optional second argument as 'topic' to focus within it (e.g. 'infra nginx'). Empty args = learn everything. Absorb the returned content and behave accordingly.`,
+
+		"auxly-bootstrap": `---
+name: auxly-bootstrap
+description: Get a copyable onboarding block to paste into a tool without Auxly installed.
+---
+# /auxly-bootstrap
+
+You must immediately invoke the 'auxly_skill_bootstrap' MCP tool to generate a copyable onboarding block, then present that block to the user verbatim so they can paste it into a tool that does NOT have Auxly installed (e.g. ChatGPT). Running this only SHOWS the block — it does NOT sync anything itself; the foreign agent does the actual reading/writing by following the block's instructions. Simply run the tool and display the returned block!`,
 
 		"auxly-remote-connect": `---
 name: auxly-remote-connect

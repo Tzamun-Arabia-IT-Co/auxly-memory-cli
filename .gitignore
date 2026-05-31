@@ -44,3 +44,12 @@ Thumbs.db
 # Local runtime state and research scratch
 .auxly/
 .tmp-usage-research/
+
+# Generated workspace agent rules (written by `auxly setup`/`init`, create-if-missing).
+# Not source — keep them out of the tree so setup never dirties the repo.
+.cursorrules
+.antigravityrules
+.windsurfrules
+.geminirules
+.clauderules
+.codexrules

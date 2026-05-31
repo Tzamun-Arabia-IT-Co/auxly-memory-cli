@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
 	"github.com/spf13/cobra"
 )
@@ -133,6 +134,12 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			fmt.Printf("   ↳ %s\r\n", strings.TrimSpace(firstLine(string(out))))
 		}
 		fmt.Print("\r\n")
+	}
+
+	// Back-fill any new default memory files this release introduced (e.g.
+	// personal.md) for existing users — idempotent, never overwrites.
+	if created, _ := memory.SeedDefaultFiles(getMemoryPath()); len(created) > 0 {
+		fmt.Printf("📂 Added new memory files: %s\r\n\r\n", strings.Join(created, ", "))
 	}
 
 	return nil
