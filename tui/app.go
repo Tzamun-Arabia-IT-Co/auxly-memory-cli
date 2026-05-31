@@ -101,10 +101,7 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case OpenFileMsg:
-		m.viewer.filename = msg.Filename
-		m.viewer.content = msg.Content
-		m.viewer.lines = strings.Split(msg.Content, "\n")
-		m.viewer.scrollY = 0
+		m.viewer = m.viewer.load(msg.Filename, msg.Content, msg.Editable)
 		m.screen = screenViewer
 		return m, nil
 	case tea.KeyMsg:
@@ -129,6 +126,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == screenSettings && m.settings.configuringCustom {
 			var cmd tea.Cmd
 			m.settings, cmd = m.settings.Update(msg)
+			return m, cmd
+		}
+
+		// While editing a memory file, every keystroke (incl. q, digits, esc,
+		// ctrl+s) must reach the editor — never the global tab/quit switch below.
+		if m.screen == screenViewer && m.viewer.editing {
+			var cmd tea.Cmd
+			m.viewer, cmd = m.viewer.Update(msg)
 			return m, cmd
 		}
 
@@ -343,7 +348,13 @@ func (m model) renderFooter() string {
 	case screenBrowser:
 		footerText = "j/k: Navigate files • Enter: View file • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenViewer:
-		footerText = "j/k: Scroll file • PgUp/PgDn: Scroll page • Esc: Back to files • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		if m.viewer.editing {
+			footerText = "Ctrl+S: Save • Esc: Cancel edit (discard changes)"
+		} else if m.viewer.editable {
+			footerText = "j/k: Scroll • PgUp/PgDn: Page • g/G: Top/Bottom • e: Edit • d: Download • Esc: Back • [ / ]: Tabs • q: Quit"
+		} else {
+			footerText = "j/k: Scroll • PgUp/PgDn: Page • g/G: Top/Bottom • d: Download • Esc: Back (read-only) • [ / ]: Tabs • q: Quit"
+		}
 	case screenDiff:
 		if m.diff.viewing != "" {
 			footerText = "a: Approve • r: Reject • Esc: Back to queue • q: Quit"

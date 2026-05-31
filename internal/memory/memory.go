@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -112,6 +113,10 @@ func (s *Store) List() ([]FileInfo, error) {
 	for _, f := range filesMap {
 		files = append(files, f)
 	}
+	// Deterministic order — map iteration is random, which made the file list
+	// (and the compiled aggregate) reshuffle on every render. Sort by name so the
+	// order is stable; the browser applies its own taxonomy-first grouping on top.
+	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 	return files, nil
 }
 
