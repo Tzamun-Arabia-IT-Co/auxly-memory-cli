@@ -1,0 +1,160 @@
+// Package sharing implements the per-remote memory file-sharing ACL.
+//
+// A host decides which of its memory files each connecting remote (consumer) may
+// READ and whether it may WRITE. The model is FAIL-CLOSED: personal-tier files
+// are never served to a remote unless the host explicitly lists them, and an
+// unknown/unmatched remote gets the safe default (all shared-tier files, no
+// personal, read-only).
+package sharing
+
+import (
+	"os"
+	"path/filepath"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	AccessRead  = "read"
+	AccessWrite = "write"
+)
+
+// unifiedDump is a generated aggregate that can embed personal facts; it is never
+// served to a remote by default (only via an explicit SharedFiles grant).
+const unifiedDump = "unified_memory.md"
+
+// ClientShare is one remote's file-sharing ACL, persisted per client.
+type ClientShare struct {
+	// SharedFiles is an explicit allow-list of files this remote may read.
+	// Empty/nil means "use the safe default" (all non-personal files).
+	SharedFiles []string `yaml:"shared_files,omitempty"`
+	// Access is "read" (default) or "write".
+	Access string `yaml:"access,omitempty"`
+}
+
+// effectiveAccess defaults to read-only.
+func (c *ClientShare) effectiveAccess() string {
+	if c != nil && c.Access == AccessWrite {
+		return AccessWrite
+	}
+	return AccessRead
+}
+
+// AllowedReads returns the set of files a remote may READ, fail-closed.
+//
+//   - Explicit SharedFiles → exactly that set.
+//   - No config → every vault file EXCEPT personal-tier files and the unified
+//     aggregate dump (which can contain personal facts).
+//
+// allVaultFiles is the full list of files present in the vault.
+func AllowedReads(share *ClientShare, allVaultFiles []string) map[string]bool {
+	allowed := map[string]bool{}
+	if share != nil && len(share.SharedFiles) > 0 {
+		for _, f := range share.SharedFiles {
+			allowed[f] = true
+		}
+		return allowed
+	}
+	for _, f := range allVaultFiles {
+		if memory.IsPersonalFile(f) || f == unifiedDump {
+			continue // fail-closed: never default-share personal or the aggregate
+		}
+		allowed[f] = true
+	}
+	return allowed
+}
+
+// CanRead reports whether a remote may read a specific file.
+func CanRead(share *ClientShare, file string, allVaultFiles []string) bool {
+	return AllowedReads(share, allVaultFiles)[file]
+}
+
+// CanWrite reports whether a remote may write a specific file. Requires both
+// write access AND the file being in the readable set (you cannot write what you
+// cannot see). Personal files require an explicit grant to be writable at all.
+func CanWrite(share *ClientShare, file string, allVaultFiles []string) bool {
+	if share.effectiveAccess() != AccessWrite {
+		return false
+	}
+	return AllowedReads(share, allVaultFiles)[file]
+}
+
+// --- persistence: read the host's per-client shares from clients.yaml ---
+
+// clientsFile mirrors only the fields this package needs from ~/.auxly/clients.yaml.
+// The authoritative writer lives in package cmd; we read the same shape.
+type clientsFile struct {
+	Clients []clientEntry `yaml:"clients"`
+}
+
+type clientEntry struct {
+	Name        string   `yaml:"name"`
+	Target      string   `yaml:"target"`
+	SharedFiles []string `yaml:"shared_files,omitempty"`
+	Access      string   `yaml:"access,omitempty"`
+}
+
+// LoadForRemoteHost looks up the ClientShare for a connecting remote, matched by
+// hostname against the host's clients.yaml Target field. Returns nil when no
+// match is found — callers then apply the safe default via AllowedReads(nil, …).
+func LoadForRemoteHost(memoryPath, remoteHost string) *ClientShare {
+	if remoteHost == "" {
+		return nil
+	}
+	path := clientsYamlPath(memoryPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var cf clientsFile
+	if yaml.Unmarshal(data, &cf) != nil {
+		return nil
+	}
+	for _, c := range cf.Clients {
+		if hostMatches(c.Target, remoteHost) {
+			return &ClientShare{SharedFiles: c.SharedFiles, Access: c.Access}
+		}
+	}
+	return nil
+}
+
+// clientsYamlPath resolves ~/.auxly/clients.yaml from the memory path
+// (~/.auxly/memory) by taking its parent directory.
+func clientsYamlPath(memoryPath string) string {
+	return filepath.Join(filepath.Dir(memoryPath), "clients.yaml")
+}
+
+// hostMatches reports whether a clients.yaml target (e.g. "root@1.2.3.4:22")
+// refers to the given remote host (hostname or IP).
+func hostMatches(target, remoteHost string) bool {
+	if target == "" || remoteHost == "" {
+		return false
+	}
+	host := target
+	if at := lastIndexByte(host, '@'); at >= 0 {
+		host = host[at+1:]
+	}
+	if colon := indexByte(host, ':'); colon >= 0 {
+		host = host[:colon]
+	}
+	return host == remoteHost
+}
+
+func lastIndexByte(s string, b byte) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}

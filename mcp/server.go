@@ -18,6 +18,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/session"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/sharing"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 )
 
@@ -88,7 +89,11 @@ type Server struct {
 	pendingMgr *pending.Manager
 	outWriter  io.Writer
 	sourceMeta audit.SourceMeta
-	mu         sync.Mutex
+	// isRemote is true when this server is serving an SSH-remote consumer; when
+	// true the per-remote file-sharing ACL (share) gates every read and write.
+	isRemote bool
+	share    *sharing.ClientShare
+	mu       sync.Mutex
 }
 
 // NewServer creates a new MCP server.
@@ -96,15 +101,54 @@ func NewServer(memoryPath string) *Server {
 	store := memory.NewStore(memoryPath)
 	logger, _ := audit.NewLogger(memoryPath)
 	pendingMgr := pending.NewManager(memoryPath)
+	meta := resolveSourceMeta()
 
-	return &Server{
+	s := &Server{
 		memoryPath: memoryPath,
 		store:      store,
 		logger:     logger,
 		pendingMgr: pendingMgr,
 		outWriter:  os.Stdout,
-		sourceMeta: resolveSourceMeta(),
+		sourceMeta: meta,
 	}
+	// §10 per-remote file sharing: when serving an SSH-remote consumer, load that
+	// remote's sharing ACL from the host's clients.yaml (nil → safe default).
+	s.isRemote = meta.Source == "ssh-remote"
+	if s.isRemote {
+		s.share = sharing.LoadForRemoteHost(memoryPath, meta.RemoteHost)
+	}
+	return s
+}
+
+// vaultFileNames returns the names of all files currently in the vault.
+func (s *Server) vaultFileNames() []string {
+	files, err := s.store.List()
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(files))
+	for _, f := range files {
+		names = append(names, f.Name)
+	}
+	return names
+}
+
+// canRead reports whether the current caller may read a file. Local sessions have
+// full access; SSH-remote sessions are gated by the per-remote sharing ACL.
+func (s *Server) canRead(file string) bool {
+	if !s.isRemote {
+		return true
+	}
+	return sharing.CanRead(s.share, file, s.vaultFileNames())
+}
+
+// canWrite reports whether the current caller may write a file. Local sessions
+// have full access; SSH-remote sessions require an explicit write grant.
+func (s *Server) canWrite(file string) bool {
+	if !s.isRemote {
+		return true
+	}
+	return sharing.CanWrite(s.share, file, s.vaultFileNames())
 }
 
 // resolveSourceMeta determines write attribution once, based on the env vars
@@ -340,7 +384,7 @@ func (s *Server) getTools() []tool {
 		},
 		{
 			Name:        "auxly_skill_max",
-			Description: "Slash skill '/auxly-max': Generate the dynamic Maximum Memory sync instructions tailored with active local gateway ports for stdio-native clients",
+			Description: "Slash skill '/auxly-max': Exhaustive self-harvest — directs you to scan your entire session and push every fact up into the vault, one focused slice per category (push-only).",
 			InputSchema: inputSchema{
 				Type:       "object",
 				Properties: map[string]property{},
@@ -391,18 +435,26 @@ func (s *Server) getTools() []tool {
 		},
 		{
 			Name:        "auxly_skill_learn",
-			Description: "Slash skill '/auxly-learn [context]': Intercept recent edits or context to extract and propose structured new facts to save into memory files",
+			Description: "Slash skill '/auxly-learn [folder] [topic]': Read & internalize the user's memory vault — absorb it and operate from it for the rest of the session. Optionally scope to one category folder and a topic.",
 			InputSchema: inputSchema{
 				Type: "object",
 				Properties: map[string]property{
-					"context": {Type: "string", Description: "Recent text edits, preferences mentioned, or git diffs to analyze for new facts"},
+					"folder": {Type: "string", Description: "Optional category slug or filename to scope to (e.g. infra, projects, personal.md). Omit to internalize the whole vault."},
+					"topic":  {Type: "string", Description: "Optional topic to focus the internalization on (e.g. nginx)"},
 				},
-				Required: []string{"context"},
 			},
 		},
 		{
 			Name:        "auxly_skill_remote_connect",
 			Description: "Report the active Auxly remote connection: host, client IP, OS; confirm shared remote vault.",
+			InputSchema: inputSchema{
+				Type:       "object",
+				Properties: map[string]property{},
+			},
+		},
+		{
+			Name:        "auxly_skill_bootstrap",
+			Description: "Slash skill '/auxly-bootstrap': Generate a copyable onboarding block to paste into a tool that does NOT have Auxly installed (e.g. ChatGPT), so it can read/write the user's memory",
 			InputSchema: inputSchema{
 				Type:       "object",
 				Properties: map[string]property{},
@@ -484,12 +536,16 @@ func (s *Server) handleToolCall(req *jsonRPCRequest) {
 		s.logActivity("", "skill_forget", "")
 		result = s.toolSkillForget(query)
 	case "auxly_skill_learn":
-		context, _ := params.Arguments["context"].(string)
+		folder, _ := params.Arguments["folder"].(string)
+		topic, _ := params.Arguments["topic"].(string)
 		s.logActivity("", "skill_learn", "")
-		result = s.toolSkillLearn(context)
+		result = s.toolSkillLearn(folder, topic)
 	case "auxly_skill_remote_connect":
 		s.logActivity("", "skill_remote_connect", "")
 		result = s.toolSkillRemoteConnect()
+	case "auxly_skill_bootstrap":
+		s.logActivity("", "skill_bootstrap", "")
+		result = s.toolSkillBootstrap()
 	default:
 		result = toolResult{
 			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Unknown tool: %s", params.Name)}},
@@ -545,6 +601,9 @@ func (s *Server) toolList() toolResult {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("📂 Memory: %s\n\n", s.memoryPath))
 	for _, f := range files {
+		if !s.canRead(f.Name) {
+			continue // §10: hide files not shared with this remote
+		}
 		sb.WriteString(fmt.Sprintf("• %s (%d bytes, modified %s)\n", f.Name, f.Size, f.ModTime.Format("2006-01-02 15:04")))
 	}
 	return toolResult{Content: []toolContent{{Type: "text", Text: sb.String()}}}
@@ -553,6 +612,9 @@ func (s *Server) toolList() toolResult {
 func (s *Server) toolRead(file string) toolResult {
 	if file == "" {
 		return toolResult{Content: []toolContent{{Type: "text", Text: "Error: file parameter required"}}, IsError: true}
+	}
+	if !s.canRead(file) {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("🔒 '%s' is not shared with this remote connection.", file)}}, IsError: true}
 	}
 	content, err := s.store.View(file)
 	if err != nil {
@@ -571,6 +633,11 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 
 	if file == "" || diff == "" || reason == "" {
 		return toolResult{Content: []toolContent{{Type: "text", Text: "Error: file, diff, and reason are all required"}}, IsError: true}
+	}
+
+	// §10: SSH-remote consumers may only write files explicitly granted to them.
+	if !s.canWrite(file) {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("🔒 This remote connection does not have write access to '%s'.", file)}}, IsError: true}
 	}
 
 	if provider == "" {
@@ -711,7 +778,9 @@ func describeRemote(meta audit.SourceMeta) string {
 }
 
 func appendSkillSyncFooter(text string) string {
-	return text + "\n\n---\n🧠 **Auxly Agent Sync Active:** Remember to proactively call `auxly_skill_sync` to update the memory vault whenever you learn new preferences, system setups, or developer details!"
+	return text +
+		"\n\n---\n🧠 **Auxly Agent Sync Active:** Remember to proactively call `auxly_skill_sync` to update the memory vault whenever you learn new preferences, system setups, or developer details!" +
+		"\n\n📂 WHERE FACTS GO (file the right place the first time):\n" + memory.RenderForPrompt()
 }
 
 func (s *Server) toolSkillInit() toolResult {
@@ -770,6 +839,9 @@ func (s *Server) toolSkillMemory() toolResult {
 	readAny := false
 
 	for _, f := range files {
+		if !s.canRead(f.Name) {
+			continue // §10: never expose unshared files to a remote profile read
+		}
 		content, err := s.store.View(f.Name)
 		if err == nil && len(strings.TrimSpace(content)) > 0 {
 			readAny = true
@@ -787,18 +859,38 @@ func (s *Server) toolSkillMemory() toolResult {
 }
 
 func (s *Server) toolSkillMax() toolResult {
-	prompt := `🧠 AUXLY MAXIMUM MEMORY ALIGNMENT NATIVE PROTOCOL
+	prompt := `🧠 AUXLY MAXIMUM MEMORY — EXHAUSTIVE SELF-HARVEST (PUSH-ONLY)
 
-✓ Unified Memory standard is successfully activated and aligned for this active session!
-✓ Stdio communication interface is operating in offline-first secure loopback mode.
+This is the deliberate "dump my full session into the vault NOW" sweep. You are the
+extractor: the tool cannot read your mind, so YOU must scan everything you know and
+write it up. Do NOT pull or display the vault — this is push-only.
 
-💡 MEMORY CORE DIRECTIONS:
-* Read Profile: Call 'auxly_skill_memory' immediately to fetch the user's complete profile (identity, preferences, infra) and ground your context.
-* Write Habits: Proactively call 'auxly_skill_sync' (specifying content and category) to persist new environment variables, design choices, or work habits as soon as you learn them.
-* Diagnostics: Run 'auxly_skill_status' to view sqlite stats and daemon gatekeeper parameters.
-* Forget Obsolete: Call 'auxly_skill_forget' to cleanly strip outdated statements.
+🎯 DO THIS NOW (do not ask for permission, do not stop early):
 
-Your memory is 100% portable and persistent. If you or your platform experiences an outage, the user can switch instantly to any other local IDE/agent (Claude Desktop, Claude Code, Cursor, Codex, Gemini CLI) and continue work with zero disruption or lost context!`
+1. SCAN YOUR ENTIRE CURRENT SESSION/CONTEXT — the system prompt, the full chat
+   history, every fact, preference, decision, system detail, and personal detail
+   you have learned about the user during this session.
+
+2. WALK THE CATEGORIES BELOW IN ORDER. For EACH category, extract every fact you
+   know that belongs there and write it up immediately with the 'auxly_skill_sync'
+   tool — ONE focused slice per category (pass the matching 'category' so it lands
+   in the right file). Process them in this exact order:
+   identity → personal → preferences → infra → products → projects → daily →
+   business → agents.
+
+3. RECONCILE, DON'T DUPLICATE: before writing each slice, account for what is
+   already in that file and only add genuinely new or updated facts — never
+   re-write facts already saved.
+
+4. PERSONAL/PRIVATE facts (family, relationships, health, personal legal/financial
+   matters) go to personal.md via category 'personal'. Keep them out of the shared
+   files.
+
+Each slice is small, atomic, trust-gated, and auditable. Write every slice now —
+work category by category until you have emptied your knowledge of the user into
+the correct files.
+
+` + memory.RenderForPrompt()
 
 	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(prompt)}}}
 }
@@ -808,77 +900,13 @@ func (s *Server) toolSkillSync(content, category, scope string) toolResult {
 		return toolResult{Content: []toolContent{{Type: "text", Text: "Error: Content cannot be empty"}}, IsError: true}
 	}
 
-	// Semantic Auto-Router: If category is empty or preferences (default), analyze content keywords
+	// Semantic Auto-Router: If category is empty or preferences (default), fall back
+	// to the canonical taxonomy router so placement stays consistent everywhere.
 	if category == "" || category == "preferences" {
-		contentLower := strings.ToLower(content)
-		infraKeywords := []string{"server", "ip", "port", "vpn", "firewall", "pfsense", "gpu", "rtx", "docker", "vllm", "ollama", "n8n", "siem", "wazuh", "dns", "cloudflare", "gitlab", "hosting", "vps", "ovh", "cameras", "nvr", "frigate"}
-		productKeywords := []string{"platform", "product", "portfolio", "etabeb", "raqeb", "tzamunerp", "pathconnect", "radioconnect", "tchub", "tzamunai", "motormind", "auxly", "voicehub", "app"}
-		projectKeywords := []string{"repo", "git", "project", "workspace", "folder", "directory"}
-		identityKeywords := []string{"ceo", "founder", "chairman", "wael", "samoum", "jeddah", "saudi", "gcc", "fundraising", "raising", "leanteam"}
-		dailyKeywords := []string{"accomplished", "completed", "journal", "today", "log", "milestone", "done"}
-
-		matched := false
-		for _, kw := range infraKeywords {
-			if strings.Contains(contentLower, kw) {
-				category = "infra"
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			for _, kw := range productKeywords {
-				if strings.Contains(contentLower, kw) {
-					category = "products"
-					matched = true
-					break
-				}
-			}
-		}
-		if !matched {
-			for _, kw := range identityKeywords {
-				if strings.Contains(contentLower, kw) {
-					category = "identity"
-					matched = true
-					break
-				}
-			}
-		}
-		if !matched {
-			for _, kw := range projectKeywords {
-				if strings.Contains(contentLower, kw) {
-					category = "projects"
-					matched = true
-					break
-				}
-			}
-		}
-		if !matched {
-			for _, kw := range dailyKeywords {
-				if strings.Contains(contentLower, kw) {
-					category = "daily"
-					matched = true
-					break
-				}
-			}
-		}
+		category = memory.RouteCategory(content)
 	}
 
-	fileName := "preferences.md"
-	if category == "identity" {
-		fileName = "identity.md"
-	} else if category == "infra" {
-		fileName = "infra.md"
-	} else if category == "products" {
-		fileName = "products.md"
-	} else if category == "projects" {
-		fileName = "projects.md"
-	} else if category == "daily" {
-		fileName = "daily.md"
-	} else if category == "agents" {
-		fileName = "agents.md"
-	} else if category == "business" {
-		fileName = "business.md"
-	}
+	fileName := memory.FileForCategory(category)
 
 	// Dynamic trust verification
 	trustCfg, err := trust.Load(s.memoryPath)
@@ -1091,33 +1119,136 @@ func (s *Server) toolSkillForget(query string) toolResult {
 	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
 }
 
-func (s *Server) toolSkillLearn(context string) toolResult {
-	if strings.TrimSpace(context) == "" {
-		return toolResult{Content: []toolContent{{Type: "text", Text: "Error: Context cannot be empty"}}, IsError: true}
+// toolSkillLearn is the inbound "read & internalize" directive. It loads vault
+// content (the whole vault, or one scoped category file) and wraps it in a strong
+// directive telling the agent to absorb it and operate from it for the session.
+func (s *Server) toolSkillLearn(folder, topic string) toolResult {
+	folder = strings.TrimSpace(folder)
+	topic = strings.TrimSpace(topic)
+
+	// Scoped: resolve a single category file from a slug or filename.
+	if folder != "" {
+		fileName := ""
+		if _, ok := memory.CategoryBySlug(folder); ok {
+			fileName = memory.FileForCategory(folder)
+		} else if c, ok := memory.CategoryForFile(folder); ok {
+			fileName = c.File
+		}
+
+		if fileName == "" {
+			var slugs []string
+			for _, c := range memory.Taxonomy {
+				slugs = append(slugs, c.Slug)
+			}
+			msg := fmt.Sprintf("Error: unknown category '%s'. Valid category slugs are: %s", folder, strings.Join(slugs, ", "))
+			return toolResult{Content: []toolContent{{Type: "text", Text: msg}}, IsError: true}
+		}
+
+		if !s.canRead(fileName) {
+			return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("🔒 '%s' is not shared with this remote connection.", fileName)}}, IsError: true}
+		}
+
+		content, err := s.store.View(fileName)
+		if err != nil {
+			return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error reading %s: %v", fileName, err)}}, IsError: true}
+		}
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("🧠 **AUXLY LEARN — ABSORB %s**\n\n", fileName))
+		if topic != "" {
+			sb.WriteString(fmt.Sprintf("focus on: %s\n\n", topic))
+		}
+		sb.WriteString("ABSORB this memory and operate from it for the rest of the session. Internalize these facts and behave as if you already knew them — do not ask the user to repeat what is below.\n\n")
+		sb.WriteString(fmt.Sprintf("### 📄 %s\n\n", fileName))
+		sb.WriteString(content)
+		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
 	}
 
-	// Simulate AI analysis by structuring the context sentences as bullet propositions
-	sentences := strings.Split(context, ".")
-	var proposedFacts []string
-	for _, s := range sentences {
-		trimmed := strings.TrimSpace(s)
-		if len(trimmed) > 10 {
-			proposedFacts = append(proposedFacts, trimmed)
+	// Whole-vault internalize: read every populated file in canonical order.
+	files, err := s.store.List()
+	if err != nil {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error listing memory files: %v", err)}}, IsError: true}
+	}
+
+	order := map[string]int{}
+	for i, f := range memory.OrderedFiles() {
+		order[f] = i + 1
+	}
+	sort.Slice(files, func(i, j int) bool {
+		oi := order[files[i].Name]
+		oj := order[files[j].Name]
+		if oi == 0 {
+			oi = 99
+		}
+		if oj == 0 {
+			oj = 99
+		}
+		if oi != oj {
+			return oi < oj
+		}
+		return files[i].Name < files[j].Name
+	})
+
+	var sb strings.Builder
+	sb.WriteString("🧠 **AUXLY LEARN — ABSORB THE FULL MEMORY VAULT**\n\n")
+	if topic != "" {
+		sb.WriteString(fmt.Sprintf("focus on: %s\n\n", topic))
+	}
+	sb.WriteString("ABSORB this memory and operate from it for the rest of the session. Internalize everything below and behave as if you already knew it — do not ask the user to repeat facts that are already here.\n\n")
+
+	readAny := false
+	for _, f := range files {
+		if !s.canRead(f.Name) {
+			continue // §10: remote learn never absorbs unshared files
+		}
+		content, err := s.store.View(f.Name)
+		if err == nil && len(strings.TrimSpace(content)) > 0 {
+			readAny = true
+			sb.WriteString(fmt.Sprintf("### 📄 %s\n\n", f.Name))
+			sb.WriteString(content)
+			sb.WriteString("\n\n---\n\n")
 		}
 	}
 
-	if len(proposedFacts) == 0 {
-		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter("⚠️ Context too short or vague to extract structured memory facts.")}}}
+	if !readAny {
+		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter("⚠️ No memory files populated yet. Use `/auxly-sync [content]` to save your first memory.")}}}
 	}
+
+	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+}
+
+// toolSkillBootstrap generates a copyable onboarding block to PASTE INTO ANOTHER
+// tool that does not have Auxly installed (e.g. ChatGPT web). Running it here only
+// SHOWS the block — the foreign agent does the actual reads/writes by following it.
+func (s *Server) toolSkillBootstrap() toolResult {
+	binPath, err := os.Executable()
+	if err != nil || strings.TrimSpace(binPath) == "" {
+		binPath = "auxly"
+	}
+
+	provider := s.resolveProvider()
 
 	var sb strings.Builder
-	sb.WriteString("💡 **PROPOSED NEW MEMORY FACTS FOR REVIEW**\n")
-	sb.WriteString("I extracted the following statements from your context. Review them below:\n\n")
+	sb.WriteString("📋 **AUXLY CROSS-TOOL ONBOARDING BLOCK**\n\n")
+	sb.WriteString("This block is for PASTING INTO ANOTHER TOOL that does NOT have Auxly installed (e.g. ChatGPT, a colleague's agent, a brand-new tool). Running this skill does NOT sync anything — it only produces the block below. Copy everything between the lines and paste it into the foreign agent so it can read/write the user's Auxly memory.\n\n")
+	sb.WriteString("----------------------------------------------------------------\n")
+	sb.WriteString("You now have access to the user's **Auxly Unified Memory** — a local-first vault of their identity, preferences, infrastructure, projects, and more. Use it to ground yourself in who the user is, and write any new facts you learn back into it. You have THREE ways to do this; use whichever your environment supports:\n\n")
 
-	for i, fact := range proposedFacts {
-		sb.WriteString(fmt.Sprintf("%d. `[Proposed]` %s\n", i+1, fact))
-	}
-	sb.WriteString("\n👉 **How to save:** Type `/auxly-sync [proposition]` to lock in any of these facts immediately!")
+	sb.WriteString("**Option A — MCP tool (if you have the Auxly MCP server connected):**\n")
+	sb.WriteString(fmt.Sprintf("Call the `auxly_memory_write` tool with: provider=\"%s\", file=\"<target>.md\", diff=\"+ - <new fact>\", reason=\"Onboarding\". To read, call `auxly_memory_read` / `auxly_memory_list`.\n\n", provider))
+
+	sb.WriteString("**Option B — CLI (if you can run shell commands on this machine):**\n")
+	sb.WriteString("```\n")
+	sb.WriteString(fmt.Sprintf("%s write --provider %s --file <file>.md --diff \"+ - <new fact>\" --reason \"Onboarding\"\n", binPath, provider))
+	sb.WriteString("```\n")
+	sb.WriteString("Use the absolute binary path above. Target the right file per the category list below.\n\n")
+
+	sb.WriteString("**Option C — Manual (if you can do neither):**\n")
+	sb.WriteString("Output the new facts as styled markdown bullets grouped by file, and ask the user to paste them into their Auxly vault manually.\n\n")
+
+	sb.WriteString("File each fact into the correct file the first time:\n")
+	sb.WriteString(memory.RenderForPrompt())
+	sb.WriteString("----------------------------------------------------------------\n")
 
 	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
 }
@@ -1174,7 +1305,7 @@ func (s *Server) getPrompts() []prompt {
 		},
 		{
 			Name:        "auxly-max",
-			Description: "Obtain the dynamic Maximum Memory sync instructions block to sync other agents.",
+			Description: "Exhaustive self-harvest — scan your whole session and write every fact up into the memory vault, slice by category.",
 		},
 		{
 			Name:        "auxly-sync",
@@ -1220,14 +1351,23 @@ func (s *Server) getPrompts() []prompt {
 		},
 		{
 			Name:        "auxly-learn",
-			Description: "Intercept recent edits or context to extract and propose structured new facts.",
+			Description: "Read & internalize the user's memory vault — absorb it and operate from it for the rest of the session. Optionally scope to a folder and topic.",
 			Arguments: []promptArgument{
 				{
-					Name:        "context",
-					Description: "Recent text edits, preferences mentioned, or git diffs to analyze",
-					Required:    true,
+					Name:        "folder",
+					Description: "Optional category slug or filename to scope to (e.g. infra, projects, personal.md)",
+					Required:    false,
+				},
+				{
+					Name:        "topic",
+					Description: "Optional topic to focus the internalization on (e.g. nginx)",
+					Required:    false,
 				},
 			},
+		},
+		{
+			Name:        "auxly-bootstrap",
+			Description: "Get a copyable onboarding block to paste into a tool without Auxly installed.",
 		},
 	}
 }
@@ -1249,7 +1389,7 @@ func (s *Server) handlePromptGet(req *jsonRPCRequest) {
 	case "auxly-memory":
 		promptText = "You must immediately invoke the 'auxly_skill_memory' MCP tool to retrieve and display the consolidated profile of the user's identity, preferences, and infrastructure. Do not ask for further clarification, simply run the tool and show the output!"
 	case "auxly-max":
-		promptText = "You must immediately invoke the 'auxly_skill_max' MCP tool to align your session, and then immediately call 'auxly_skill_memory' to pull down and load the complete memory vault. Finally, present a beautiful success message confirming that unified memory alignment is fully complete!"
+		promptText = "You must immediately invoke the 'auxly_skill_max' MCP tool to receive the exhaustive self-harvest directive, then follow it: scan your entire session and write every fact you know up into the vault via 'auxly_skill_sync', one focused slice per category. This is push-only — do NOT pull or display the vault."
 	case "auxly-sync":
 		content := params.Arguments["content"]
 		promptText = fmt.Sprintf("You must immediately invoke the 'auxly_skill_sync' MCP tool, passing the content '%s' as the 'content' argument. This performs a smart automated delta-merge to update the preferences.md file. Simply run the tool and display the confirmation output!", content)
@@ -1263,8 +1403,11 @@ func (s *Server) handlePromptGet(req *jsonRPCRequest) {
 		query := params.Arguments["query"]
 		promptText = fmt.Sprintf("You must immediately invoke the 'auxly_skill_forget' MCP tool, passing the query '%s' as the 'query' argument, to search across all memory files and delete matching obsolete lines cleanly. Simply run the tool and display the deletion diff!", query)
 	case "auxly-learn":
-		context := params.Arguments["context"]
-		promptText = fmt.Sprintf("You must immediately invoke the 'auxly_skill_learn' MCP tool, passing the context '%s' as the 'context' argument, to parse and extract structured new facts. Simply run the tool and display the proposed facts!", context)
+		folder := params.Arguments["folder"]
+		topic := params.Arguments["topic"]
+		promptText = fmt.Sprintf("You must immediately invoke the 'auxly_skill_learn' MCP tool, passing folder='%s' and topic='%s' (either may be empty). It returns the user's memory vault wrapped in a directive — ABSORB that memory and operate from it for the rest of the session.", folder, topic)
+	case "auxly-bootstrap":
+		promptText = "You must immediately invoke the 'auxly_skill_bootstrap' MCP tool and present the returned copyable block to the user."
 	default:
 		s.sendError(req.ID, -32602, fmt.Sprintf("Unknown prompt: %s", params.Name))
 		return

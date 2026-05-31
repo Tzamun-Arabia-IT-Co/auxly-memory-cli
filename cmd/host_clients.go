@@ -26,6 +26,12 @@ type clientEntry struct {
 	// here lets the live-status match the box to its session instead of surfacing
 	// a phantom duplicate row.
 	Hostname string `yaml:"hostname,omitempty"`
+	// SharedFiles is the §10 per-remote file-sharing allow-list: which memory
+	// files this box may READ. Empty/nil means the safe default (all non-personal
+	// files). The matching reader lives in internal/sharing.
+	SharedFiles []string `yaml:"shared_files,omitempty"`
+	// Access is "read" (default) or "write" — governs writes to shared files.
+	Access string `yaml:"access,omitempty"`
 }
 
 // clientIsLive reports whether a configured box currently holds a live
