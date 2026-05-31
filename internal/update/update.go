@@ -27,8 +27,10 @@ var versionRe = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+){0,3}([-+][0-9A-Za-z.]+)?
 //
 //	-ldflags "-X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update.Current=x.y.z"
 //
-// It defaults to a placeholder for plain `go build` / source installs.
-var Current = "1.0.0"
+// It defaults to the current release version for plain `go build` / source /
+// `go install` builds (which carry no ldflags). Bump this together with the
+// VERSION file and the git tag on every release.
+var Current = "1.0.1"
 
 const checkInterval = 24 * time.Hour
 

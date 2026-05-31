@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/assets"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -28,7 +29,7 @@ func renderBanner(width int) string {
 
 	version := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("245")).
-		Render("v1.0.0")
+		Render("v" + update.Current)
 
 	// If the terminal is narrow, don't show the massive ASCII art
 	if width > 0 && width < 80 {

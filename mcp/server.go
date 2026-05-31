@@ -20,6 +20,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/session"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/sharing"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
 )
 
 // JSON-RPC types
@@ -254,7 +255,7 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 			},
 			ServerInfo: serverInfo{
 				Name:    "auxly-memory",
-				Version: "1.0.0",
+				Version: update.Current,
 			},
 		})
 
