@@ -44,11 +44,12 @@ type dashboardModel struct {
 	height           int
 
 	// Live Usage data layer (opt-in; off keeps Auxly fully local).
-	usageMgr      *usage.Manager
-	usageReports  map[string]usage.Report
-	liveUsage     bool
-	agyAuthing    bool   // Antigravity consent flow in progress
-	agyAuthStatus string // last Antigravity auth result/status
+	usageMgr       *usage.Manager
+	usageReports   map[string]usage.Report
+	liveUsage      bool
+	showUsagePopup bool   // all-agents Live Usage overlay ([u])
+	agyAuthing     bool   // Antigravity consent flow in progress
+	agyAuthStatus  string // last Antigravity auth result/status
 
 	// Interactive Popup & Grid Selection State
 	selectedAgent  string // E.g., "claude", "cursor", etc.
@@ -130,7 +131,7 @@ func animationTickCmd() tea.Cmd {
 	})
 }
 
-func newDashboardModel(logger *audit.Logger, mgr *pending.Manager, memoryPath string) dashboardModel {
+func newDashboardModel(logger *audit.Logger, mgr *pending.Manager, memoryPath string, usageMgr *usage.Manager) dashboardModel {
 	return dashboardModel{
 		logger:           logger,
 		pendingMgr:       mgr,
@@ -140,7 +141,7 @@ func newDashboardModel(logger *audit.Logger, mgr *pending.Manager, memoryPath st
 		mcpError:         "",
 		reloaded:         false,
 		gridCursor:       0,
-		usageMgr:         usage.New(),
+		usageMgr:         usageMgr,
 		usageReports:     map[string]usage.Report{},
 		liveUsage:        config.LoadSettings().LiveUsage,
 	}
@@ -234,9 +235,9 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 
 		return m, tea.Batch(cmds...)
 	case dashboardTickMsg:
-		if m.liveUsage {
-			return m, tea.Batch(m.Refresh(), usageFetchCmd(m.usageMgr))
-		}
+		// Usage isn't on the cards anymore; it's fetched on demand when the [u]
+		// popup opens (and on the Analytics Usage tab), to keep background load
+		// off the rate-limited endpoints.
 		return m, m.Refresh()
 	case usageReportsMsg:
 		for _, r := range msg.reports {
@@ -346,15 +347,14 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 					// The name sits right of the glyph emblem (border+pad+glyph+gap ≈ 5
 					// cols, +1 left margin); the card spans a row above and below it.
 					// Bound the hit box to that rectangle so adjacent cards don't overlap.
-					// Live Usage adds two body lines, extending the card downward by 2.
 					bottom := idx + 2
-					if m.liveUsage {
-						bottom = idx + 4
-					}
 					x0, x1 := col-6, col-6+cardWidth+2
 					if clickLineIdx >= idx-1 && clickLineIdx <= bottom && msg.X >= x0 && msg.X <= x1 {
 						m.selectedAgent = b.id
 						m.activeAgentTab = 0
+						if m.liveUsage {
+							return m, usageFetchCmd(m.usageMgr)
+						}
 						return m, nil
 					}
 					break // first occurrence of this name is its card
@@ -362,6 +362,20 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			}
 		}
 	case tea.KeyMsg:
+		if m.showUsagePopup {
+			switch msg.String() {
+			case "esc", "q", "u":
+				m.showUsagePopup = false
+				return m, nil
+			case "r", "R":
+				if m.liveUsage {
+					m.usageMgr.Invalidate()
+					return m, usageFetchCmd(m.usageMgr)
+				}
+				return m, nil
+			}
+			return m, nil // swallow keys while the usage popup is open
+		}
 		if m.selectedAgent != "" {
 			switch msg.String() {
 			case "esc", "q":
@@ -428,6 +442,9 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			if m.gridCursor >= 0 && m.gridCursor < len(brands) {
 				m.selectedAgent = brands[m.gridCursor]
 				m.activeAgentTab = 0
+				if m.liveUsage {
+					return m, usageFetchCmd(m.usageMgr)
+				}
 			}
 		case "r", "R":
 			// Force refresh: immediately re-scan the session registry and the
@@ -441,7 +458,16 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 				return m, tea.Batch(m.Refresh(), usageFetchCmd(m.usageMgr))
 			}
 			return m, m.Refresh()
-		case "u", "U":
+		case "u":
+			// Toggle the all-agents Live Usage popup.
+			if m.selectedAgent == "" {
+				m.showUsagePopup = !m.showUsagePopup
+				if m.showUsagePopup && m.liveUsage {
+					return m, usageFetchCmd(m.usageMgr)
+				}
+				return m, nil
+			}
+		case "U":
 			// One-click self-update when a newer release is available.
 			if m.updateAvail && !m.updating {
 				m.updating = true
@@ -587,14 +613,6 @@ func (m dashboardModel) View() string {
 		textBlock := fmt.Sprintf("%s\n%s · %s · %s", cardName, statusDot, connInfo, trustBadge)
 		body := lipgloss.JoinHorizontal(lipgloss.Top, icon, "  ", textBlock)
 
-		// Live Usage adds two lines to each card (a meter + a reset/secondary
-		// line). Vertical-joined below the icon row so they sit at the card's
-		// left edge regardless of the glyph width.
-		if m.liveUsage {
-			l1, l2 := m.cardUsageLines(b.id)
-			body = lipgloss.JoinVertical(lipgloss.Left, body, l1, l2)
-		}
-
 		card := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(cardBorderColor).
@@ -635,6 +653,8 @@ func (m dashboardModel) View() string {
 			}
 		}
 		dashboardContent = overlayPopup(dashboardContent, popupStr, startX, 3)
+	} else if m.showUsagePopup {
+		dashboardContent = overlayPopup(dashboardContent, m.renderUsagePopup(), 10, 3)
 	}
 
 	var b strings.Builder
@@ -647,10 +667,12 @@ func (m dashboardModel) View() string {
 
 	if m.selectedAgent != "" {
 		b.WriteString(dim.Render("  Popup active: [1/2/3/4] switch tabs • [Esc] or Click outside to close"))
+	} else if m.showUsagePopup {
+		b.WriteString(dim.Render("  Live Usage • [r] refresh • [Esc]/[u] close"))
 	} else {
-		hint := "  Use arrow keys or Mouse Clicks to select agent boxes • Enter: open details popup • q: exit TUI"
+		hint := "  Use arrow keys or Mouse Clicks to select agent boxes • Enter: open details popup • [u] usage • q: exit TUI"
 		if m.updateAvail && !m.updating {
-			hint += " • [u] update"
+			hint += " • [U] update"
 		}
 		b.WriteString(dim.Render(hint))
 	}
@@ -673,7 +695,7 @@ func (m dashboardModel) renderUpdateBanner() string {
 		return lipgloss.NewStyle().Foreground(color).Bold(true).Render("  " + m.updateResult)
 	case m.updateAvail:
 		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).
-			Render(fmt.Sprintf("  ⬆ Update available: v%s (you have v%s) — press [u] to update",
+			Render(fmt.Sprintf("  ⬆ Update available: v%s (you have v%s) — press [U] to update",
 				m.updateLatest, update.Current))
 	}
 	return ""
@@ -770,47 +792,6 @@ func usageBar(pct float64, width int, brand string) string {
 		dimStyle.Render(strings.Repeat("▱", width-filled))
 }
 
-// cardUsageLines returns the two compact Live Usage lines for an agent card,
-// mapping the card's brand id to its report: a 10-cell meter + percent on line
-// one, and a dim "<reset> · wk NN%" (or the window label for single-window
-// providers like Google) on line two. Handles the not-loaded and error states.
-func (m dashboardModel) cardUsageLines(brand string) (string, string) {
-	dim := lipgloss.NewStyle().Foreground(ColorDim)
-
-	report, loaded := m.usageReports[brand]
-	if !loaded {
-		return dim.Render("usage …"), dim.Render("")
-	}
-	if report.Err != "" {
-		reason := report.Err
-		if len(reason) > 24 {
-			reason = reason[:21] + "..."
-		}
-		return dim.Render("usage —"), dim.Render(reason)
-	}
-	if !report.Available() {
-		return dim.Render("usage —"), dim.Render("no data")
-	}
-
-	head := report.Windows[0]
-	// Label the meter (Session / Week / Overall) so the bar reads unmistakably as
-	// quota usage, not some generic progress. Mirrors the Stream Deck convention.
-	label := dim.Render(fmt.Sprintf("%-7s", head.Label))
-	line1 := fmt.Sprintf("%s %s %3.0f%%", label, usageBar(head.Pct, 8, brand), head.Pct)
-
-	now := time.Now()
-	reset := usage.FormatReset(head.ResetAt, now)
-	if reset == "" {
-		reset = "—"
-	}
-	second := "resets " + reset
-	if len(report.Windows) > 1 {
-		second = fmt.Sprintf("resets %s · wk %.0f%%", reset, report.Windows[1].Pct)
-	}
-	line2 := dim.Render(second)
-	return line1, line2
-}
-
 // renderUsageTab writes the "Usage" popup tab for one provider: its plan, each
 // quota window as a labeled bar with reset time, and a provenance line. When the
 // Live Usage opt-in is off, or the snapshot is unavailable, it explains why.
@@ -838,8 +819,14 @@ func (m dashboardModel) renderUsageTab(pb *strings.Builder, provider string) {
 		return
 	}
 
+	if report.Account != "" {
+		pb.WriteString("  " + dim.Render(fmt.Sprintf("%-8s", "Account:")) + " " + bold.Render(report.Account) + "\n")
+	}
 	if report.Plan != "" {
-		pb.WriteString("  " + dim.Render(fmt.Sprintf("%-7s", "Plan:")) + " " + bold.Render(report.Plan) + "\n")
+		pb.WriteString("  " + dim.Render(fmt.Sprintf("%-8s", "Plan:")) + " " + bold.Render(report.Plan) + "\n")
+	}
+	if report.Org != "" {
+		pb.WriteString("  " + dim.Render(fmt.Sprintf("%-8s", "Org:")) + " " + bold.Render(report.Org) + "\n")
 	}
 	pb.WriteString("\n")
 
@@ -1133,6 +1120,26 @@ func (m dashboardModel) renderPopup(provider string) string {
 		Width(82)
 
 	return popupStyle.Render(pb.String())
+}
+
+// renderUsagePopup is the all-agents Live Usage overlay opened with [u]: every
+// brand's account/tier + quota meters in one box, sharing the Analytics renderer.
+func (m dashboardModel) renderUsagePopup() string {
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	var pb strings.Builder
+	pb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Render("🔋 LIVE USAGE — ALL AGENTS") + "\n\n")
+	if !m.liveUsage {
+		pb.WriteString(dim.Render("Live Usage is off. Enable it in Settings (6).") + "\n")
+	} else {
+		pb.WriteString(renderUsageRows(m.usageReports, 16) + "\n")
+	}
+	pb.WriteString("\n" + StyleFooter.Render("  [r] refresh • [Esc]/[u] close"))
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorPrimary).
+		Padding(1, 2).
+		Width(82).
+		Render(pb.String())
 }
 
 // agentCard describes one brand tile on the dashboard grid. Used by both the

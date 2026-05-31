@@ -54,7 +54,9 @@ type Window struct {
 // explains why (missing token, offline, re-auth needed) for the popup detail.
 type Report struct {
 	Provider    string // "claude", "claude-code", "codex", "gemini", "antigravity", "cursor"
-	Plan        string // human plan label when the endpoint reveals it; may be ""
+	Account     string // signed-in email, when the local credential exposes it
+	Plan        string // subscription tier label (e.g. "Max (20x)", "Plus"); may be ""
+	Org         string // organization/team name, when exposed (Codex)
 	Source      string // host the data came from, for the popup's provenance line
 	Windows     []Window
 	FetchedAt   time.Time

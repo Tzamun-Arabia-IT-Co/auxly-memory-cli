@@ -18,10 +18,10 @@ func init() {
 
 func runInit(cmd *cobra.Command, args []string) error {
 	memPath := getMemoryPath()
-	
+
 	// Automatically check and install missing dependencies (Node.js)
 	checkAndInstallDependencies()
-	
+
 	tui.RunWizard(memPath)
 	return nil
 }

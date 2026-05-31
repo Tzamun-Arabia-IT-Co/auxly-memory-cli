@@ -114,6 +114,7 @@ func AntigravityLogin(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	creds.Email = email // persist for the Usage view's account line
 	if err := saveAntigravityCreds(creds); err != nil {
 		return "", err
 	}

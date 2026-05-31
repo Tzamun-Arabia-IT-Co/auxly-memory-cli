@@ -52,6 +52,8 @@ func (f googleFetcher) fetch(ctx context.Context) Report {
 		}
 	}
 
+	r.Account = googleEmail(creds)
+
 	token, err := googleAccessToken(ctx, creds, clientID, clientSecret)
 	if err != "" {
 		r.Err = err
@@ -67,8 +69,12 @@ func (f googleFetcher) fetch(ctx context.Context) Report {
 		r.Source = "daily-cloudcode-pa.googleapis.com"
 	} else {
 		r.Source = "cloudcode-pa.googleapis.com"
-		if project := resolveProject(ctx, host, token); project != "" {
+		project, tier := loadCodeAssistInfo(ctx, host, token)
+		if project != "" {
 			body["project"] = project
+		}
+		if tier != "" {
+			r.Plan = tier
 		}
 	}
 
@@ -156,28 +162,48 @@ func googleAccessToken(ctx context.Context, c googleCreds, clientID, clientSecre
 	return tok.AccessToken, ""
 }
 
-// resolveProject finds the Cloud AI Companion project id for Gemini CLI: env
-// override first, else loadCodeAssist. Returns "" if it can't be determined
-// (retrieveUserQuota still works without it on some accounts).
-func resolveProject(ctx context.Context, host, token string) string {
-	if p := os.Getenv("GOOGLE_CLOUD_PROJECT"); p != "" {
-		return p
-	}
-	if p := os.Getenv("GOOGLE_CLOUD_PROJECT_ID"); p != "" {
-		return p
-	}
+// loadCodeAssistInfo returns the Cloud AI Companion project id and the current
+// subscription tier name from the Code Assist loadCodeAssist call. The project
+// falls back to env overrides; the tier (e.g. "Standard", "Free") comes from
+// currentTier and drives the Usage view's plan label.
+func loadCodeAssistInfo(ctx context.Context, host, token string) (project, tier string) {
 	var lca struct {
 		CloudaicompanionProject string `json:"cloudaicompanionProject"`
+		CurrentTier             struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"currentTier"`
 	}
 	body := map[string]any{"metadata": map[string]any{
 		"ideType":    "IDE_UNSPECIFIED",
 		"platform":   "PLATFORM_UNSPECIFIED",
 		"pluginType": "GEMINI",
 	}}
-	if reason, _ := googlePost(ctx, host+":loadCodeAssist", token, "", body, &lca); reason != "" {
+	if reason, _ := googlePost(ctx, host+":loadCodeAssist", token, "", body, &lca); reason == "" {
+		project = lca.CloudaicompanionProject
+		tier = lca.CurrentTier.Name
+		if tier == "" && lca.CurrentTier.ID != "" {
+			tier = prettyTierID(lca.CurrentTier.ID)
+		}
+	}
+	// Env overrides take precedence for the project id.
+	if p := os.Getenv("GOOGLE_CLOUD_PROJECT"); p != "" {
+		project = p
+	} else if p := os.Getenv("GOOGLE_CLOUD_PROJECT_ID"); p != "" {
+		project = p
+	}
+	return project, tier
+}
+
+// prettyTierID turns an id like "free-tier" or "standard-tier" into "Free" /
+// "Standard" for display.
+func prettyTierID(id string) string {
+	id = strings.TrimSuffix(id, "-tier")
+	id = strings.ReplaceAll(id, "-", " ")
+	if id == "" {
 		return ""
 	}
-	return lca.CloudaicompanionProject
+	return strings.ToUpper(id[:1]) + id[1:]
 }
 
 func googlePost(ctx context.Context, urlStr, token, userAgent string, body any, out any) (errReason string, rateLimited bool) {

@@ -30,7 +30,20 @@ var usageShowCmd = &cobra.Command{
 				fmt.Printf("  %-13s —  %s\n", r.Provider, r.Err)
 				continue
 			}
-			fmt.Printf("  %-13s\n", r.Provider)
+			id := r.Account
+			if r.Plan != "" {
+				if id != "" {
+					id += "  ·  "
+				}
+				id += r.Plan
+			}
+			if r.Org != "" {
+				id += "  ·  " + r.Org
+			}
+			if id == "" {
+				id = "(no account info)"
+			}
+			fmt.Printf("  %-13s %s\n", r.Provider, id)
 			for _, w := range r.Windows {
 				reset := usage.FormatReset(w.ResetAt, now)
 				if reset != "" {

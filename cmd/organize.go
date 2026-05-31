@@ -19,7 +19,7 @@ func init() {
 
 func runOrganize(cmd *cobra.Command, args []string) error {
 	store := memory.NewStore(getMemoryPath())
-	
+
 	estTokens := store.GetEstimatedTokens()
 	fmt.Printf("🧠 Starting On-Demand Memory Organize...\n")
 	fmt.Printf("📊 Estimated Token Cost: ~%d tokens\n", estTokens)

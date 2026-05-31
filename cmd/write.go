@@ -92,7 +92,7 @@ func runWrite(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("access denied: path traversal attempt for '%s'", writeFile)
 	}
 	targetPath := filepath.Join(memPath, cleanedRel)
-	
+
 	// Double check boundaries
 	relBoundary, err := filepath.Rel(memPath, targetPath)
 	if err != nil || strings.HasPrefix(relBoundary, "..") {

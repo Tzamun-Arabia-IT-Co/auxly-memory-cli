@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/config"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/usage"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -14,6 +16,12 @@ import (
 type analyticsModel struct {
 	logger *audit.Logger
 	stats  *audit.Stats
+
+	// Sub-tabs: 0 = Activity (audit metrics), 1 = Usage (live quota panel).
+	activeTab    int
+	usageMgr     *usage.Manager
+	usageReports map[string]usage.Report
+	liveUsage    bool
 }
 
 type analyticsRefreshMsg struct {
@@ -26,24 +34,43 @@ type kvCount struct {
 	count int
 }
 
-func newAnalyticsModel(logger *audit.Logger) analyticsModel {
-	return analyticsModel{logger: logger}
+func newAnalyticsModel(logger *audit.Logger, usageMgr *usage.Manager) analyticsModel {
+	return analyticsModel{
+		logger:       logger,
+		usageMgr:     usageMgr,
+		usageReports: map[string]usage.Report{},
+		liveUsage:    config.LoadSettings().LiveUsage,
+	}
 }
 
 func (m analyticsModel) Refresh() tea.Cmd {
-	return func() tea.Msg {
+	m.liveUsage = config.LoadSettings().LiveUsage
+	statsCmd := func() tea.Msg {
 		var stats *audit.Stats
 		if m.logger != nil {
 			stats, _ = m.logger.Stats()
 		}
 		return analyticsRefreshMsg{stats: stats}
 	}
+	if m.liveUsage && m.usageMgr != nil {
+		return tea.Batch(statsCmd, usageFetchCmd(m.usageMgr))
+	}
+	return statsCmd
 }
 
 func (m analyticsModel) Update(msg tea.Msg) (analyticsModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case analyticsRefreshMsg:
 		m.stats = msg.stats
+	case usageReportsMsg:
+		for _, r := range msg.reports {
+			m.usageReports[r.Provider] = r
+		}
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "left", "h", "right", "l":
+			m.activeTab = 1 - m.activeTab // toggle Activity <-> Usage
+		}
 	}
 	return m, nil
 }
@@ -53,20 +80,118 @@ func (m analyticsModel) View(width int) string {
 		width = 80
 	}
 	title := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary).Render("📈 Agent Analytics")
+	tabs := m.renderSubTabs()
+
+	if m.activeTab == 1 {
+		return title + "\n" + tabs + "\n\n" + m.renderUsagePanel(width)
+	}
 
 	if m.stats == nil {
-		return title + "\n\n" + lipgloss.NewStyle().Foreground(ColorDim).Render("Loading…")
+		return title + "\n" + tabs + "\n\n" + lipgloss.NewStyle().Foreground(ColorDim).Render("Loading…")
 	}
 	s := m.stats
-
 	sections := []string{
-		title,
 		renderKPIRow(s),
 		renderBarSection("📡 Writes per Provider", sortedCounts(s.ByProvider), width, s.TotalEntries, 0),
 		renderBarSection("📊 Activity by Action", sortedCounts(s.ByAction), width, s.TotalActivity, 8),
 		renderInsights(s),
 	}
-	return strings.Join(sections, "\n\n")
+	return title + "\n" + tabs + "\n\n" + strings.Join(sections, "\n\n")
+}
+
+// renderSubTabs draws the Activity/Usage selector. Switched with ←/→ (the global
+// number keys are reserved for top-level screen navigation).
+func (m analyticsModel) renderSubTabs() string {
+	on := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
+	off := lipgloss.NewStyle().Foreground(ColorDim)
+	activity, usage := off.Render("  Activity  "), off.Render("  Usage  ")
+	if m.activeTab == 0 {
+		activity = on.Render("▸ Activity ")
+	} else {
+		usage = on.Render("▸ Usage ")
+	}
+	hint := off.Render("  (←/→ switch)")
+	return activity + usage + hint
+}
+
+// usagePanelOrder fixes the row order so the panel doesn't reshuffle.
+var usagePanelOrder = []struct{ id, name string }{
+	{"claude", "Claude"},
+	{"claude-code", "Claude Code"},
+	{"codex", "Codex"},
+	{"gemini", "Gemini"},
+	{"antigravity", "Antigravity"},
+	{"cursor", "Cursor"},
+}
+
+// renderUsagePanel draws the rich per-brand Live Usage view for the Analytics
+// Usage tab: each agent's account + tier, then its quota meters with resets.
+func (m analyticsModel) renderUsagePanel(width int) string {
+	if !m.liveUsage {
+		return lipgloss.NewStyle().Foreground(ColorDim).
+			Render("Live Usage is off. Enable it in Settings (6) to see per-agent quota here.")
+	}
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	return renderUsageRows(m.usageReports, 16) + "\n\n" +
+		dim.Render("↻ live · reuses each agent's own login · [r] on Dashboard force-refreshes")
+}
+
+// renderUsageRows renders the per-brand Live Usage blocks (header = glyph + name
+// + account/tier, body = labeled meters + resets). Shared by the Analytics Usage
+// tab and the Dashboard [u] popup. barW sets the meter width.
+func renderUsageRows(reports map[string]usage.Report, barW int) string {
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	bold := lipgloss.NewStyle().Bold(true)
+	now := time.Now()
+
+	var b strings.Builder
+	for _, brand := range usagePanelOrder {
+		report, ok := reports[brand.id]
+		header := brandMark(brand.id) + " " + bold.Render(fmt.Sprintf("%-12s", brand.name))
+		id := ""
+		if ok {
+			id = usageIdentityLine(report)
+		}
+		b.WriteString(header + "  " + dim.Render(id) + "\n")
+
+		switch {
+		case !ok:
+			b.WriteString("    " + dim.Render("…") + "\n")
+		case report.Err != "":
+			b.WriteString("    " + dim.Render("— "+report.Err) + "\n")
+		default:
+			for _, w := range report.Windows {
+				reset := ""
+				if r := usage.FormatReset(w.ResetAt, now); r != "" {
+					reset = dim.Render("resets " + r)
+				}
+				b.WriteString(fmt.Sprintf("    %s %s %s   %s\n",
+					dim.Render(fmt.Sprintf("%-8s", w.Label)),
+					usageBar(w.Pct, barW, brand.id),
+					bold.Render(fmt.Sprintf("%3.0f%%", w.Pct)),
+					reset,
+				))
+			}
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// usageIdentityLine joins the account email, subscription tier, and org that a
+// report exposes, into a single dim line. Returns "" when none are known.
+func usageIdentityLine(r usage.Report) string {
+	parts := []string{}
+	if r.Account != "" {
+		parts = append(parts, r.Account)
+	}
+	if r.Plan != "" {
+		parts = append(parts, r.Plan)
+	}
+	if r.Org != "" {
+		parts = append(parts, r.Org)
+	}
+	return strings.Join(parts, "  ·  ")
 }
 
 // ── KPI cards ───────────────────────────────────────────────────────────────

@@ -79,5 +79,6 @@ func (codexFetcher) fetch(ctx context.Context) Report {
 		week.ResetAt, week.HasReset = t, true
 	}
 	r.Windows = []Window{session, week}
+	r.Account, r.Plan, r.Org = codexIdentity()
 	return r
 }

@@ -78,5 +78,6 @@ func (f anthropicFetcher) fetch(ctx context.Context) Report {
 		week.ResetAt, week.HasReset = t, true
 	}
 	r.Windows = []Window{session, week}
+	r.Plan = claudeTier()
 	return r
 }

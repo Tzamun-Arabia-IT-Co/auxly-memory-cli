@@ -9,6 +9,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/usage"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -63,12 +64,14 @@ type model struct {
 	store      *memory.Store
 	logger     *audit.Logger
 	pendingMgr *pending.Manager
+	usageMgr   *usage.Manager // one Live Usage manager shared by dashboard + analytics
 }
 
 func NewApp(memoryPath string) *model {
 	store := memory.NewStore(memoryPath)
 	logger, _ := audit.NewLogger(memoryPath)
 	pendingMgr := pending.NewManager(memoryPath)
+	usageMgr := usage.New()
 
 	return &model{
 		memoryPath: memoryPath,
@@ -76,12 +79,13 @@ func NewApp(memoryPath string) *model {
 		store:      store,
 		logger:     logger,
 		pendingMgr: pendingMgr,
-		dashboard:  newDashboardModel(logger, pendingMgr, memoryPath),
+		usageMgr:   usageMgr,
+		dashboard:  newDashboardModel(logger, pendingMgr, memoryPath, usageMgr),
 		activity:   newActivityModel(logger),
 		auditTrail: newAuditTrailModel(logger),
 		browser:    newBrowserModel(store),
 		diff:       newDiffModel(pendingMgr),
-		analytics:  newAnalyticsModel(logger),
+		analytics:  newAnalyticsModel(logger, usageMgr),
 		search:     newSearchModel(store),
 		settings:   newSettingsModel(memoryPath),
 		ssh:        newSSHModel(),
@@ -389,6 +393,7 @@ func (m *model) refreshCurrentScreen() tea.Cmd {
 	case screenDiff:
 		return m.diff.Refresh()
 	case screenAnalytics:
+		m.analytics.liveUsage = config.LoadSettings().LiveUsage
 		return m.analytics.Refresh()
 	case screenSettings:
 		return m.settings.Refresh()
