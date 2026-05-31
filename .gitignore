@@ -19,9 +19,10 @@ build/
 
 # Runtime and temporary directories
 .bg-shell/
-.gsd/runtime/
+.gsd/
 .tempmediaStorage/
 .system_generated/
+*.bak
 
 # OS-specific files
 .DS_Store
@@ -44,6 +45,13 @@ Thumbs.db
 # Local runtime state and research scratch
 .auxly/
 .tmp-usage-research/
+
+# Local agent dirs + dev tooling — not shipped (the binary writes its own skills
+# from internal/skills via `auxly setup`; brand-logos are generator-only inputs
+# whose base64 output is already committed in tui/brandlogos.go).
+.claude/
+.codex/
+brand-logos/
 
 # Generated workspace agent rules (written by `auxly setup`/`init`, create-if-missing).
 # Not source — keep them out of the tree so setup never dirties the repo.
