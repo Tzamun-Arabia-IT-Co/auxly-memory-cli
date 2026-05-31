@@ -32,10 +32,10 @@ archives:
     ids:
       - auxly
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
-    format: tar.gz
+    formats: [tar.gz]
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
     files:
       - README.md
       - LICENSE
@@ -47,16 +47,17 @@ archives:
   - id: rawbin
     ids:
       - auxly
-    format: binary
+    formats: [binary]
     name_template: "auxly-{{ .Os }}-{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"
 
-# Homebrew formula — auto-pushed to the tap repo on every release. Users then run
-# `brew install Tzamun-Arabia-IT-Co/homebrew-tap/auxly`.
-brews:
-  # Formula name "auxly" (not the project_name) so the command is
+# Homebrew cask — auto-pushed to the tap repo on every release. Users then run
+# `brew install Tzamun-Arabia-IT-Co/homebrew-tap/auxly`. (GoReleaser v2 deprecated
+# `brews` formulae in favor of casks for pre-built binaries.)
+homebrew_casks:
+  # Cask name "auxly" so the command is
   # `brew install Tzamun-Arabia-IT-Co/homebrew-tap/auxly`.
   - name: auxly
     repository:
@@ -65,17 +66,20 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     ids:
       - archive
-    directory: Formula
     homepage: "https://auxly.io"
     description: "Local-first unified memory system for AI agents"
-    license: MIT
     commit_author:
       name: auxly-release-bot
       email: hi@auxly.io
-    install: |
-      bin.install "auxly"
-    test: |
-      system "#{bin}/auxly", "version"
+    # Strip the Gatekeeper quarantine flag on install so an unsigned binary runs
+    # without a "developer cannot be verified" prompt on macOS.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr",
+              args: ["-dr", "com.apple.quarantine", "#{staged_path}/auxly"]
+          end
 
 # Linux packages attached to each GitHub Release.
 nfpms:
