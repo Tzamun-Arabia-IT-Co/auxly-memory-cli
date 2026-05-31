@@ -1,0 +1,42 @@
+name: test
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          fmtout="$(gofmt -l .)"
+          if [ -n "$fmtout" ]; then
+            echo "These files need gofmt:"; echo "$fmtout"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: tests (race)
+        run: go test -race ./...
+
+      # Validate the release config so a broken .goreleaser.yaml is caught here,
+      # long before a real tag is pushed.
+      - name: validate goreleaser config
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: check

@@ -2,82 +2,96 @@ version: 2
 
 project_name: auxly-cli
 
+before:
+  hooks:
+    - go mod download
+
 builds:
-  - id: unix
+  # Single CGO-free build for every target. Auxly uses pure-Go SQLite
+  # (modernc.org/sqlite), so CGO_ENABLED=0 cross-compiles to all OS/arch from a
+  # plain runner — no C toolchain, no llvm-mingw.
+  - id: auxly
     main: .
     binary: auxly
     env:
-      - CGO_ENABLED=1
+      - CGO_ENABLED=0
     goos:
       - linux
       - darwin
-    goarch:
-      - amd64
-      - arm64
-    ldflags:
-      - -s -w -X github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update.Current={{.Version}}
-
-  # Windows host build (amd64 + arm64). go-sqlite3 needs CGO, so cross-compiling
-  # to Windows requires a Windows C toolchain on the release runner. We use
-  # llvm-mingw (https://github.com/mstorsjo/llvm-mingw) because it ships BOTH
-  # x86_64- and aarch64- Windows clang targets; the standard gcc mingw-w64
-  # package is amd64-only. Put its bin/ on PATH in CI before `goreleaser release`.
-  - id: windows
-    main: .
-    binary: auxly
-    env:
-      - CGO_ENABLED=1
-    goos:
       - windows
     goarch:
       - amd64
       - arm64
-    overrides:
-      - goos: windows
-        goarch: amd64
-        env:
-          - CC=x86_64-w64-mingw32-clang
-      - goos: windows
-        goarch: arm64
-        env:
-          - CC=aarch64-w64-mingw32-clang
     ldflags:
-      - -s -w -X github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update.Current={{.Version}}
+      - -s -w -X github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update.Current={{ .Version }}
 
 archives:
-  - id: default
-    format: tar.gz
+  # 1) tar.gz / zip archives — consumed by Homebrew, the deb/rpm packages, and
+  #    humans downloading from the Releases page.
+  - id: archive
+    ids:
+      - auxly
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
-    # tar.gz everywhere except Windows, which gets a .zip (matches install.ps1).
+    format: tar.gz
     format_overrides:
       - goos: windows
         format: zip
     files:
       - README.md
+      - LICENSE
       - wrappers/*
 
+  # 2) raw per-target binaries — exactly what scripts/install.sh, install.ps1,
+  #    and `auxly update` (self-update) fetch from /dl/auxly-<os>-<arch>[.exe].
+  #    goreleaser appends .exe automatically on Windows.
+  - id: rawbin
+    ids:
+      - auxly
+    format: binary
+    name_template: "auxly-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+# Homebrew formula — auto-pushed to the tap repo on every release. Users then run
+# `brew install Tzamun-Arabia-IT-Co/homebrew-tap/auxly`.
 brews:
   - repository:
       owner: Tzamun-Arabia-IT-Co
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     ids:
-      - default
-    homepage: "https://auxly.io/cli"
+      - archive
+    directory: Formula
+    homepage: "https://auxly.io"
     description: "Local-first unified memory system for AI agents"
     license: MIT
+    commit_author:
+      name: auxly-release-bot
+      email: hi@auxly.io
     install: |
       bin.install "auxly"
+    test: |
+      system "#{bin}/auxly", "version"
 
+# Linux packages attached to each GitHub Release.
 nfpms:
   - package_name: auxly-cli
-    builds:
-      - unix
-    homepage: "https://auxly.io/cli"
+    ids:
+      - auxly
+    homepage: "https://auxly.io"
     description: "Local-first unified memory system for AI agents"
+    maintainer: "Tzamun Arabia IT Co. <hi@auxly.io>"
     license: MIT
     formats:
       - deb
       - rpm
+
+# Let goreleaser create the Release in whatever repo it runs in (the public
+# auxly-cli repo), so nothing is hardcoded.
+release:
+  draft: false
+  prerelease: auto
 
 changelog:
   sort: asc
@@ -85,3 +99,5 @@ changelog:
     exclude:
       - "^docs:"
       - "^test:"
+      - "^chore:"
+      - "^ci:"

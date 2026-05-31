@@ -1,10 +1,12 @@
-.PHONY: build run test clean install tui
+.PHONY: build run test clean install tui check
 
 BINARY=auxly
-VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+# Strip a leading "v" from the tag so it matches internal/update.Current ("1.0.0").
+VERSION=$(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo "dev")
+LDFLAGS=-s -w -X github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update.Current=$(VERSION)
 
 build:
-	go build -ldflags="-s -w -X main.version=$(VERSION)" -o $(BINARY) .
+	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o $(BINARY) .
 
 run: build
 	./$(BINARY)
@@ -14,6 +16,11 @@ tui: build
 
 test:
 	go test ./...
+
+check:
+	gofmt -l .
+	go vet ./...
+	go test -race ./...
 
 clean:
 	rm -f $(BINARY)

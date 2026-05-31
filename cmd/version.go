@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update"
 	"github.com/spf13/cobra"
 )
 
@@ -15,11 +16,15 @@ var versionCmd = &cobra.Command{
 		bold := "\033[1m"
 		reset := "\033[0m"
 
+		// update.Current is injected at build time via -ldflags (goreleaser /
+		// Makefile), so the printed version always matches the actual release.
+		ver := update.Current
+
 		var sb strings.Builder
 		sb.WriteString("\r\n")
-		sb.WriteString(fmt.Sprintf("%s🧠 Auxly-Memory CLI Version:%s %s1.0.0%s\r\n", bold+purple, reset, bold, reset))
+		sb.WriteString(fmt.Sprintf("%s🧠 Auxly-Memory CLI Version:%s %s%s%s\r\n", bold+purple, reset, bold, ver, reset))
 		sb.WriteString("   ↳ Platform: macOS/Linux/Windows stdio-native\r\n")
-		sb.WriteString("   ↳ Revision: release-v1.0.0\r\n\r\n")
+		sb.WriteString(fmt.Sprintf("   ↳ Revision: release-v%s\r\n\r\n", ver))
 		fmt.Print(sb.String())
 	},
 }
