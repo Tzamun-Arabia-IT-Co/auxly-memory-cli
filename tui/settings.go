@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/detect"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/memory"
 	tea "github.com/charmbracelet/bubbletea"
@@ -56,6 +57,10 @@ type settingsModel struct {
 	lastRun        string
 	lastTokensUsed int
 	confirmingRun  bool
+
+	// Live Usage opt-in (calls each agent's provider with its stored login —
+	// off keeps Auxly fully local). Persisted via config.SaveSettings.
+	liveUsage bool
 }
 
 type organizeStats struct {
@@ -146,6 +151,7 @@ func newSettingsModel(memPath string) settingsModel {
 		store:                 store,
 		selectedOrganizeAgent: -2,
 		customURL:             "http://localhost:11434",
+		liveUsage:             config.LoadSettings().LiveUsage,
 	}
 }
 
@@ -331,6 +337,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			defaultTrustLineY := -1
 			agentToUseLineY := -1
 			runButtonLineY := -1
+			liveUsageLineY := -1
 			providerLineYs := make(map[string]int)
 
 			uniqueAgents := m.getUniqueAgents()
@@ -344,6 +351,13 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				}
 				if strings.Contains(clean, "RUN ON-DEMAND ORGANIZATION") {
 					runButtonLineY = idx
+				}
+				// The toggle row carries the [ON]/[OFF] badge; the heading line
+				// ("Live Usage") and the description lines are excluded so only the
+				// interactive row hit-tests.
+				if strings.Contains(clean, "Live Usage") &&
+					(strings.Contains(clean, "[ON]") || strings.Contains(clean, "[OFF]")) {
+					liveUsageLineY = idx
 				}
 				for _, a := range uniqueAgents {
 					if strings.Contains(clean, a.Name) && !strings.Contains(clean, "Overrides") && !strings.Contains(clean, "Default Trust") {
@@ -390,7 +404,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			}
 
 			if (clickedViewLineY == agentToUseLineY || clickedViewLineY == agentToUseLineY+1) && agentToUseLineY != -1 {
-				m.cursor = len(uniqueAgents) + 1
+				m.cursor = len(uniqueAgents) + 2
 				dir := 1
 				if msg.X < 55 {
 					dir = -1
@@ -400,7 +414,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			}
 
 			if clickedViewLineY == runButtonLineY && runButtonLineY != -1 {
-				m.cursor = len(uniqueAgents) + 2
+				m.cursor = len(uniqueAgents) + 3
 				if m.selectedOrganizeAgent == -2 && m.selectedCustomURL == "" {
 					m.configuringCustom = true
 					m.customModels = nil
@@ -413,6 +427,11 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 					m.organizeResult = ""
 					return m, nil
 				}
+			}
+
+			if clickedViewLineY == liveUsageLineY && liveUsageLineY != -1 {
+				m.cursor = len(uniqueAgents) + 1
+				return m, m.toggleLiveUsage()
 			}
 		}
 	case tea.KeyMsg:
@@ -501,7 +520,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 
 		switch msg.String() {
 		case "j", "down":
-			max := len(uniqueAgents) + 2
+			max := len(uniqueAgents) + 3
 			if m.cursor < max {
 				m.cursor++
 			}
@@ -510,11 +529,11 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				m.cursor--
 			}
 		case "h", "left":
-			if m.cursor == len(uniqueAgents)+1 {
+			if m.cursor == len(uniqueAgents)+2 {
 				m.cycleOrganizeAgent(-1)
 			}
 		case "l", "right":
-			if m.cursor == len(uniqueAgents)+1 {
+			if m.cursor == len(uniqueAgents)+2 {
 				m.cycleOrganizeAgent(1)
 			}
 		case "enter", " ":
@@ -536,7 +555,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				}
 				m.trust.Providers[provider]["trust_level"] = next
 				return m, m.saveTrust()
-			} else if m.cursor == len(uniqueAgents)+1 {
+			} else if m.cursor == len(uniqueAgents)+2 {
 				if m.selectedOrganizeAgent == -2 {
 					m.configuringCustom = true
 					m.customURL = "http://localhost:11434"
@@ -550,7 +569,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				}
 				m.cycleOrganizeAgent(1)
 				return m, nil
-			} else if m.cursor == len(uniqueAgents)+2 {
+			} else if m.cursor == len(uniqueAgents)+3 {
 				if m.selectedOrganizeAgent == -2 && m.selectedCustomURL == "" {
 					m.configuringCustom = true
 					m.customModels = nil
@@ -563,10 +582,21 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 					m.organizeResult = ""
 					return m, nil
 				}
+			} else if m.cursor == len(uniqueAgents)+1 {
+				return m, m.toggleLiveUsage()
 			}
 		}
 	}
 	return m, nil
+}
+
+// toggleLiveUsage flips the Live Usage opt-in, persisting it to settings.json.
+func (m *settingsModel) toggleLiveUsage() tea.Cmd {
+	m.liveUsage = !m.liveUsage
+	next := config.LoadSettings()
+	next.LiveUsage = m.liveUsage
+	_ = config.SaveSettings(next)
+	return nil
 }
 
 func (m *settingsModel) cycleOrganizeAgent(dir int) {
@@ -708,6 +738,27 @@ func (m settingsModel) View() string {
 		leftLines = append(leftLines, agentText)
 	}
 
+	// Live Usage toggle (opt-in network panel). Cursor sits last.
+	leftLines = append(leftLines, "")
+	leftLines = append(leftLines, purple.Render("   Live Usage"))
+	leftLines = append(leftLines, dim.Render("   Calls each agent's provider with its stored"))
+	leftLines = append(leftLines, dim.Render("   login — off keeps Auxly fully local."))
+	cursorLive := "  "
+	if m.cursor == len(uniqueAgents)+1 {
+		cursorLive = cyan.Render("▸ ")
+	}
+	liveState := red.Render("[OFF]")
+	if m.liveUsage {
+		liveState = green.Render("[ON]")
+	}
+	liveLabel := "Live Usage"
+	if m.cursor == len(uniqueAgents)+1 {
+		liveLabel = bold.Render("Live Usage") + strings.Repeat(" ", 8)
+	} else {
+		liveLabel = fmt.Sprintf("%-18s", liveLabel)
+	}
+	leftLines = append(leftLines, fmt.Sprintf("%s%s %s", cursorLive, liveLabel, liveState))
+
 	// 2. RIGHT PANEL: Memory Organization
 	var rightLines []string
 	rightLines = append(rightLines, bold.Render("On-Demand Memory Organization"))
@@ -727,12 +778,12 @@ func (m settingsModel) View() string {
 	}
 
 	cursorAgentSelect := "  "
-	if m.cursor == len(uniqueAgents)+1 {
+	if m.cursor == len(uniqueAgents)+2 {
 		cursorAgentSelect = cyan.Render("▸ ")
 	}
 
 	cursorRun := "  "
-	if m.cursor == len(uniqueAgents)+2 {
+	if m.cursor == len(uniqueAgents)+3 {
 		cursorRun = cyan.Render("▸ ")
 	}
 
@@ -749,7 +800,7 @@ func (m settingsModel) View() string {
 			Foreground(lipgloss.Color("255")).
 			Bold(true).
 			Padding(0, 3)
-		if m.cursor == len(uniqueAgents)+2 {
+		if m.cursor == len(uniqueAgents)+3 {
 			btnStyle = btnStyle.Background(ColorSecondary)
 		}
 		rightLines = append(rightLines, fmt.Sprintf("  %s %s", cursorRun, btnStyle.Render(" RUN ON-DEMAND ORGANIZATION ")))

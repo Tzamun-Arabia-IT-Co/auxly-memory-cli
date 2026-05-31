@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/pending"
 	tea "github.com/charmbracelet/bubbletea"
@@ -104,11 +105,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		if m.screen == screenDashboard && m.dashboard.selectedAgent != "" {
-			// While the agent popup is open, its tab keys (1/2/3) must reach the
+			// While the agent popup is open, its tab keys (1/2/3/4) must reach the
 			// dashboard rather than the parent's screen switcher. "3" was missing,
 			// so it fell through and jumped to the Files screen.
 			switch msg.String() {
-			case "1", "2", "3":
+			case "1", "2", "3", "4":
 				var cmd tea.Cmd
 				m.dashboard, cmd = m.dashboard.Update(msg)
 				return m, cmd
@@ -374,9 +375,12 @@ func (m model) renderFooter() string {
 	return StyleFooter.Render(footerText)
 }
 
-func (m model) refreshCurrentScreen() tea.Cmd {
+func (m *model) refreshCurrentScreen() tea.Cmd {
 	switch m.screen {
 	case screenDashboard:
+		// Re-read the Live Usage opt-in each time the dashboard is (re)entered so
+		// the Settings toggle takes effect without restarting the TUI.
+		m.dashboard.liveUsage = config.LoadSettings().LiveUsage
 		return m.dashboard.Refresh()
 	case screenActivity:
 		return m.activity.Refresh()

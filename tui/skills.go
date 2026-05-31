@@ -14,24 +14,24 @@ import (
 )
 
 type skillDetail struct {
-	cmd         string
-	name        string
-	desc        string
-	params      string
-	useCase     string
-	example     string
+	cmd     string
+	name    string
+	desc    string
+	params  string
+	useCase string
+	example string
 }
 
 type skillsModel struct {
-	cursor           int
-	skills           []skillDetail
-	stats            *audit.Stats
-	activeProviders  []string
-	lastRefresh      time.Time
-	exportSuccess    bool
-	exportTime       time.Time
-	width            int
-	height           int
+	cursor          int
+	skills          []skillDetail
+	stats           *audit.Stats
+	activeProviders []string
+	lastRefresh     time.Time
+	exportSuccess   bool
+	exportTime      time.Time
+	width           int
+	height          int
 }
 
 type skillsRefreshMsg struct {
@@ -241,7 +241,7 @@ func (m skillsModel) View(width int, height int) string {
 		isSel := i == m.cursor
 		var prefix string
 		var styledCmd string
-		
+
 		if isSel {
 			prefix = purple.Render("➔ ")
 			styledCmd = purple.Bold(true).Render(s.cmd)
@@ -275,7 +275,7 @@ func (m skillsModel) View(width int, height int) string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
 		Padding(1, 2)
-	
+
 	leftPanel := leftColStyle.Render(strings.Join(paddedLeftLines, "\n"))
 
 	// 2. RIGHT COLUMN: Detail & Matrix Stack
@@ -327,7 +327,7 @@ func (m skillsModel) View(width int, height int) string {
 			rawCfg = "✓ Configured"
 		}
 		rawCfg = fmt.Sprintf("%-13s", rawCfg)
-		
+
 		var cfgText string
 		if a.cfgExists {
 			cfgText = green.Render(rawCfg)
@@ -350,7 +350,7 @@ func (m skillsModel) View(width int, height int) string {
 		} else if hasActivity {
 			rawConn = "○ Idle"
 		}
-		
+
 		var connText string
 		if isActive {
 			connText = green.Render(rawConn)
@@ -361,9 +361,9 @@ func (m skillsModel) View(width int, height int) string {
 		nameStr := fmt.Sprintf("%-18s", a.name)
 		styledName := cyan.Render(nameStr)
 
-		matrixLines = append(matrixLines, fmt.Sprintf("  %s · %s · %s", 
-			styledName, 
-			cfgText, 
+		matrixLines = append(matrixLines, fmt.Sprintf("  %s · %s · %s",
+			styledName,
+			cfgText,
 			connText,
 		))
 	}
@@ -586,13 +586,13 @@ You must immediately invoke the 'auxly_skill_learn' MCP tool, passing the provid
 	for skillName, content := range commands {
 		// 1. Write to ~/.auxly/skills/
 		zipPath1 := filepath.Join(auxlySkillsDir, skillName+".zip")
-		writeZipFile(zipPath1, skillName, content + updateReminder)
+		writeZipFile(zipPath1, skillName, content+updateReminder)
 
 		// 2. Write to ~/Downloads/auxly-skills/
 		downloadsDir := filepath.Join(home, "Downloads", "auxly-skills")
 		_ = os.MkdirAll(downloadsDir, 0755)
 		zipPath2 := filepath.Join(downloadsDir, skillName+".zip")
-		writeZipFile(zipPath2, skillName, content + updateReminder)
+		writeZipFile(zipPath2, skillName, content+updateReminder)
 	}
 }
 

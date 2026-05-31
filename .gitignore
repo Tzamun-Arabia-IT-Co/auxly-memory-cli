@@ -40,3 +40,7 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Local runtime state and research scratch
+.auxly/
+.tmp-usage-research/

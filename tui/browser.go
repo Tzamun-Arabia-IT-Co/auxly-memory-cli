@@ -77,7 +77,7 @@ func (m browserModel) View() string {
 		if i == m.cursor {
 			cursor = lipgloss.NewStyle().Foreground(ColorPrimary).Render("▸ ")
 		}
-		
+
 		line := fmt.Sprintf("%s%-25s %6d B %16s", cursor, f.Name, f.Size, f.ModTime.Format("02/01/2006 15:04:05"))
 		if i == m.cursor {
 			line = StyleSelectedRow.Render(line)

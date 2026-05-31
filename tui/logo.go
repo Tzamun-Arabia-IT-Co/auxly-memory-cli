@@ -15,11 +15,11 @@ func renderBanner(width int) string {
 		Bold(true).
 		Foreground(ColorPrimary).
 		Render(auxlyLink)
-		
+
 	subtitle := lipgloss.NewStyle().
 		Foreground(ColorDim).
 		Render("Unified Memory for AI Agents")
-		
+
 	tzamunLink := fmt.Sprintf("\x1b]8;;https://tzamun.sa\x1b\\Tzamun Arabia IT Co\x1b]8;;\x1b\\")
 	developedBy := lipgloss.NewStyle().
 		Foreground(ColorDim).

@@ -653,11 +653,17 @@ You must immediately invoke the 'auxly_skill_pending' MCP tool, passing the prov
 
 		"auxly-status": `---
 name: auxly-status
-description: Show real-time system diagnostics, active connections, and remote/SSH attribution.
+description: Show whether this agent is connected to Auxly memory and the MCP link is live.
 ---
 # /auxly-status
 
-You must immediately invoke the 'auxly_skill_status' MCP tool to retrieve and display the real-time system diagnostics, active connections, and database metrics. Do not perform other actions. Simply run the tool and show the diagnostics screen!`,
+Call the 'auxly_skill_status' MCP tool exactly ONCE and show its raw output to the user. That output IS the complete status: it confirms the MCP link is live, reports the memory connection (local or ssh-remote), and shows database stats.
+
+HARD RULES — the single tool call is the entire task:
+- Do NOT read any source code or files.
+- Do NOT run shell/bash commands or other auxly CLI commands (no 'auxly stats', 'auxly connect test', 'auxly list', etc.).
+- Do NOT investigate, diagnose, or "test" anything further — the tool reply already proves the MCP channel works.
+- If the tool replies, the status is healthy. Just present it and stop.`,
 
 		"auxly-forget": `---
 name: auxly-forget

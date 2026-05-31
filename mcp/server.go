@@ -233,7 +233,29 @@ func (s *Server) handleRequest(req *jsonRPCRequest) {
 	case "prompts/get":
 		s.handlePromptGet(req)
 
+	case "ping":
+		// Standard MCP liveness check — a compliant server MUST answer with an
+		// empty result. Strict clients (e.g. Antigravity) ping after connecting
+		// and close the connection if it isn't honored ("client is closing:
+		// invalid request"), which silently hides all tools.
+		s.sendResult(req.ID, map[string]interface{}{})
+
+	case "resources/list":
+		// We don't advertise the resources capability, but some clients probe it
+		// anyway. Answer with an empty list rather than an error so the probe
+		// doesn't trip strict clients into closing.
+		s.sendResult(req.ID, map[string]interface{}{"resources": []interface{}{}})
+
+	case "resources/templates/list":
+		s.sendResult(req.ID, map[string]interface{}{"resourceTemplates": []interface{}{}})
+
 	default:
+		// Notifications carry no id and never expect a reply — answering one with
+		// an error response is itself a protocol violation that can make strict
+		// clients drop the connection. Only error on genuine requests.
+		if req.ID == nil || strings.HasPrefix(req.Method, "notifications/") {
+			return
+		}
 		s.sendError(req.ID, -32601, fmt.Sprintf("Method not found: %s", req.Method))
 	}
 }
@@ -917,13 +939,19 @@ func (s *Server) toolSkillPending(action, targetID string) toolResult {
 
 func (s *Server) toolSkillStatus() toolResult {
 	var sb strings.Builder
-	sb.WriteString("📡 **AUXLY GATEWAY SYSTEM STATUS**\n\n")
+	sb.WriteString("📡 **AUXLY STATUS**\n\n")
 
-	sourceText := "● local"
+	// The two things a status check is actually for: is the MCP link up, and is
+	// memory connected. The fact this tool produced a reply IS the proof the
+	// agent↔Auxly MCP channel is live — state it plainly so the agent doesn't go
+	// off "investigating an MCP failure."
+	sb.WriteString("✅ **MCP link:** connected & responding (you're reading this through it).\n")
+
+	memoryLine := "✅ **Memory:** local vault active"
 	if s.sourceMeta.Source == "ssh-remote" {
-		sourceText = fmt.Sprintf("● ssh-remote (%s)", describeRemote(s.sourceMeta))
+		memoryLine = fmt.Sprintf("✅ **Memory:** ssh-remote vault — %s", describeRemote(s.sourceMeta))
 	}
-	sb.WriteString(fmt.Sprintf("• **Source:** %s\n", sourceText))
+	sb.WriteString(memoryLine + "\n")
 
 	if stats, err := s.logger.Stats(); err == nil && stats != nil {
 		sb.WriteString(fmt.Sprintf("• **Writes Today:** %d\n", stats.WritesToday))

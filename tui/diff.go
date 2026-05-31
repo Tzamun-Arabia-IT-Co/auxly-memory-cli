@@ -97,7 +97,7 @@ func (m diffModel) View() string {
 		if i == m.cursor {
 			cursor = lipgloss.NewStyle().Foreground(ColorPrimary).Render("▸ ")
 		}
-		
+
 		line := fmt.Sprintf("%s%-40s %s", cursor, f.Name, f.ModTime.Format("2006-01-02 15:04"))
 		if i == m.cursor {
 			line = StyleSelectedRow.Render(line)

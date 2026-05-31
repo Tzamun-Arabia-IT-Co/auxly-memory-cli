@@ -10,11 +10,11 @@ import (
 
 // FileInfo represents metadata about a memory file.
 type FileInfo struct {
-	Name     string
-	Path     string
-	Size     int64
-	ModTime  time.Time
-	IsDir    bool
+	Name    string
+	Path    string
+	Size    int64
+	ModTime time.Time
+	IsDir   bool
 }
 
 // Store manages both global and workspace-level memory folders.

@@ -115,9 +115,9 @@ func highlightQuery(line, query string) string {
 	}
 	lowerLine := strings.ToLower(line)
 	lowerQuery := strings.ToLower(query)
-	
+
 	style := lipgloss.NewStyle().Background(lipgloss.Color("220")).Foreground(lipgloss.Color("0"))
-	
+
 	var result strings.Builder
 	start := 0
 	for {

@@ -455,11 +455,11 @@ func (m wizardModel) onboardClaudeCmd() tea.Cmd {
 		output := string(outBytes)
 
 		outputLower := strings.ToLower(output)
-		isAuthError := strings.Contains(outputLower, "login") || 
-			strings.Contains(outputLower, "auth") || 
-			strings.Contains(outputLower, "sign in") || 
+		isAuthError := strings.Contains(outputLower, "login") ||
+			strings.Contains(outputLower, "auth") ||
+			strings.Contains(outputLower, "sign in") ||
 			strings.Contains(outputLower, "not authenticated") ||
-			strings.Contains(outputLower, "api key") || 
+			strings.Contains(outputLower, "api key") ||
 			strings.Contains(outputLower, "unauthorized") ||
 			strings.Contains(outputLower, "credentials")
 
@@ -499,10 +499,10 @@ func (m wizardModel) onboardGeminiCmd() tea.Cmd {
 		output := string(outBytes)
 
 		outputLower := strings.ToLower(output)
-		isAuthError := strings.Contains(outputLower, "login") || 
-			strings.Contains(outputLower, "auth") || 
-			strings.Contains(outputLower, "sign in") || 
-			strings.Contains(outputLower, "api key") || 
+		isAuthError := strings.Contains(outputLower, "login") ||
+			strings.Contains(outputLower, "auth") ||
+			strings.Contains(outputLower, "sign in") ||
+			strings.Contains(outputLower, "api key") ||
 			strings.Contains(outputLower, "unauthorized") ||
 			strings.Contains(outputLower, "credentials")
 
@@ -542,10 +542,10 @@ func (m wizardModel) onboardCodexCmd() tea.Cmd {
 		output := string(outBytes)
 
 		outputLower := strings.ToLower(output)
-		isAuthError := strings.Contains(outputLower, "login") || 
-			strings.Contains(outputLower, "auth") || 
-			strings.Contains(outputLower, "sign in") || 
-			strings.Contains(outputLower, "api key") || 
+		isAuthError := strings.Contains(outputLower, "login") ||
+			strings.Contains(outputLower, "auth") ||
+			strings.Contains(outputLower, "sign in") ||
+			strings.Contains(outputLower, "api key") ||
 			strings.Contains(outputLower, "unauthorized") ||
 			strings.Contains(outputLower, "credentials")
 
@@ -585,10 +585,10 @@ func (m wizardModel) onboardAntigravityCmd() tea.Cmd {
 		output := string(outBytes)
 
 		outputLower := strings.ToLower(output)
-		isAuthError := strings.Contains(outputLower, "login") || 
-			strings.Contains(outputLower, "auth") || 
-			strings.Contains(outputLower, "sign in") || 
-			strings.Contains(outputLower, "api key") || 
+		isAuthError := strings.Contains(outputLower, "login") ||
+			strings.Contains(outputLower, "auth") ||
+			strings.Contains(outputLower, "sign in") ||
+			strings.Contains(outputLower, "api key") ||
 			strings.Contains(outputLower, "unauthorized") ||
 			strings.Contains(outputLower, "credentials")
 
@@ -795,7 +795,7 @@ func (m wizardModel) View() string {
 		if shown > len(scanDirs) {
 			shown = len(scanDirs)
 		}
-		
+
 		pBar := RenderProgressBar(shown, len(scanDirs), 40, ColorPrimary)
 		b.WriteString("  " + pBar + "\n\n")
 
@@ -912,7 +912,7 @@ func (m wizardModel) View() string {
 			cyan.Render(m.spinner()),
 			bold.Render("Onboarding selected agents headlessly..."),
 		))
-		
+
 		descText := "Running '/auxly-init' on installed CLI agents to synchronize memory vault..."
 		b.WriteString("  " + dim.Render(descText) + "\n\n")
 
@@ -924,7 +924,7 @@ func (m wizardModel) View() string {
 			for _, status := range m.onboardStatuses {
 				icon := "●"
 				var nameStyle, msgStyle lipgloss.Style
-				
+
 				if status.status == "success" {
 					nameStyle = lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
 					msgStyle = lipgloss.NewStyle().Foreground(ColorSuccess)
@@ -943,7 +943,7 @@ func (m wizardModel) View() string {
 					msgStyle = lipgloss.NewStyle().Foreground(ColorDim)
 					icon = cyan.Render("👉")
 				}
-				
+
 				b.WriteString(fmt.Sprintf("    %s %-24s %s\n",
 					icon,
 					nameStyle.Render(status.name),
@@ -958,7 +958,7 @@ func (m wizardModel) View() string {
 			green.Render("✓"), len(m.scanResults), m.totalFolders, m.totalFiles))
 		b.WriteString(fmt.Sprintf("  %s Created %d memory files\n",
 			green.Render("✓"), m.migrated))
-		
+
 		selected := 0
 		for _, a := range m.agents {
 			if a.selected {
@@ -967,7 +967,7 @@ func (m wizardModel) View() string {
 		}
 		b.WriteString(fmt.Sprintf("  %s Connected %d agents (all trusted)\n",
 			green.Render("✓"), selected))
-		
+
 		if m.setupChoice == 0 {
 			b.WriteString(fmt.Sprintf("  %s MCP configured\n", green.Render("✓")))
 		} else {
@@ -976,14 +976,14 @@ func (m wizardModel) View() string {
 		}
 
 		b.WriteString("\n")
-		
+
 		// Render E2E Onboarding Results Dashboard
 		if m.setupChoice == 0 && len(m.onboardStatuses) > 0 {
 			b.WriteString(bold.Render("  🔄 E2E Agent Onboarding Dashboard:") + "\n")
 			for _, status := range m.onboardStatuses {
 				icon := "●"
 				var nameStyle, msgStyle lipgloss.Style
-				
+
 				if status.status == "success" {
 					nameStyle = lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true)
 					msgStyle = lipgloss.NewStyle().Foreground(ColorSuccess)
@@ -998,7 +998,7 @@ func (m wizardModel) View() string {
 					msgStyle = lipgloss.NewStyle().Foreground(ColorDim)
 					icon = cyan.Render("👉")
 				}
-				
+
 				b.WriteString(fmt.Sprintf("    %s %-24s %s\n",
 					icon,
 					nameStyle.Render(status.name),
@@ -1019,7 +1019,7 @@ func (m wizardModel) View() string {
 
 		b.WriteString(fmt.Sprintf("  %s %s\n", dim.Render("Memory:"), cyan.Render(m.memoryPath)))
 		b.WriteString("\n")
-		
+
 		boxWidth := 78
 		if m.width > 0 && m.width < 82 {
 			boxWidth = m.width - 4
@@ -1031,10 +1031,10 @@ func (m wizardModel) View() string {
 			Width(boxWidth)
 
 		b.WriteString(cyan.Render("  🚀 ONBOARD YOUR AGENTS INSTANTLY WITH /auxly-init:") + "\n")
-		
+
 		descText := "Type this command first in any new chat session with your AI assistants:"
 		if m.width > 0 && m.width < 90 {
-			b.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Width(m.width - 4).Render(descText) + "\n\n")
+			b.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Width(m.width-4).Render(descText) + "\n\n")
 		} else {
 			b.WriteString(dim.Render("  "+descText) + "\n\n")
 		}
@@ -1046,14 +1046,14 @@ func (m wizardModel) View() string {
 
 		b.WriteString(promptStyle.Render(
 			purple.Render("/auxly-init") + " (or type 'auxly init' in agent chat)\n\n" +
-			"This universal onboarding command trains the agent on your memory preferences,\n" +
-			"provides local environment rules, and commands the assistant to immediately\n" +
-			"scan your active context and synchronize existing facts to the Auxly vault.\n\n" +
-			warnBold.Render("👉 FOR CLAUDE DESKTOP GUI:\n") +
-			warnStyle.Render("Please upload the generated skills ZIP files from ") +
-			cyanBold.Render("~/Downloads/auxly-skills/") +
-			warnStyle.Render(" via\nSettings -> Customize -> Skills -> Upload a skill after updates.") + "\n\n" +
-			dim.Render("Supported in: Claude Desktop, Claude Code CLI, Cursor, and Codex IDE."),
+				"This universal onboarding command trains the agent on your memory preferences,\n" +
+				"provides local environment rules, and commands the assistant to immediately\n" +
+				"scan your active context and synchronize existing facts to the Auxly vault.\n\n" +
+				warnBold.Render("👉 FOR CLAUDE DESKTOP GUI:\n") +
+				warnStyle.Render("Please upload the generated skills ZIP files from ") +
+				cyanBold.Render("~/Downloads/auxly-skills/") +
+				warnStyle.Render(" via\nSettings -> Customize -> Skills -> Upload a skill after updates.") + "\n\n" +
+				dim.Render("Supported in: Claude Desktop, Claude Code CLI, Cursor, and Codex IDE."),
 		))
 		b.WriteString("\n\n")
 

@@ -12,10 +12,10 @@ import (
 
 // PendingFile represents a file waiting for approval.
 type PendingFile struct {
-	Name     string
-	Path     string
-	Size     int64
-	ModTime  time.Time
+	Name    string
+	Path    string
+	Size    int64
+	ModTime time.Time
 }
 
 // Manager handles the .pending/ directory.
@@ -98,13 +98,13 @@ func (m *Manager) Approve(pendingName string) error {
 
 	// Write to target
 	targetPath := filepath.Join(m.memoryRoot, target)
-	
+
 	// Read existing content
 	var existingContent string
 	if fileData, err := os.ReadFile(targetPath); err == nil {
 		existingContent = string(fileData)
 	}
-	
+
 	// Apply diff content cleanly
 	mergedContent := ApplyDiff(existingContent, diffContent)
 
@@ -126,7 +126,7 @@ func ApplyDiff(existing, diff string) string {
 	if existing == "" {
 		var cleanLines []string
 		lines := strings.Split(diff, "\n")
-		
+
 		isUnified := false
 		for _, line := range lines {
 			if strings.HasPrefix(line, "@@ ") || strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") {
@@ -134,7 +134,7 @@ func ApplyDiff(existing, diff string) string {
 				break
 			}
 		}
-		
+
 		for _, line := range lines {
 			if isUnified {
 				if strings.HasPrefix(line, "---") || strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "@@") {
@@ -162,7 +162,7 @@ func ApplyDiff(existing, diff string) string {
 
 	lines := strings.Split(existing, "\n")
 	diffLines := strings.Split(diff, "\n")
-	
+
 	for _, dl := range diffLines {
 		if strings.HasPrefix(dl, "---") || strings.HasPrefix(dl, "+++") || strings.HasPrefix(dl, "@@") {
 			continue
@@ -190,7 +190,7 @@ func ApplyDiff(existing, diff string) string {
 			lines = newLines
 		}
 	}
-	
+
 	return strings.Join(lines, "\n")
 }
 

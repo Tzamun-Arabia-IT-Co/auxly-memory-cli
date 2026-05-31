@@ -105,18 +105,33 @@ var brandAccent = map[string]string{
 	"gemini":      "#4285F4", // Google blue
 }
 
-// brandMark returns the brand emblem: a crisp two-line brand-colored rounded
-// tile. Tiny pixel logos can't render legibly at this height, so we use a clean
-// geometric mark instead. The real-logo pipeline (brandlogos.go / brandLogo)
-// stays available for a future larger-card mode.
-func brandMark(id string) []string {
+// brandGlyph is one distinct symbol per brand, each chosen to hint at the
+// product: Anthropic sunburst (claude), a CLI prompt (claude-code), a space
+// star (antigravity), an I-beam text cursor (cursor), a hexagon (codex), a
+// sparkle diamond (gemini). Rendered in the brand's accent color so the six
+// cards read apart at a glance — no block art, no emoji width quirks.
+var brandGlyph = map[string]string{
+	"claude":      "✶",
+	"claude-code": "❯",
+	"antigravity": "✦",
+	"cursor":      "▮",
+	"codex":       "⬡",
+	"gemini":      "◆",
+}
+
+// brandMark returns the brand's emblem: a single accent-colored glyph. It sits
+// on the card's name line (see the dashboard card render), reading like a
+// brand-colored bullet rather than the old generic filled tile.
+func brandMark(id string) string {
+	g, ok := brandGlyph[id]
+	if !ok {
+		g = "◆"
+	}
 	c, ok := brandAccent[id]
 	if !ok {
 		c = "#84DCFB"
 	}
-	st := lipgloss.NewStyle().Foreground(lipgloss.Color(c))
-	// Rounded filled tile via quadrant glyphs (corners cut top and bottom).
-	return []string{st.Render("▟█▙"), st.Render("▜█▛")}
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(c)).Render(g)
 }
 
 // brandMarkLogo returns the real baked logo lines for a brand (used only if a

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,9 +9,11 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/trust"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/usage"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
@@ -40,9 +43,16 @@ type dashboardModel struct {
 	width            int
 	height           int
 
+	// Live Usage data layer (opt-in; off keeps Auxly fully local).
+	usageMgr      *usage.Manager
+	usageReports  map[string]usage.Report
+	liveUsage     bool
+	agyAuthing    bool   // Antigravity consent flow in progress
+	agyAuthStatus string // last Antigravity auth result/status
+
 	// Interactive Popup & Grid Selection State
 	selectedAgent  string // E.g., "claude", "cursor", etc.
-	activeAgentTab int    // 0 = Info, 1 = Recent Writes
+	activeAgentTab int    // 0 = Info, 1 = Recent Writes, 2 = Connected, 3 = Usage
 	gridCursor     int    // 0 to 5 for selecting the grid box
 }
 
@@ -69,6 +79,45 @@ type dashboardUpdateDoneMsg struct {
 type dashboardTickMsg struct{}
 type animationTickMsg struct{}
 
+// usageReportsMsg carries the result of an async Live Usage fetch.
+type usageReportsMsg struct {
+	reports []usage.Report
+}
+
+// usageFetchCmd runs the blocking Reports call off the UI thread. The manager's
+// 60s cache throttles real network calls, so firing this each tick is cheap.
+func usageFetchCmd(mgr *usage.Manager) tea.Cmd {
+	return func() tea.Msg {
+		if mgr == nil {
+			return usageReportsMsg{}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		return usageReportsMsg{reports: mgr.Reports(ctx)}
+	}
+}
+
+// agyAuthMsg carries the outcome of the Antigravity consent flow.
+type agyAuthMsg struct {
+	email string
+	err   error
+}
+
+// agyAuthCmd runs the Antigravity OAuth consent off the UI thread: it opens the
+// browser and waits (up to 3 min) for the user to approve, then stores the token
+// and busts the usage cache so the meter refetches.
+func agyAuthCmd(mgr *usage.Manager) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		email, err := usage.AntigravityLogin(ctx)
+		if err == nil && mgr != nil {
+			mgr.Invalidate()
+		}
+		return agyAuthMsg{email: email, err: err}
+	}
+}
+
 func dashboardTickCmd() tea.Cmd {
 	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
 		return dashboardTickMsg{}
@@ -91,6 +140,9 @@ func newDashboardModel(logger *audit.Logger, mgr *pending.Manager, memoryPath st
 		mcpError:         "",
 		reloaded:         false,
 		gridCursor:       0,
+		usageMgr:         usage.New(),
+		usageReports:     map[string]usage.Report{},
+		liveUsage:        config.LoadSettings().LiveUsage,
 	}
 }
 
@@ -182,7 +234,27 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 
 		return m, tea.Batch(cmds...)
 	case dashboardTickMsg:
+		if m.liveUsage {
+			return m, tea.Batch(m.Refresh(), usageFetchCmd(m.usageMgr))
+		}
 		return m, m.Refresh()
+	case usageReportsMsg:
+		for _, r := range msg.reports {
+			m.usageReports[r.Provider] = r
+		}
+		return m, nil
+	case agyAuthMsg:
+		m.agyAuthing = false
+		if msg.err != nil {
+			m.agyAuthStatus = "✗ " + msg.err.Error()
+			return m, nil
+		}
+		if msg.email != "" {
+			m.agyAuthStatus = "✓ Connected as " + msg.email
+		} else {
+			m.agyAuthStatus = "✓ Connected"
+		}
+		return m, usageFetchCmd(m.usageMgr)
 	case animationTickMsg:
 		m.blinkCycle = (m.blinkCycle + 1) % 24
 		return m, animationTickCmd()
@@ -271,11 +343,16 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 					if col < 0 {
 						continue
 					}
-					// The name sits right of the emblem (~8 cols in); the card spans a
-					// row above and below it. Bound the hit box to that rectangle so
-					// adjacent cards don't overlap.
-					x0, x1 := col-8, col-8+cardWidth+2
-					if clickLineIdx >= idx-1 && clickLineIdx <= idx+2 && msg.X >= x0 && msg.X <= x1 {
+					// The name sits right of the glyph emblem (border+pad+glyph+gap ≈ 5
+					// cols, +1 left margin); the card spans a row above and below it.
+					// Bound the hit box to that rectangle so adjacent cards don't overlap.
+					// Live Usage adds two body lines, extending the card downward by 2.
+					bottom := idx + 2
+					if m.liveUsage {
+						bottom = idx + 4
+					}
+					x0, x1 := col-6, col-6+cardWidth+2
+					if clickLineIdx >= idx-1 && clickLineIdx <= bottom && msg.X >= x0 && msg.X <= x1 {
 						m.selectedAgent = b.id
 						m.activeAgentTab = 0
 						return m, nil
@@ -299,18 +376,31 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			case "3":
 				m.activeAgentTab = 2
 				return m, nil
+			case "4":
+				m.activeAgentTab = 3
+				return m, nil
 			case "left":
 				if m.activeAgentTab > 0 {
 					m.activeAgentTab--
 				}
 				return m, nil
 			case "right":
-				if m.activeAgentTab < 2 {
+				if m.activeAgentTab < 3 {
 					m.activeAgentTab++
 				}
 				return m, nil
 			case "tab":
-				m.activeAgentTab = (m.activeAgentTab + 1) % 3
+				m.activeAgentTab = (m.activeAgentTab + 1) % 4
+				return m, nil
+			case "a", "A":
+				// Authorize Antigravity from within the Usage tab: launches the
+				// one-time Google consent flow (opens the browser) without leaving
+				// the TUI.
+				if m.selectedAgent == "antigravity" && m.activeAgentTab == 3 && !m.agyAuthing {
+					m.agyAuthing = true
+					m.agyAuthStatus = ""
+					return m, agyAuthCmd(m.usageMgr)
+				}
 				return m, nil
 			}
 			return m, nil // Swallow keys when popup is active
@@ -342,9 +432,14 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		case "r", "R":
 			// Force refresh: immediately re-scan the session registry and the
 			// live process table (no waiting for the 1s tick), surfacing any
-			// agent that's running but not yet reflected.
+			// agent that's running but not yet reflected. When Live Usage is on,
+			// also bust its 60s cache so the meters refetch fresh numbers now.
 			m.reloaded = true
 			m.reloadedAt = time.Now()
+			if m.liveUsage {
+				m.usageMgr.Invalidate()
+				return m, tea.Batch(m.Refresh(), usageFetchCmd(m.usageMgr))
+			}
 			return m, m.Refresh()
 		case "u", "U":
 			// One-click self-update when a newer release is available.
@@ -439,7 +534,10 @@ func (m dashboardModel) View() string {
 		}
 
 		// Count live MCP sessions for this brand from the session registry
-		// (ground truth). "active" = at least one connection right now.
+		// (ground truth). "active" = at least one connection right now. We do NOT
+		// fall back to recent audit activity: background apps (e.g. the Antigravity
+		// IDE) reconnect every few minutes just to enumerate tools, which would
+		// falsely light the card as active when the user isn't using the agent.
 		connCount := 0
 		for _, sess := range m.sessions {
 			if sess.Provider == b.id ||
@@ -481,11 +579,21 @@ func (m dashboardModel) View() string {
 			cardName = bold.Render(b.name)
 		}
 
-		// Clean brand-colored emblem (2 lines) centered beside the text.
-		icon := strings.Join(brandMark(b.id), "\n")
+		// Brand-colored glyph on the name line; the status line sits below, aligned
+		// to the same left edge (Top join keeps both text lines flush regardless of
+		// the glyph's rendered width).
+		icon := brandMark(b.id)
 		connInfo := dim.Render(fmt.Sprintf("⇄%d", connCount))
 		textBlock := fmt.Sprintf("%s\n%s · %s · %s", cardName, statusDot, connInfo, trustBadge)
-		body := lipgloss.JoinHorizontal(lipgloss.Center, icon, "  ", textBlock)
+		body := lipgloss.JoinHorizontal(lipgloss.Top, icon, "  ", textBlock)
+
+		// Live Usage adds two lines to each card (a meter + a reset/secondary
+		// line). Vertical-joined below the icon row so they sit at the card's
+		// left edge regardless of the glyph width.
+		if m.liveUsage {
+			l1, l2 := m.cardUsageLines(b.id)
+			body = lipgloss.JoinVertical(lipgloss.Left, body, l1, l2)
+		}
 
 		card := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -538,7 +646,7 @@ func (m dashboardModel) View() string {
 	b.WriteString(dashboardContent + "\n\n")
 
 	if m.selectedAgent != "" {
-		b.WriteString(dim.Render("  Popup active: [1/2/3] switch tabs • [Esc] or Click outside to close"))
+		b.WriteString(dim.Render("  Popup active: [1/2/3/4] switch tabs • [Esc] or Click outside to close"))
 	} else {
 		hint := "  Use arrow keys or Mouse Clicks to select agent boxes • Enter: open details popup • q: exit TUI"
 		if m.updateAvail && !m.updating {
@@ -635,6 +743,153 @@ func (m dashboardModel) renderConnectedTab(pb *strings.Builder, provider string)
 				dim.Render("this machine"),
 			))
 		}
+	}
+}
+
+// usageBar renders a fixed-width meter for a percent-used value (0–100). The
+// filled portion uses the brand's accent color; the remainder is dim. Mirrors
+// the half-block aesthetic of the brand marks with ▰/▱ cells.
+func usageBar(pct float64, width int, brand string) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	filled := int(pct/100*float64(width) + 0.5)
+	if filled > width {
+		filled = width
+	}
+	accent, ok := brandAccent[brand]
+	if !ok {
+		accent = "#84DCFB"
+	}
+	barStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(accent))
+	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
+	return barStyle.Render(strings.Repeat("▰", filled)) +
+		dimStyle.Render(strings.Repeat("▱", width-filled))
+}
+
+// cardUsageLines returns the two compact Live Usage lines for an agent card,
+// mapping the card's brand id to its report: a 10-cell meter + percent on line
+// one, and a dim "<reset> · wk NN%" (or the window label for single-window
+// providers like Google) on line two. Handles the not-loaded and error states.
+func (m dashboardModel) cardUsageLines(brand string) (string, string) {
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+
+	report, loaded := m.usageReports[brand]
+	if !loaded {
+		return dim.Render("usage …"), dim.Render("")
+	}
+	if report.Err != "" {
+		reason := report.Err
+		if len(reason) > 24 {
+			reason = reason[:21] + "..."
+		}
+		return dim.Render("usage —"), dim.Render(reason)
+	}
+	if !report.Available() {
+		return dim.Render("usage —"), dim.Render("no data")
+	}
+
+	head := report.Windows[0]
+	// Label the meter (Session / Week / Overall) so the bar reads unmistakably as
+	// quota usage, not some generic progress. Mirrors the Stream Deck convention.
+	label := dim.Render(fmt.Sprintf("%-7s", head.Label))
+	line1 := fmt.Sprintf("%s %s %3.0f%%", label, usageBar(head.Pct, 8, brand), head.Pct)
+
+	now := time.Now()
+	reset := usage.FormatReset(head.ResetAt, now)
+	if reset == "" {
+		reset = "—"
+	}
+	second := "resets " + reset
+	if len(report.Windows) > 1 {
+		second = fmt.Sprintf("resets %s · wk %.0f%%", reset, report.Windows[1].Pct)
+	}
+	line2 := dim.Render(second)
+	return line1, line2
+}
+
+// renderUsageTab writes the "Usage" popup tab for one provider: its plan, each
+// quota window as a labeled bar with reset time, and a provenance line. When the
+// Live Usage opt-in is off, or the snapshot is unavailable, it explains why.
+func (m dashboardModel) renderUsageTab(pb *strings.Builder, provider string) {
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	bold := lipgloss.NewStyle().Bold(true)
+	teal := lipgloss.NewStyle().Foreground(lipgloss.Color("#73CBAD"))
+
+	if !m.liveUsage {
+		pb.WriteString("\n  " + dim.Render("Live Usage is off — enable it in Settings.") + "\n")
+		return
+	}
+
+	report, loaded := m.usageReports[provider]
+	if !loaded {
+		pb.WriteString("\n  " + dim.Render("usage … (fetching from provider)") + "\n")
+		return
+	}
+
+	if report.Err != "" {
+		pb.WriteString("\n  " + bold.Render("—") + "  " + dim.Render(report.Err) + "\n")
+		if provider == "antigravity" {
+			m.writeAgyAuthHint(pb)
+		}
+		return
+	}
+
+	if report.Plan != "" {
+		pb.WriteString("  " + dim.Render(fmt.Sprintf("%-7s", "Plan:")) + " " + bold.Render(report.Plan) + "\n")
+	}
+	pb.WriteString("\n")
+
+	now := time.Now()
+	for _, w := range report.Windows {
+		bar := usageBar(w.Pct, 12, provider)
+		reset := ""
+		if r := usage.FormatReset(w.ResetAt, now); r != "" {
+			reset = dim.Render("resets " + r)
+		}
+		pb.WriteString(fmt.Sprintf("  %s  %s  %s   %s\n",
+			bold.Render(fmt.Sprintf("%-8s", w.Label)),
+			bar,
+			fmt.Sprintf("%3.0f%%", w.Pct),
+			reset,
+		))
+	}
+
+	source := report.Source
+	if source == "" {
+		source = "provider"
+	}
+	// Distinguish a fresh read from a last-good snapshot held through a transient
+	// rate-limit, so the user knows whether the numbers are live or cached.
+	stamp := teal.Render("↻ live")
+	if !report.FetchedAt.IsZero() && time.Since(report.FetchedAt) > 90*time.Second {
+		stamp = lipgloss.NewStyle().Foreground(ColorWarning).Render("⧗ as of " + report.FetchedAt.Format("15:04"))
+	}
+	pb.WriteString("\n  " + stamp + " " + dim.Render("· via "+source) + "\n")
+}
+
+// writeAgyAuthHint shows the Antigravity authorization affordance in its Usage
+// tab: a [a] prompt, the in-progress state, or the last result. Antigravity is
+// the one provider that needs its own one-time consent (it stores no reusable
+// token), so we surface the flow inline rather than sending the user to a CLI.
+func (m dashboardModel) writeAgyAuthHint(pb *strings.Builder) {
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	switch {
+	case m.agyAuthing:
+		warn := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+		pb.WriteString("\n  " + warn.Render("⏳ Authorizing…") + " " + dim.Render("approve in your browser") + "\n")
+	case m.agyAuthStatus != "":
+		color := ColorSuccess
+		if strings.HasPrefix(m.agyAuthStatus, "✗") {
+			color = ColorDanger
+		}
+		pb.WriteString("\n  " + lipgloss.NewStyle().Foreground(color).Render(m.agyAuthStatus) + "\n")
+	default:
+		key := lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
+		pb.WriteString("\n  " + key.Render("[a]") + " " + dim.Render("Authorize Antigravity in your browser") + "\n")
 	}
 }
 
@@ -760,6 +1015,7 @@ func (m dashboardModel) renderPopup(provider string) string {
 	tab1 := "[1 Info & Diagnostics]"
 	tab2 := "[2 Recent Writes]"
 	tab3 := "[3 Connected]"
+	tab4 := "[4 Usage]"
 	switch m.activeAgentTab {
 	case 0:
 		tab1 = cyan.Render(tab1)
@@ -767,8 +1023,10 @@ func (m dashboardModel) renderPopup(provider string) string {
 		tab2 = cyan.Render(tab2)
 	case 2:
 		tab3 = cyan.Render(tab3)
+	case 3:
+		tab4 = cyan.Render(tab4)
 	}
-	pb.WriteString(fmt.Sprintf("  %s    %s    %s\n\n", tab1, tab2, tab3))
+	pb.WriteString(fmt.Sprintf("  %s    %s    %s    %s\n\n", tab1, tab2, tab3, tab4))
 
 	if m.activeAgentTab == 0 {
 		matchesProvider := func(p string) bool {
@@ -859,12 +1117,14 @@ func (m dashboardModel) renderPopup(provider string) string {
 				))
 			}
 		}
-	} else {
+	} else if m.activeAgentTab == 2 {
 		m.renderConnectedTab(&pb, provider)
+	} else {
+		m.renderUsageTab(&pb, provider)
 	}
 
 	pb.WriteString("\n")
-	pb.WriteString(StyleFooter.Render("  Press [Esc] to close • [1/2/3] Switch tabs"))
+	pb.WriteString(StyleFooter.Render("  Press [Esc] to close • [1/2/3/4] Switch tabs"))
 
 	popupStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -919,31 +1179,37 @@ func popupVisibleWidth(lines []string) int {
 }
 
 // tabAtColumn partitions the popup tab row by the actual columns of its "[1 ",
-// "[2 ", "[3 " markers and returns the 0-based tab index containing clickX (an
-// absolute terminal column), or -1 if the row carries no markers. originX is
-// the popup box's left edge. The first tab also catches clicks in the left
-// margin so the row hit-tests as three contiguous zones.
+// "[2 ", "[3 ", "[4 " markers and returns the 0-based tab index containing
+// clickX (an absolute terminal column), or -1 if the row carries no markers.
+// originX is the popup box's left edge. Absent markers are skipped (so a row
+// with fewer tabs still hit-tests), and the first present tab also catches
+// clicks in the left margin so the row reads as contiguous zones.
 func tabAtColumn(cleanRow string, originX, clickX int) int {
-	markers := []string{"[1 ", "[2 ", "[3 "}
-	cols := make([]int, 0, len(markers))
-	for _, mk := range markers {
-		c := visibleColumnOf(cleanRow, mk)
-		if c < 0 {
-			return -1
+	markers := []string{"[1 ", "[2 ", "[3 ", "[4 "}
+	type tabCol struct {
+		idx int
+		col int
+	}
+	var cols []tabCol
+	for i, mk := range markers {
+		if c := visibleColumnOf(cleanRow, mk); c >= 0 {
+			cols = append(cols, tabCol{idx: i, col: originX + c})
 		}
-		cols = append(cols, originX+c)
+	}
+	if len(cols) == 0 {
+		return -1
 	}
 	for i := range cols {
-		start := cols[i]
+		start := cols[i].col
 		if i == 0 {
 			start = originX
 		}
 		end := 1 << 30
 		if i+1 < len(cols) {
-			end = cols[i+1]
+			end = cols[i+1].col
 		}
 		if clickX >= start && clickX < end {
-			return i
+			return cols[i].idx
 		}
 	}
 	return -1
