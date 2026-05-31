@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/detect"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/templates"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/templates"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )

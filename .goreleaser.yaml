@@ -23,7 +23,7 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update.Current={{ .Version }}
+      - -s -w -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update.Current={{ .Version }}
 
 archives:
   # 1) tar.gz / zip archives — consumed by Homebrew, the deb/rpm packages, and
@@ -56,7 +56,10 @@ checksum:
 # Homebrew formula — auto-pushed to the tap repo on every release. Users then run
 # `brew install Tzamun-Arabia-IT-Co/homebrew-tap/auxly`.
 brews:
-  - repository:
+  # Formula name "auxly" (not the project_name) so the command is
+  # `brew install Tzamun-Arabia-IT-Co/homebrew-tap/auxly`.
+  - name: auxly
+    repository:
       owner: Tzamun-Arabia-IT-Co
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"

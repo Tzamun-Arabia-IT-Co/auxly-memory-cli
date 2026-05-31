@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )

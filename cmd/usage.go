@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/usage"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage"
 	"github.com/spf13/cobra"
 )
 

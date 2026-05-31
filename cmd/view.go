@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/memory"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	tea "github.com/charmbracelet/bubbletea"
 	lipgloss "github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"

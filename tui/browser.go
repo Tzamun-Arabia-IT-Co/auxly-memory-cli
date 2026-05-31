@@ -3,7 +3,7 @@ package tui
 import (
 	"fmt"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/memory"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )

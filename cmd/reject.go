@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/spf13/cobra"
 )
 

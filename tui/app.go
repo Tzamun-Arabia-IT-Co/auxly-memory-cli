@@ -5,11 +5,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/config"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/memory"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/pending"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/usage"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )

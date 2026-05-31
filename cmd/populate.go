@@ -5,9 +5,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/detect"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/profiler"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/templates"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/profiler"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/templates"
 	"github.com/spf13/cobra"
 )
 

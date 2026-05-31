@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/detect"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
 )
 
 // Profile holds auto-detected user/system information.

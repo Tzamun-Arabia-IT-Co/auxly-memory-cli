@@ -5,7 +5,7 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/memory"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/spf13/cobra"
 )
 

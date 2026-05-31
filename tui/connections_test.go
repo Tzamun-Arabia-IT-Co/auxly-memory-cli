@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/session"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/session"
 )
 
 func TestSessionFromRecordRemote(t *testing.T) {

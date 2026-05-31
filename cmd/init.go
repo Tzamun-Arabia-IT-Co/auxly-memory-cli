@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/tui"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/tui"
 	"github.com/spf13/cobra"
 )
 

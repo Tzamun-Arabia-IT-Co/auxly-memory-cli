@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/memory"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 )
 
 // PendingFile represents a file waiting for approval.

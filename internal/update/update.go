@@ -25,7 +25,7 @@ var versionRe = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+){0,3}([-+][0-9A-Za-z.]+)?
 
 // Current is the running build version, injected at release time via
 //
-//	-ldflags "-X github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update.Current=x.y.z"
+//	-ldflags "-X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update.Current=x.y.z"
 //
 // It defaults to a placeholder for plain `go build` / source installs.
 var Current = "1.0.0"

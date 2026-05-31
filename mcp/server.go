@@ -14,11 +14,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/memory"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/pending"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/session"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/trust"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/session"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 )
 
 // JSON-RPC types

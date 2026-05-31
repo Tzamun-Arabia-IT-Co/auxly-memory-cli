@@ -3,7 +3,7 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/git"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/git"
 	"github.com/spf13/cobra"
 )
 

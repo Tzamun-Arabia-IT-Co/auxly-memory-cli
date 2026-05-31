@@ -8,7 +8,7 @@
 
 No cloud. No database. No vendor lock-in. Just Markdown files you own, with an audit trail you can read and a review queue you control.
 
-[![Release](https://img.shields.io/github/v/release/Tzamun-Arabia-IT-Co/auxly-cli?label=release)](https://github.com/Tzamun-Arabia-IT-Co/auxly-cli/releases)
+[![Release](https://img.shields.io/github/v/release/Tzamun-Arabia-IT-Co/auxly-memory-cli?label=release)](https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8.svg)](go.mod)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
@@ -121,19 +121,19 @@ brew install Tzamun-Arabia-IT-Co/homebrew-tap/auxly
 ### Go
 
 ```bash
-go install github.com/Tzamun-Arabia-IT-Co/auxly-cli@latest
+go install github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli@latest
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/Tzamun-Arabia-IT-Co/auxly-cli.git
-cd auxly-cli
+git clone https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli.git
+cd auxly-memory-cli
 make build         # produces ./auxly
 # Apple Silicon dev builds: codesign --force --sign - ./auxly
 ```
 
-Prebuilt binaries, `.deb`, and `.rpm` packages are on the [Releases page](https://github.com/Tzamun-Arabia-IT-Co/auxly-cli/releases). Binaries are CGO-free single files — nothing to extract, no shared libraries to install.
+Prebuilt binaries, `.deb`, and `.rpm` packages are on the [Releases page](https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases). Binaries are CGO-free single files — nothing to extract, no shared libraries to install.
 
 ---
 

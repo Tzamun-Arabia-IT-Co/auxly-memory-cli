@@ -5,9 +5,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/config"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/tui"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/tui"
 	"github.com/spf13/cobra"
 )
 

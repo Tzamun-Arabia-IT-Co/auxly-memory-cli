@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
 	"github.com/spf13/cobra"
 )
 

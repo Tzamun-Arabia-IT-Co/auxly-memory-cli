@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/session"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/session"
 )
 
 // agentSession is a live MCP connection to this memory host, read from the

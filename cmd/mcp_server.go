@@ -3,7 +3,7 @@ package cmd
 import (
 	"os"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/mcp"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/mcp"
 	"github.com/spf13/cobra"
 )
 

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/audit"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/internal/update"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )

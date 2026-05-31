@@ -21,7 +21,7 @@ are on the most recent release (`auxly update`) before reporting.
 Instead, report privately:
 
 - **Email:** hi@auxly.io
-- Or use GitHub's [private vulnerability reporting](https://github.com/Tzamun-Arabia-IT-Co/auxly-cli/security/advisories/new).
+- Or use GitHub's [private vulnerability reporting](https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/security/advisories/new).
 
 Please include:
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-cli/assets"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/assets"
 )
 
 func printBanner() {

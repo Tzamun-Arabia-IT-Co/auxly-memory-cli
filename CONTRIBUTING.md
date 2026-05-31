@@ -23,8 +23,8 @@ platform thanks to a pure-Go SQLite driver.
 ## Build & run from source
 
 ```bash
-git clone https://github.com/Tzamun-Arabia-IT-Co/auxly-cli.git
-cd auxly-cli
+git clone https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli.git
+cd auxly-memory-cli
 
 make build      # compile ./auxly
 make run        # build, then run

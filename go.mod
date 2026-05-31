@@ -1,4 +1,4 @@
-module github.com/Tzamun-Arabia-IT-Co/auxly-cli
+module github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli
 
 go 1.26.3
 
