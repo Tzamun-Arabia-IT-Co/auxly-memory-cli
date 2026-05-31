@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🧠 Auxly
+<img src="assets/brand/auxly-banner.png" alt="Auxly" width="380" />
 
 ### One memory. Every AI agent. On your machine.
 
@@ -13,31 +13,53 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8.svg)](go.mod)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
-[Install](#install) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Skills](#skills) · [Remote memory](#remote-memory-over-ssh) · [Docs](https://auxly.io/docs)
-
 </div>
 
 ---
 
-## The problem
+## Contents
 
-Every AI agent keeps its own memory in its own walled garden. Tell Claude your stack, then open Codex — it knows nothing. Switch to Gemini — start over. Your context is fragmented across a dozen tools, none of them talk to each other, and none of them let you see or correct what they "remember" about you.
+- [Why Auxly](#why-auxly)
+- [How it works](#how-it-works)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [The memory vault](#the-memory-vault)
+- [Trust & access control](#trust--access-control)
+- [Skills (slash commands)](#skills-slash-commands)
+- [Supported agents](#supported-agents)
+- [The dashboard](#the-dashboard)
+- [Remote memory over SSH](#remote-memory-over-ssh)
+- [Live Usage](#live-usage)
+- [Git sync](#git-sync)
+- [Command reference](#command-reference)
+- [Configuration](#configuration)
+- [Security & privacy](#security--privacy)
+- [Contributing](#contributing)
+- [License](#license)
 
-## What Auxly does
+---
 
-Auxly gives all of your agents **one** memory — a folder of Markdown files on your own machine — and wires every agent to it through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Teach one agent something once; every other agent knows it instantly. And because the memory is plain Markdown under your control, you can read it, edit it, diff it, and version it in Git like any other file.
+## Why Auxly
 
-### Why you'll want it
+### The problem
+
+Every AI agent keeps its own memory in its own walled garden. Tell Claude your stack, then open Codex — it knows nothing. Switch to Gemini — start over. Your context is fragmented across a dozen tools, none of them talk to each other, and none let you see or correct what they "remember" about you.
+
+### What Auxly does
+
+Auxly gives all of your agents **one** memory — a folder of Markdown files on your own machine — and wires every agent to it through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). Teach one agent something once; every other agent knows it instantly. Because the memory is plain Markdown under your control, you can read it, edit it, diff it, and version it in Git like any other file.
+
+### The benefits
 
 | | Benefit |
 |---|---|
 | 🧠 **Shared context** | Say it once to any agent — all your other agents inherit it. No more re-explaining your stack, preferences, or projects per tool. |
 | 📂 **You own the data** | Memory is Markdown in `~/.auxly/memory/`. Open it in any editor, grep it, commit it. Nothing is locked inside a vendor's cloud. |
 | 🔒 **Local-first & private** | No server, no telemetry, no embeddings, no Docker. Memory never leaves your machine unless *you* push it to a Git remote. |
-| 🛂 **You stay in control** | Per-agent trust levels decide whether a write lands instantly, queues for your approval, or is denied outright. |
-| 🧾 **Fully auditable** | Every read and write is logged append-only with who, what, when, and why — surfaced in a live TUI. |
+| 🛂 **You stay in control** | Per-agent trust levels decide whether a write lands instantly, queues for your approval, or is denied. |
+| 🧾 **Fully auditable** | Every read and write is logged append-only with who, what, when, and why — surfaced in a live dashboard. |
 | 🌐 **Works across machines** | Share one memory host with NAT'd servers and laptops over plain SSH — no daemon, no open port, no token. |
-| 🆓 **Free & open** | MIT-licensed Go binary. Single file, zero runtime dependencies. |
+| 🆓 **Free & open** | MIT-licensed Go binary. Single static file, zero runtime dependencies. |
 
 ---
 
@@ -56,17 +78,17 @@ Auxly is a single static Go binary that plays three roles at once:
                 │                                  ▼            │
                 │   ┌──────────────┐      ┌────────────────┐   │
                 │   │  Audit log   │◀─────│  ~/.auxly/      │   │
-                │   │ JSONL + SQLite│      │  memory/*.md    │──┼──▶ git push
+                │   │JSONL + SQLite│      │  memory/*.md    │──┼──▶ git push
                 │   └──────────────┘      └────────────────┘   │   (optional)
                 └─────────────────────────────────────────────┘
 ```
 
-1. **MCP server** — `auxly mcp-server` exposes a set of tools (read, write, search, sync, …) to any MCP-capable agent over stdio. Agents call them like any other tool.
+1. **MCP server** — `auxly mcp-server` exposes tools (read, write, search, sync, …) to any MCP-capable agent over stdio. Agents call them like any other tool.
 2. **Trust gate** — every write is checked against the writing provider's trust level: write directly, queue for human approval, or reject.
 3. **Memory vault** — accepted writes land as Markdown in `~/.auxly/memory/`, optionally auto-committed to Git.
-4. **Audit** — every access is recorded to an append-only JSON Lines log and indexed in SQLite for instant querying in the TUI.
+4. **Audit** — every access is recorded to an append-only JSON Lines log and indexed in SQLite for instant querying in the dashboard.
 
-The only "database" anywhere is a local SQLite file used purely to index the audit log. There are **no embeddings, no background server, no network calls** in normal operation.
+The only "database" anywhere is a local SQLite file used purely to index the audit log. There are **no embeddings, no background daemon, and no network calls** in normal operation.
 
 ---
 
@@ -78,7 +100,7 @@ The only "database" anywhere is a local SQLite file used purely to index the aud
 curl -fsSL https://auxly.io/cli | sh
 ```
 
-Bootstrap everything in one go — install **and** wire up your local agents:
+Install **and** wire up your local agents in one go:
 
 ```bash
 curl -fsSL https://auxly.io/cli | sh -s -- --setup
@@ -111,32 +133,40 @@ make build         # produces ./auxly
 # Apple Silicon dev builds: codesign --force --sign - ./auxly
 ```
 
-Or grab a prebuilt binary / `.deb` / `.rpm` from the [Releases page](https://github.com/Tzamun-Arabia-IT-Co/auxly-cli/releases). Binaries are CGO-free single files — no archive to extract, no shared libraries to install.
+Prebuilt binaries, `.deb`, and `.rpm` packages are on the [Releases page](https://github.com/Tzamun-Arabia-IT-Co/auxly-cli/releases). Binaries are CGO-free single files — nothing to extract, no shared libraries to install.
 
 ---
 
 ## Quick start
 
+Auxly is built around **one command** — just run `auxly`:
+
 ```bash
-# 1. Create your memory vault and walk through first-time setup
-auxly init
+auxly
+```
 
-# 2. Wire every AI agent on this machine to Auxly (MCP + slash commands)
+- **First run** walks you through a short setup wizard and creates your memory vault.
+- **Every run after that** opens the full-screen **dashboard**.
+
+That's the whole entry point — there's no separate "init" or "ui" step to remember (those exist as explicit aliases, but you never need them).
+
+Next, connect your AI agents to the shared memory:
+
+```bash
 auxly setup
-
-# 3. Open the dashboard
-auxly ui
 ```
 
-Then, inside any connected agent's chat, type:
+This detects every AI agent installed on your machine (Claude, Codex, Gemini, Cursor, Antigravity, …) and wires each one to Auxly via MCP — plus installs the `/auxly-*` slash commands. No manual config editing.
+
+Now, inside any connected agent's chat, start teaching it:
 
 ```
-/auxly-init     # scans the conversation and seeds your memory
-/auxly-sync     I prefer pnpm over npm and deploy on Vercel
-/auxly-memory   # shows the consolidated profile every agent now shares
+/auxly-init                  # scans the conversation and seeds your memory
+/auxly-sync  I prefer pnpm and deploy on Vercel
+/auxly-memory                # shows the profile every agent now shares
 ```
 
-That's it. From now on, anything any agent learns about you can be saved with `/auxly-sync`, and every other agent picks it up.
+From here on, anything any agent learns about you can be saved with `/auxly-sync`, and every other agent picks it up automatically.
 
 ---
 
@@ -162,7 +192,7 @@ Your memory lives in `~/.auxly/memory/` as human-readable Markdown, organized by
 └── .pending/          # writes awaiting your approval
 ```
 
-You can edit any of these by hand at any time — Auxly treats the files as the source of truth.
+Edit any of these by hand at any time — Auxly treats the files as the source of truth.
 
 ---
 
@@ -177,23 +207,23 @@ You decide what each provider is allowed to do. Trust levels live in `trust.yaml
 | `read_only` | Provider can read but never write |
 
 ```bash
-auxly trust list                      # show current levels
-auxly trust set claude auto           # trust Claude to write directly
+auxly trust list                       # show current levels
+auxly trust set claude auto            # trust Claude to write directly
 auxly trust set codex require_approval # review Codex's writes first
-auxly trust set copilot read_only     # let Copilot read but not write
+auxly trust set copilot read_only      # let Copilot read but not write
 ```
 
-Pending writes show up as reviewable diffs in the TUI's **Approvals** tab — approve or reject with a keystroke.
+Pending writes show up as reviewable diffs in the dashboard's **Approvals** tab — approve or reject with a keystroke.
 
 ---
 
-## Skills
+## Skills (slash commands)
 
-Auxly installs **8 slash commands** into every agent it configures. They work natively inside the agent's chat (Claude Code, Codex, Cursor, Gemini, Antigravity, Windsurf, …):
+`auxly setup` installs **8 slash commands** into every agent it configures. They work natively inside the agent's chat:
 
 | Skill | What it does |
 |-------|--------------|
-| `/auxly-init` | Onboards you — scans the current conversation/system context and seeds your memory with what's already known. |
+| `/auxly-init` | Onboards you — scans the current conversation/context and seeds your memory with what's already known. |
 | `/auxly-sync` `<fact>` | Saves a new fact, preference, or detail with a smart delta-merge that auto-routes it to the right memory file. |
 | `/auxly-memory` | Prints the consolidated profile (identity + preferences + infra) every agent currently shares. |
 | `/auxly-learn` `[context]` | Inspects recent edits/context and proposes structured facts to save. |
@@ -226,13 +256,13 @@ For each agent, Auxly also drops a workspace rules file (`.clauderules`, `.curso
 
 ---
 
-## TUI dashboard
+## The dashboard
 
-`auxly ui` opens a full-screen terminal dashboard:
+`auxly` opens a full-screen terminal dashboard:
 
 | # | Tab | What you see |
 |---|-----|--------------|
-| 1 | **Dashboard** | Today's writes, pending approvals, per-agent activity, brand-aware cards |
+| 1 | **Dashboard** | Today's writes, pending approvals, per-agent activity |
 | 2 | **Activity** | Live audit feed, color-coded by provider, local vs. SSH-remote |
 | 3 | **Files** | Browse and view your memory files |
 | 4 | **Approvals** | Review pending diffs — approve or reject |
@@ -248,18 +278,35 @@ Keyboard-driven throughout: `1–9` jump tabs, `↑/↓` or `j/k` navigate, `Tab
 
 ## Remote memory over SSH
 
-Run your agents on a server, a NAT'd box, or a teammate's laptop while keeping **one** memory host as the source of truth — over **plain SSH**. No daemon, no open listening port, no auth token, no custom protocol. A remote session is literally:
+Run your agents on a server, a NAT'd box, or another laptop while keeping **one** memory host as the source of truth — over **plain SSH**. There is **no daemon, no open listening port, no auth token, and no custom protocol**. A remote session is literally:
 
 ```bash
 ssh host auxly mcp-server
 ```
 
-The agent on the remote machine spawns that over SSH and speaks MCP over stdio; the host serves its memory and audits every access as if it were local.
+The agent on the remote machine spawns that over SSH and speaks MCP over stdio; the host serves its memory and audits every access as if it were local. Anything that gives you `ssh host` already gives you Auxly — bring your own LAN, VPN, bastion, or relay.
 
-### Connect from a machine (consumer side)
+### Two roles
+
+```
+   ┌────────────────────┐         plain SSH          ┌────────────────────┐
+   │   CONSUMER box      │  ───────────────────────▶  │   MEMORY HOST       │
+   │  (agent runs here)  │   ssh host auxly mcp-server │ (memory lives here, │
+   │  auxly connect …    │  ◀───────────────────────  │  audits every write)│
+   └────────────────────┘     memory over stdio        └────────────────────┘
+```
+
+| Role | What it does | Command |
+|------|--------------|---------|
+| **Memory host** | Serves the shared memory and audits every access | runs `auxly mcp-server` (invoked over SSH) |
+| **Consumer box** | Where an agent runs; reaches the host's memory | `auxly connect` |
+
+### Connecting a machine to a host
+
+On the **consumer** box, run the wizard and pick how the two machines reach each other:
 
 ```bash
-auxly connect          # interactive wizard: pick how the machines reach each other
+auxly connect          # wizard: LAN / VPN / bastion / public / relay
 auxly connect list     # show configured hosts + connected boxes
 auxly connect auto     # one-command bootstrap when a host advertises an offer
 ```
@@ -274,22 +321,26 @@ Auxly is **network-agnostic** and stores **no network credentials** — you brin
 | **Public** | A reachable hostname/IP or custom SSH config entry |
 | **Relay** | Serve a NAT'd box through a reverse tunnel you control |
 
-### Serve your memory to other boxes (host side)
+### Serving your memory to NAT'd boxes (relay)
+
+If a box can't reach your machine directly (it's behind NAT), your machine opens an outbound **reverse tunnel** through a relay you both can reach, and the box reaches your memory through it. On the **host**:
 
 ```bash
-auxly host setup       # open a reverse tunnel through a relay you control
-auxly host status      # see every served box and its tunnel state
+auxly host setup       # open the reverse tunnel via a relay; provision the box
+auxly host status      # every served box + its live tunnel state
 auxly host clients     # list connected boxes
 auxly host down        # stop serving
 ```
 
-Multiple boxes stay connected **simultaneously** — each gets its own independent, self-healing tunnel, and the host keep-alive supervises them all. Connecting one box never disconnects another. Remote sessions are tagged **SSH-remote** in the Activity/Audit views with the connecting client's IP and OS, so you always know which writes came from where.
+**Multiple boxes stay connected at the same time** — each gets its own independent, self-healing tunnel, supervised by a single keep-alive. Connecting one box never disconnects another.
 
-`auxly connect` also runs an OS-aware doctor that installs `auxly` on a macOS/Linux host automatically (and prints guided steps on Windows), so linking a new machine is usually a single command.
+### See where writes come from
+
+Sessions opened from a remote machine appear in the **Activity** and **Audit Trail** tabs tagged **SSH-remote**, annotated with the connecting client's **IP** and **OS** — so you always know which writes came from a remote agent versus a local one. `auxly connect` also runs an OS-aware doctor that installs `auxly` on a macOS/Linux host automatically (and prints guided steps on Windows), so linking a new machine is usually a single command.
 
 ---
 
-## Live Usage (opt-in)
+## Live Usage
 
 Auxly can show each agent's **live subscription quota** — session and weekly usage — right in the dashboard, by reusing each agent's own locally-stored login token. It reads:
 
@@ -328,9 +379,8 @@ branch: main
 
 | Command | Description |
 |---------|-------------|
-| `auxly init` | Create the memory vault and run first-time setup |
+| `auxly` | First run: setup wizard. After that: open the dashboard. |
 | `auxly setup` | Detect and wire every local agent (MCP + skills) |
-| `auxly ui` | Launch the TUI dashboard |
 | `auxly list` / `view <file>` | List or view memory files |
 | `auxly search <query>` | Search across all memory |
 | `auxly write …` | Write a change (used by agents/wrappers) |
@@ -366,7 +416,7 @@ Auto-update polls `auxly.io/version` and, when a newer release exists, prints a 
 - **Local-first.** Memory lives only on your machine; nothing is uploaded unless you push to your own Git remote.
 - **No telemetry.** Auxly phones home only for version checks and the opt-in Usage feature.
 - **Credentials stay put.** Auxly stores no SSH keys, VPN config, or network secrets. Usage tokens are read in place and never persisted or logged.
-- **Auditable by design.** Every read and write is recorded with who/what/when/why and reviewable in the TUI.
+- **Auditable by design.** Every read and write is recorded with who/what/when/why and reviewable in the dashboard.
 - **You hold the keys.** Trust levels and the approval queue mean no agent writes anything you didn't allow.
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md) for private disclosure.
@@ -375,10 +425,10 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md) for private disclosure.
 
 ## Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the build, test, and PR flow.
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the build, test, and PR flow, and our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ```bash
-make build && go test ./...
+make build && go test -race ./...
 ```
 
 ---
@@ -388,5 +438,10 @@ make build && go test ./...
 [MIT](LICENSE) © Tzamun Arabia IT Co.
 
 <div align="center">
-<sub>Built by <a href="https://auxly.io">Tzamun Arabia IT Co.</a> — your memory, every agent, on your machine.</sub>
+<br/>
+<sub>Built with care by</sub>
+<br/><br/>
+<img src="assets/brand/tzamun-banner.png" alt="Tzamun Arabia IT Co." width="200" />
+<br/><br/>
+<sub><a href="https://auxly.io">auxly.io</a> · your memory, every agent, on your machine</sub>
 </div>
