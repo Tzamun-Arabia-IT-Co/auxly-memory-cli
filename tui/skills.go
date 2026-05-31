@@ -528,96 +528,16 @@ func EnsureClaudeSkillsZip() {
 	auxlySkillsDir := filepath.Join(home, ".auxly", "skills")
 	_ = os.MkdirAll(auxlySkillsDir, 0755)
 
-	commands := map[string]string{
-		"auxly-init": `---
-name: auxly-init
-description: Run the onboarding training, scan current context, and synchronize existing chat context/preferences to Auxly.
----
-# /auxly-init
+	downloadsDir := downloadsSkillsDir(home)
+	_ = os.MkdirAll(downloadsDir, 0755)
 
-You must immediately invoke the 'auxly_skill_init' MCP tool to align your session instructions, scan current context and system prompts, and synchronize existing facts/preferences to the Auxly vault. Show the beautiful onboarding guide and confirmation card!`,
-
-		"auxly-memory": `---
-name: auxly-memory
-description: Retrieve and display a consolidated markdown profile of the user's identity, preferences, and system infrastructure.
----
-# /auxly-memory
-
-You must immediately invoke the 'auxly_skill_memory' MCP tool to retrieve and display the consolidated profile of the user's identity, preferences, and infrastructure. Do not ask for further clarification, simply run the tool and show the output!`,
-
-		"auxly-max": `---
-name: auxly-max
-description: Exhaustively harvest everything this agent knows from the current session and push it up into the memory vault, slice-by-category.
----
-# /auxly-max
-
-You must immediately invoke the 'auxly_skill_max' MCP tool to obtain the harvest directive. Then scan your ENTIRE session, extract every fact you know about the user, and write them all up slice-by-category via the sync/write tools (pass the matching 'category' for each slice). Route the user's OWN private-life facts — family, relationships, health, and their personal legal/financial matters (their own lawsuit/court case, divorce, custody, personal loan, salary) — into personal.md via category 'personal'; a company/business legal or money matter is NOT personal. Judge by context: a personal legal case is never a 'project' or 'business' entry. This is push-only — do NOT pull memory. Finally, present a beautiful success message confirming how many facts were harvested into which files!`,
-
-		"auxly-bootstrap": `---
-name: auxly-bootstrap
-description: Generate a copyable onboarding block to paste into a tool that does not have Auxly installed (e.g. ChatGPT) so it can read/write your memory.
----
-# /auxly-bootstrap
-
-You must immediately invoke the 'auxly_skill_bootstrap' MCP tool to generate the dynamic, paste-ready onboarding prompt block (tailored with the live binary path, provider, and gateway port). Only SHOW the copyable block — do NOT sync anything yourself. The user copies it into a foreign agent, which then reads/writes their memory by following the block's instructions!`,
-
-		"auxly-sync": `---
-name: auxly-sync
-description: Append and synchronize a new fact, preference, or system detail using smart automated delta-merges into memory files (preferences.md, identity.md, infra.md, products.md, projects.md, daily.md, personal.md, etc.).
-argument-hint: "<fact or preference statement to sync>"
----
-# /auxly-sync
-
-You must immediately invoke the 'auxly_skill_sync' MCP tool. Pass the user's statement as the 'content' argument AND set the 'category' argument to the best-fit category from the taxonomy shown in the tool's footer (identity, personal, preferences, infra, products, projects, daily, business, agents) — you understand the fact, so you pick the file; only omit 'category' if you are genuinely unsure, in which case the router will guess. Route the user's OWN private-life facts — their family, health, relationships, and their PERSONAL legal/financial matters (their own lawsuit, court case, divorce, custody, personal loan, salary) — to category 'personal'; a company/business legal or money matter is NOT personal (use 'business'). Judge by context, not the topic word, and when a fact is about the user's private life, 'personal' wins over any topical category (a personal legal case is never a 'project'). This performs a smart automated delta-merge into the chosen memory file. Run the tool and display the confirmation output!`,
-
-		"auxly-pending": `---
-name: auxly-pending
-description: Manage pending memory changes awaiting human approval directly inside the active chat panel.
-argument-hint: "[list | approve <id> | reject <id>]"
----
-# /auxly-pending
-
-You must immediately invoke the 'auxly_skill_pending' MCP tool, passing the provided arguments (such as action: list/approve/reject, and target ID) to manage the secure memory write queue. Simply run the tool and display the results!`,
-
-		"auxly-status": `---
-name: auxly-status
-description: Show real-time system diagnostics, active client connections, database sizes, and local daemon status.
----
-# /auxly-status
-
-You must immediately invoke the 'auxly_skill_status' MCP tool to retrieve and display the real-time system diagnostics, active connections, and database metrics. Do not perform other actions. Simply run the tool and show the diagnostics screen!`,
-
-		"auxly-forget": `---
-name: auxly-forget
-description: Search memory vault and prune obsolete or outdated bullet statements cleanly from memory files.
-argument-hint: "<query string to search and delete>"
----
-# /auxly-forget
-
-You must immediately invoke the 'auxly_skill_forget' MCP tool, passing the user's provided input as the 'query' argument, to search across all memory files and delete matching obsolete lines cleanly. Simply run the tool and display the deletion diff!`,
-
-		"auxly-learn": `---
-name: auxly-learn
-description: Read the unified memory vault and internalize it, grounding the agent in everything already known about the user for the rest of the session.
-argument-hint: "[folder] [topic]"
----
-# /auxly-learn
-
-You must immediately invoke the 'auxly_skill_learn' MCP tool to read the memory vault and internalize it. Pass the optional 'folder' (a category like infra/projects) and 'topic' arguments to scope the read: no args = learn everything; folder only = read that category; folder + topic = focused read. Absorb the returned content and operate with it loaded for the rest of the session!`,
-	}
-
-	updateReminder := "\n\nIMPORTANT: You are expected to proactively update the user's unified Auxly memory vault. Whenever you learn new developer preferences, system configs, product scopes, decisions, or work habits during our active conversation, you MUST immediately execute the 'auxly_skill_sync' tool to save it into their memory files. Keep the memory synchronized!"
-
-	for skillName, content := range commands {
-		// 1. Write to ~/.auxly/skills/
-		zipPath1 := filepath.Join(auxlySkillsDir, skillName+".zip")
-		writeZipFile(zipPath1, skillName, content+updateReminder)
-
-		// 2. Write to ~/Downloads/auxly-skills-v<Version>/ (version on the folder)
-		downloadsDir := downloadsSkillsDir(home)
-		_ = os.MkdirAll(downloadsDir, 0755)
-		zipPath2 := filepath.Join(downloadsDir, skillName+".zip")
-		writeZipFile(zipPath2, skillName, content+updateReminder)
+	// Single source of truth: internal/skills. The ~/.auxly working copy and the
+	// versioned Downloads folder get the SAME body, so the export can never drift
+	// from what setup installs.
+	for _, s := range skills.DesktopSkills() {
+		content := s.Body + skills.UpdateReminder
+		writeZipFile(filepath.Join(auxlySkillsDir, s.Name+".zip"), s.Name, content)
+		writeZipFile(filepath.Join(downloadsDir, s.Name+".zip"), s.Name, content)
 	}
 }
 
