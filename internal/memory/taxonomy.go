@@ -46,8 +46,8 @@ var Taxonomy = []Category{
 		Slug:        "personal",
 		File:        "personal.md",
 		Tier:        TierPersonal,
-		Description: "PRIVATE life — family, relationships, health, personal legal/financial matters",
-		Keywords:    []string{"wife", "husband", "son", "daughter", "child", "children", "kids", "family", "pregnan", "baby", "newborn", "marriage", "married", "divorce", "health", "medical", "hanan"},
+		Description: "PRIVATE life — the USER'S OWN family, relationships, health, and their PERSONAL legal/financial matters (their own lawsuit, court case, divorce, custody, personal loan, salary, bank). NOT a company/business legal or financial matter — judge by context, not the topic word: if it is about the user as an individual or their family it is PERSONAL; if it is about the company/a client/the business it is NOT.",
+		Keywords:    []string{"wife", "husband", "son", "daughter", "child", "children", "kids", "family", "pregnan", "baby", "newborn", "marriage", "married", "divorce", "custody", "alimony", "spouse", "fiance", "girlfriend", "boyfriend", "mother", "father", "sibling", "health", "medical", "hanan"},
 	},
 	{
 		Slug:        "preferences",
@@ -88,7 +88,7 @@ var Taxonomy = []Category{
 		Slug:        "business",
 		File:        "business.md",
 		Tier:        TierShared,
-		Description: "strategy, financial, company-level facts",
+		Description: "company/organizational matters — strategy, revenue, investors, pricing, AND the COMPANY's legal, financial, and contractual dealings (a company/client legal or money matter, not the user's own personal one)",
 		Keywords:    []string{"strategy", "revenue", "investor", "valuation", "market", "competitor", "pricing"},
 	},
 	{
@@ -185,6 +185,16 @@ func IsPersonalFile(file string) bool {
 		return c.Tier == TierPersonal
 	}
 	return false
+}
+
+// IsEditableFile reports whether a file is a user-editable memory file — i.e. a
+// canonical taxonomy category. Per-agent instruction/rules files (CLAUDE.md,
+// CODEX.md, GEMINI.md, …), the protocol doc (providers.md), and the generated
+// aggregate (unified_memory.md) are NOT in the taxonomy and stay read-only in
+// the dashboard, so a hand-edit can never clobber a generated or rules file.
+func IsEditableFile(file string) bool {
+	_, ok := CategoryForFile(file)
+	return ok
 }
 
 // RenderForPrompt produces the canonical taxonomy block injected into skill

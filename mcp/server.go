@@ -397,7 +397,7 @@ func (s *Server) getTools() []tool {
 				Type: "object",
 				Properties: map[string]property{
 					"content":  {Type: "string", Description: "The specific fact or detail to synchronize to memory"},
-					"category": {Type: "string", Description: "Target context area: preferences (default), identity, infra, products, projects, daily, agents, business"},
+					"category": {Type: "string", Description: "Target file. Use 'personal' for the USER'S OWN private life — their family, health, relationships, and their personal legal/financial matters (their own lawsuit, divorce, custody, personal loan, salary); a company/business legal or money matter is NOT personal, use 'business'. Other areas: preferences (default), identity, infra, products, projects, daily, agents. When a fact is about the user's private life, choose 'personal' — it overrides any topical category."},
 					"scope":    {Type: "string", Description: "Vault scoping: 'global' (default) or project 'workspace'"},
 				},
 				Required: []string{"content"},
@@ -882,9 +882,14 @@ write it up. Do NOT pull or display the vault — this is push-only.
    already in that file and only add genuinely new or updated facts — never
    re-write facts already saved.
 
-4. PERSONAL/PRIVATE facts (family, relationships, health, personal legal/financial
-   matters) go to personal.md via category 'personal'. Keep them out of the shared
-   files.
+4. PERSONAL/PRIVATE facts go to personal.md via category 'personal' — and keep
+   them OUT of the shared files. This means the USER'S OWN family, relationships,
+   health, and their PERSONAL legal/financial matters (their own lawsuit/court
+   case, divorce, custody, personal loan, salary, bank). Judge by context, not the
+   topic word: a legal or money matter about the USER or their family is PERSONAL;
+   the same kind of matter about the COMPANY/a client/the business is 'business'.
+   When a fact is the user's private affair, 'personal' ALWAYS wins — a personal
+   legal case is NEVER a 'project' or 'business' entry.
 
 Each slice is small, atomic, trust-gated, and auditable. Write every slice now —
 work category by category until you have emptied your knowledge of the user into

@@ -61,9 +61,20 @@ Other principles (all subordinate to RULE 0):
    preserve every distinct fact, number, and identifier. Brevity of WORDING only.
 4. INTEGRITY ON MOVE: Every fact ends up in EXACTLY ONE file (the correct one) —
    never dropped, never duplicated across files.
-5. TIER BOUNDARY: Never move a fact across the personal/shared boundary.
-   personal.md holds private life facts (family, health, personal legal/financial)
-   and must never be merged into shared files or vice-versa.
+5. PERSONAL IS A ONE-WAY SINK (PRIVACY — CRITICAL):
+   - If a PRIVATE-LIFE fact about the USER as an individual (their own family,
+     health, relationships, or their OWN legal/financial matter — e.g. their
+     personal lawsuit/court case, divorce, custody, personal loan, salary, bank
+     details) is sitting in a SHARED file, you MUST MOVE it INTO personal.md.
+     This is the one boundary crossing that is REQUIRED — it is a correction, not
+     a violation (see the WORKED EXAMPLE above).
+   - You must NEVER move a fact OUT of personal.md into a shared file. Personal
+     content only ever flows TOWARD personal.md, never away from it.
+   - Judge PERSONAL vs BUSINESS by CONTEXT, not by the topic word: a legal or
+     financial matter about the USER or their family is PERSONAL (personal.md);
+     the same topic about the COMPANY, a client, or the business is SHARED
+     (business.md). When a matter is genuinely the user's private affair,
+     personal.md ALWAYS wins.
 6. JSON OUTPUT FORMAT: Output ONLY a single valid JSON object matching the schema
    below — no prose, no markdown fences outside the JSON. Include EVERY file you
    were given (plus personal.md if you moved personal facts into it):
