@@ -126,27 +126,47 @@ func hostConfigPath() (string, error) {
 	return filepath.Join(dir, "host.yaml"), nil
 }
 
-// loadHostConfig reads host.yaml. The bool reports whether the file exists.
-func loadHostConfig() (hostConfig, bool, error) {
-	var hc hostConfig
+// hostFile is the on-disk shape of host.yaml: a LIST of relays this machine
+// serves its memory to. Each relay is an independent reverse tunnel, so many
+// boxes stay connected at once. The legacy single-relay form (top-level
+// rendezvous/… with no `relays:` key) is still read and migrated on next save.
+type hostFile struct {
+	Relays []hostConfig `yaml:"relays"`
+}
+
+// loadHostConfigs returns every configured relay. The bool reports whether the
+// file exists. A legacy single-relay file is returned as a one-element slice so
+// older configs keep working and get migrated to the list form on next save.
+func loadHostConfigs() ([]hostConfig, bool, error) {
 	path, err := hostConfigPath()
 	if err != nil {
-		return hc, false, err
+		return nil, false, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return hc, false, nil
+			return nil, false, nil
 		}
-		return hc, false, fmt.Errorf("failed to read host config %s: %w", path, err)
+		return nil, false, fmt.Errorf("failed to read host config %s: %w", path, err)
 	}
+	// Prefer the new list form.
+	var hf hostFile
+	if err := yaml.Unmarshal(data, &hf); err == nil && len(hf.Relays) > 0 {
+		return hf.Relays, true, nil
+	}
+	// Fall back to the legacy single-relay form.
+	var hc hostConfig
 	if err := yaml.Unmarshal(data, &hc); err != nil {
-		return hc, true, fmt.Errorf("failed to parse host config %s: %w", path, err)
+		return nil, true, fmt.Errorf("failed to parse host config %s: %w", path, err)
 	}
-	return hc, true, nil
+	if strings.TrimSpace(hc.Rendezvous) == "" {
+		return nil, true, nil
+	}
+	return []hostConfig{hc}, true, nil
 }
 
-func saveHostConfig(hc hostConfig) error {
+// saveHostConfigs writes the relay list (always the new `relays:` form).
+func saveHostConfigs(relays []hostConfig) error {
 	dir, err := auxlyDir()
 	if err != nil {
 		return err
@@ -154,7 +174,7 @@ func saveHostConfig(hc hostConfig) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create %s: %w", dir, err)
 	}
-	data, err := yaml.Marshal(hc)
+	data, err := yaml.Marshal(hostFile{Relays: relays})
 	if err != nil {
 		return fmt.Errorf("failed to marshal host config: %w", err)
 	}
@@ -163,6 +183,63 @@ func saveHostConfig(hc hostConfig) error {
 		return fmt.Errorf("failed to write host config %s: %w", path, err)
 	}
 	return nil
+}
+
+// upsertHostConfig adds a relay, or replaces an existing one with the same
+// rendezvous. This is the fix for the singleton bug: connecting a new box no
+// longer tears down its siblings' tunnels — it just appends another.
+func upsertHostConfig(hc hostConfig) error {
+	relays, _, err := loadHostConfigs()
+	if err != nil {
+		return err
+	}
+	out := make([]hostConfig, 0, len(relays)+1)
+	replaced := false
+	for _, r := range relays {
+		if strings.EqualFold(strings.TrimSpace(r.Rendezvous), strings.TrimSpace(hc.Rendezvous)) {
+			out = append(out, hc)
+			replaced = true
+		} else {
+			out = append(out, r)
+		}
+	}
+	if !replaced {
+		out = append(out, hc)
+	}
+	return saveHostConfigs(out)
+}
+
+// removeHostConfig drops the relay with the given rendezvous and returns how
+// many relays remain configured.
+func removeHostConfig(rendezvous string) (int, error) {
+	relays, _, err := loadHostConfigs()
+	if err != nil {
+		return 0, err
+	}
+	out := make([]hostConfig, 0, len(relays))
+	for _, r := range relays {
+		if !strings.EqualFold(strings.TrimSpace(r.Rendezvous), strings.TrimSpace(rendezvous)) {
+			out = append(out, r)
+		}
+	}
+	if err := saveHostConfigs(out); err != nil {
+		return 0, err
+	}
+	return len(out), nil
+}
+
+// loadHostConfig returns the FIRST configured relay — a convenience for the
+// status/remote/offer printers that describe "the relay". Multi-relay callers
+// use loadHostConfigs.
+func loadHostConfig() (hostConfig, bool, error) {
+	relays, ok, err := loadHostConfigs()
+	if err != nil {
+		return hostConfig{}, false, err
+	}
+	if !ok || len(relays) == 0 {
+		return hostConfig{}, false, nil
+	}
+	return relays[0], true, nil
 }
 
 func (hc hostConfig) localPort() int {
@@ -480,8 +557,10 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 	// useless without a local sshd to forward to.
 	checkLocalSSHD(hc.localPort())
 
-	// Persist before doing anything else so `tunnel`/`status` can read it.
-	if err := saveHostConfig(hc); err != nil {
+	// Persist before doing anything else so `tunnel`/`status` can read it. Upsert
+	// (not overwrite) so connecting this box keeps every previously-connected box's
+	// tunnel alive — the keep-alive supervises one tunnel per relay.
+	if err := upsertHostConfig(hc); err != nil {
 		return err
 	}
 	fmt.Printf("💾 Saved relay config (%s, reverse port %d → local :%d)\n", relayTarget, hc.ReversePort, hc.localPort())
@@ -563,14 +642,23 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 }
 
 func runHostProvision(cmd *cobra.Command, args []string) error {
-	hc, ok, err := loadHostConfig()
+	relays, ok, err := loadHostConfigs()
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !ok || len(relays) == 0 {
 		return fmt.Errorf("no host config — run `auxly host setup` first")
 	}
-	return provisionConsumer(hc)
+	var firstErr error
+	for _, hc := range relays {
+		if err := provisionConsumer(hc); err != nil {
+			fmt.Printf("   ⚠ provisioning %s incomplete: %v\n", hc.Rendezvous, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
 }
 
 // checkLocalSSHD warns if nothing is listening on this machine's sshd port.
@@ -596,19 +684,42 @@ func checkLocalSSHD(port int) {
 // ---------------------------------------------------------------------------
 
 func runHostTunnel(cmd *cobra.Command, args []string) error {
-	hc, ok, err := loadHostConfig()
+	relays, ok, err := loadHostConfigs()
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !ok || len(relays) == 0 {
 		return fmt.Errorf("no host config — run `auxly host setup` first")
 	}
-	if err := validateRendezvous(hc); err != nil {
-		return err
+	// Supervise one reverse tunnel per relay, each with its own restart loop, so a
+	// flap (or a box going offline) on one tunnel never drops the others. This
+	// process is owned by the per-OS keep-alive (launchd/systemd/Task Scheduler)
+	// and blocks forever once at least one tunnel is supervised.
+	started := 0
+	for _, hc := range relays {
+		if verr := validateRendezvous(hc); verr != nil {
+			fmt.Fprintf(os.Stderr, "skipping invalid relay %q: %v\n", hc.Rendezvous, verr)
+			continue
+		}
+		go superviseTunnel(hc)
+		started++
 	}
-	c := exec.Command("ssh", tunnelArgs(hc)...)
-	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return c.Run()
+	if started == 0 {
+		return fmt.Errorf("no valid relay to tunnel — run `auxly host setup` first")
+	}
+	select {} // block forever; the keep-alive service owns our lifecycle
+}
+
+// superviseTunnel runs one relay's reverse tunnel, restarting it with a short
+// backoff whenever it exits, forever. Each relay gets its own goroutine so the
+// tunnels are fully independent.
+func superviseTunnel(hc hostConfig) {
+	for {
+		c := exec.Command("ssh", tunnelArgs(hc)...)
+		c.Stdout, c.Stderr = os.Stdout, os.Stderr
+		_ = c.Run() // returns when the tunnel drops; loop reconnects
+		time.Sleep(5 * time.Second)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -641,25 +752,16 @@ func runHostDown(cmd *cobra.Command, args []string) error {
 // ---------------------------------------------------------------------------
 
 func runHostStatus(cmd *cobra.Command, args []string) error {
-	hc, ok, err := loadHostConfig()
+	relays, ok, err := loadHostConfigs()
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !ok || len(relays) == 0 {
 		fmt.Println("No host tunnel configured. Run `auxly host setup` to make this")
 		fmt.Println("machine's memory reachable from a remote box through a relay.")
 		return nil
 	}
-	fmt.Println("🛰️  Auxly memory host")
-	fmt.Printf("   Relay        : %s", hc.Rendezvous)
-	if hc.RendezvousPort != 0 && hc.RendezvousPort != defaultSSHPort {
-		fmt.Printf(":%d", hc.RendezvousPort)
-	}
-	fmt.Println()
-	fmt.Printf("   Reverse port : %d (on the relay → this machine :%d)\n", hc.ReversePort, hc.localPort())
-	if hc.HostUser != "" {
-		fmt.Printf("   Host login   : %s\n", hc.HostUser)
-	}
+	fmt.Printf("🛰️  Auxly memory host — serving %d box(es)\n", len(relays))
 
 	loaded, detail := keepAliveStatus()
 	if loaded {
@@ -667,7 +769,19 @@ func runHostStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("   Keep-alive   : ✗ %s\n", detail)
 	}
-	reportTunnelLive(hc)
+
+	for i, hc := range relays {
+		fmt.Printf("\n   [%d] Relay      : %s", i+1, hc.Rendezvous)
+		if hc.RendezvousPort != 0 && hc.RendezvousPort != defaultSSHPort {
+			fmt.Printf(":%d", hc.RendezvousPort)
+		}
+		fmt.Println()
+		fmt.Printf("       Reverse    : %d (on the relay → this machine :%d)\n", hc.ReversePort, hc.localPort())
+		if hc.HostUser != "" {
+			fmt.Printf("       Host login : %s\n", hc.HostUser)
+		}
+		reportTunnelLive(hc)
+	}
 	return nil
 }
 
@@ -708,30 +822,35 @@ func reportTunnelLive(hc hostConfig) {
 // ---------------------------------------------------------------------------
 
 func runHostRemote(cmd *cobra.Command, args []string) error {
-	hc, ok, err := loadHostConfig()
+	relays, ok, err := loadHostConfigs()
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !ok || len(relays) == 0 {
 		return fmt.Errorf("no host config — run `auxly host setup` first")
 	}
-	printConsumerCommand(hc)
+	for _, hc := range relays {
+		printConsumerCommand(hc)
+	}
 	return nil
 }
 
 func runHostOffer(cmd *cobra.Command, args []string) error {
-	hc, ok, err := loadHostConfig()
+	relays, ok, err := loadHostConfigs()
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !ok || len(relays) == 0 {
 		return fmt.Errorf("no host config — run `auxly host setup` first")
 	}
-	if err := writeRelayOffer(hc); err != nil {
-		return err
+	for _, hc := range relays {
+		if err := writeRelayOffer(hc); err != nil {
+			fmt.Printf("⚠ Couldn't publish the offer to %s: %v\n", hc.Rendezvous, err)
+			continue
+		}
+		fmt.Printf("✓ Published connect offer %q to the relay (%s).\n", offerName(), hc.Rendezvous)
 	}
-	fmt.Printf("✓ Published connect offer %q to the relay (%s).\n", offerName(), hc.Rendezvous)
-	fmt.Println("  On the remote box: `auxly connect auto` (or /auxly-remote-connect in its agent).")
+	fmt.Println("  On each remote box: `auxly connect auto` (or /auxly-remote-connect in its agent).")
 	return nil
 }
 

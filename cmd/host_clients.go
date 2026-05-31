@@ -246,6 +246,18 @@ func runHostForget(cmd *cobra.Command, args []string) error {
 	if err := removeClientEntry(c.Name); err != nil {
 		return err
 	}
+	// Drop this box's reverse tunnel too (its relay rendezvous == the box target),
+	// then refresh the keep-alive so the supervisor stops tunneling to it. The
+	// sibling boxes' tunnels are unaffected.
+	if remaining, rerr := removeHostConfig(c.Target); rerr == nil {
+		if remaining > 0 {
+			if err := installKeepAlive(); err != nil {
+				fmt.Printf("   ⚠ Couldn't refresh the tunnel supervisor: %v\n", err)
+			}
+		} else {
+			_ = uninstallKeepAlive()
+		}
+	}
 	fmt.Printf("🗑️  Removed %q from the connections list.\n", c.Name)
 	return nil
 }

@@ -192,6 +192,7 @@ type hostInfo struct {
 	RendezvousPort int    `yaml:"rendezvous_port"`
 	ReversePort    int    `yaml:"reverse_port"`
 	HostUser       string `yaml:"host_user"`
+	RelayCount     int    `yaml:"-"` // number of relays served (1 unless multi-relay)
 }
 
 // clientRow mirrors an entry in ~/.auxly/clients.yaml — a remote box this Mac
@@ -224,7 +225,8 @@ func readClients() []clientRow {
 }
 
 // readHostInfo loads ~/.auxly/host.yaml; ok is false when this machine is not
-// configured as a relay host.
+// configured as a relay host. It reads the multi-relay list form (and the legacy
+// single-relay form), reporting the first relay plus the total count.
 func readHostInfo() (hostInfo, bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -234,27 +236,70 @@ func readHostInfo() (hostInfo, bool) {
 	if err != nil {
 		return hostInfo{}, false
 	}
+	// New multi-relay form: a list of relays under `relays:`.
+	var list struct {
+		Relays []hostInfo `yaml:"relays"`
+	}
+	if yaml.Unmarshal(data, &list) == nil && len(list.Relays) > 0 {
+		h := list.Relays[0]
+		h.RelayCount = len(list.Relays)
+		return h, true
+	}
+	// Legacy single-relay form.
 	var h hostInfo
 	if yaml.Unmarshal(data, &h) != nil || strings.TrimSpace(h.Rendezvous) == "" {
 		return hostInfo{}, false
 	}
+	h.RelayCount = 1
 	return h, true
 }
 
+// The Remote tab stacks up to two selectable lists: the connected boxes this
+// machine HOSTS (shown when hostOK) followed by the memory hosts it CONSUMES
+// (remotes.yaml). A single cursor indexes them as one virtual list — clients
+// first, then remotes — so a machine that is BOTH a host and a consumer can
+// still select and manage its consumer remotes (not just its boxes).
+
+// clientCount is the number of navigable connected-box rows. Boxes are only
+// selectable when this machine is configured as a host (the section is hidden
+// otherwise), so this is 0 unless hostOK.
+func (m sshModel) clientCount() int {
+	if m.hostOK {
+		return len(m.clients)
+	}
+	return 0
+}
+
+// cursorOnClient returns the connected box under the cursor, when the cursor is
+// in the clients region (the first clientCount() slots).
+func (m sshModel) cursorOnClient() (clientRow, bool) {
+	if m.cursor >= 0 && m.cursor < m.clientCount() {
+		return m.clients[m.cursor], true
+	}
+	return clientRow{}, false
+}
+
+// cursorOnRemote returns the consumer remote under the cursor, when the cursor
+// is in the remotes region (the slots after the clients).
+func (m sshModel) cursorOnRemote() (remoteEntry, bool) {
+	i := m.cursor - m.clientCount()
+	if i >= 0 && i < len(m.remotes) {
+		return m.remotes[i], true
+	}
+	return remoteEntry{}, false
+}
+
 func (m sshModel) selectedName() string {
-	if m.cursor >= 0 && m.cursor < len(m.remotes) {
-		return m.remotes[m.cursor].Name
+	if r, ok := m.cursorOnRemote(); ok {
+		return r.Name
 	}
 	return ""
 }
 
-// selectedClient returns the highlighted connection (host side) and whether one
-// is selected.
+// selectedClient returns the highlighted connected box (host side) and whether
+// the cursor is on one.
 func (m sshModel) selectedClient() (clientRow, bool) {
-	if m.cursor >= 0 && m.cursor < len(m.clients) {
-		return m.clients[m.cursor], true
-	}
-	return clientRow{}, false
+	return m.cursorOnClient()
 }
 
 func exePath() string {
@@ -517,13 +562,10 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 	return m, nil
 }
 
-// listLen is the length of the active selectable list — the connected boxes
-// (host side) when present, otherwise the consumer remotes.
+// listLen is the number of selectable rows across both stacked lists: the
+// connected boxes (shown when hostOK) plus the consumer remotes.
 func (m sshModel) listLen() int {
-	if len(m.clients) > 0 {
-		return len(m.clients)
-	}
-	return len(m.remotes)
+	return m.clientCount() + len(m.remotes)
 }
 
 func clampCursor(c, n int) int {
@@ -565,8 +607,33 @@ func (m sshModel) handleMouse(msg tea.MouseMsg) (sshModel, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
 	}
-	idx := msg.Y - m.listAnchorY()
-	if idx >= 0 && idx < m.listLen() {
+	anchor := m.listAnchorY()
+	nc := m.clientCount()
+	if m.hostOK {
+		// Client rows (or a single "None yet" placeholder when there are none)
+		// start at the anchor.
+		if nc > 0 {
+			if cidx := msg.Y - anchor; cidx >= 0 && cidx < nc {
+				m.cursor = cidx
+				return m, nil
+			}
+		}
+		// Consumer remotes are drawn below the client block: the boxes (or the
+		// placeholder), then a blank + the "HOSTS THIS MACHINE CONNECTS TO" header
+		// + a blank (3 lines). Rare live-only rows can shift this; keyboard ↑/↓ is
+		// always exact regardless.
+		clientBlock := nc
+		if clientBlock == 0 {
+			clientBlock = 1
+		}
+		rAnchor := anchor + clientBlock + 3
+		if ridx := msg.Y - rAnchor; ridx >= 0 && ridx < len(m.remotes) {
+			m.cursor = nc + ridx
+		}
+		return m, nil
+	}
+	// Pure consumer: the anchor points straight at the first remote row.
+	if idx := msg.Y - anchor; idx >= 0 && idx < len(m.remotes) {
 		m.cursor = idx
 	}
 	return m, nil
@@ -582,11 +649,11 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 	case sshModeConfirm:
 		switch msg.String() {
 		case "y", "Y", "enter":
-			if c, ok := m.selectedClient(); ok && len(m.clients) > 0 {
+			if c, ok := m.cursorOnClient(); ok {
 				return m.beginCapturedSub("Removing "+c.Name, "host", "forget", c.Name)
 			}
-			if name := m.selectedName(); name != "" {
-				return m.beginCaptured("Removing "+name, "remove", name)
+			if r, ok := m.cursorOnRemote(); ok {
+				return m.beginCaptured("Removing "+r.Name, "remove", r.Name)
 			}
 			m.mode = sshModeList
 		case "n", "N", "esc":
@@ -656,21 +723,19 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		return m.handlePasswordKey(msg)
 
 	default: // list mode
-		// When this Mac has connected boxes (host side), the cursor manages THEM.
-		managingClients := len(m.clients) > 0
+		// One cursor spans both stacked lists (boxes then remotes); ↑/↓ moves
+		// across the whole thing so every row is reachable.
 		switch msg.String() {
 		case "j", "down":
-			max := len(m.clients)
-			if !managingClients {
-				max = len(m.remotes)
-			}
-			if m.cursor < max-1 {
+			if m.cursor < m.listLen()-1 {
 				m.cursor++
 			}
+			return m, nil
 		case "k", "up":
 			if m.cursor > 0 {
 				m.cursor--
 			}
+			return m, nil
 		case "c":
 			m.mode = sshModeForm
 			m.formStep = formStepMethod
@@ -679,42 +744,40 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 			m.editingHost = true // capture all keys for the in-TUI form
 			return m, nil
 		}
-		if managingClients {
-			if c, ok := m.selectedClient(); ok {
-				switch msg.String() {
-				case "d":
-					m.status = ""
-					return m.beginCapturedSub("Disconnecting "+c.Name, "host", "disconnect", c.Name)
-				case "r":
-					m.status = ""
-					return m.beginCapturedSub("Reconnecting "+c.Name, "host", "reconnect", c.Name)
-				case "e":
-					m.rename = c.Name
-					m.mode = sshModeRename
-					m.editingHost = true
-					return m, nil
-				case "x":
-					m.mode = sshModeConfirm
-					return m, nil
-				}
+		// Row actions dispatch on WHAT the cursor is on, so a machine that is both
+		// a host and a consumer can act on either list. Connected boxes (host side):
+		if c, ok := m.cursorOnClient(); ok {
+			switch msg.String() {
+			case "d":
+				m.status = ""
+				return m.beginCapturedSub("Disconnecting "+c.Name, "host", "disconnect", c.Name)
+			case "r":
+				m.status = ""
+				return m.beginCapturedSub("Reconnecting "+c.Name, "host", "reconnect", c.Name)
+			case "e":
+				m.rename = c.Name
+				m.mode = sshModeRename
+				m.editingHost = true
+				return m, nil
+			case "x":
+				m.mode = sshModeConfirm
+				return m, nil
 			}
 			return m, nil
 		}
-		// Consumer-remote fallback (this Mac connects TO another host).
-		switch msg.String() {
-		case "t":
-			if name := m.selectedName(); name != "" {
+		// Consumer remotes (this machine connects TO another host):
+		if r, ok := m.cursorOnRemote(); ok {
+			switch msg.String() {
+			case "t":
 				m.status = ""
-				return m.beginCaptured("Testing "+name, "test", name)
-			}
-		case "p", "enter":
-			if name := m.selectedName(); name != "" {
-				m.preview = mcpConfigJSON(name)
+				return m.beginCaptured("Testing "+r.Name, "test", r.Name)
+			case "p", "enter":
+				m.preview = mcpConfigJSON(r.Name)
 				m.mode = sshModePrint
-			}
-		case "d", "x":
-			if m.selectedName() != "" {
+				return m, nil
+			case "d", "x":
 				m.mode = sshModeConfirm
+				return m, nil
 			}
 		}
 		return m, nil
@@ -1014,7 +1077,6 @@ func (m sshModel) View() string {
 	lines = append(lines, "")
 
 	selRow := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
-	managingClients := len(m.clients) > 0
 
 	if m.hostOK {
 		// ── This machine as a HOST + the boxes connected to it ───────
@@ -1024,7 +1086,11 @@ func (m sshModel) View() string {
 			relay = fmt.Sprintf("%s:%d", relay, m.host.RendezvousPort)
 		}
 		lines = append(lines, cyan.Render("THIS MACHINE IS A MEMORY HOST")+"  "+ok.Render("● serving"))
-		lines = append(lines, "  "+dim.Render("Relay   ")+relay+dim.Render(fmt.Sprintf("   reverse port %d → local :22", m.host.ReversePort)))
+		if m.host.RelayCount > 1 {
+			lines = append(lines, "  "+dim.Render(fmt.Sprintf("Relays  %d boxes", m.host.RelayCount))+dim.Render("   each tunnels back to this machine (independent)"))
+		} else {
+			lines = append(lines, "  "+dim.Render("Relay   ")+relay+dim.Render(fmt.Sprintf("   reverse port %d → local :22", m.host.ReversePort)))
+		}
 		lines = append(lines, "  "+dim.Render("Boxes below use your memory through it.  Down it with ")+accent.Render("auxly host down"))
 		lines = append(lines, "")
 		lines = append(lines, cyan.Render("CONNECTED BOXES")+dim.Render("   (using your memory)"))
@@ -1107,8 +1173,9 @@ func (m sshModel) View() string {
 					method = "—"
 				}
 				row := fmt.Sprintf("%-20s %-24s %s", truncate(name, 20), truncate(target, 24), dim.Render("["+method+"]"))
-				// Only the consumer list is the cursor target when there are no clients.
-				if !managingClients && i == m.cursor {
+				// Highlight when the unified cursor lands on this remote (the slots
+				// after the connected boxes).
+				if i == m.cursor-m.clientCount() {
 					lines = append(lines, accent.Render("▸ ")+selRow.Render(row))
 				} else {
 					lines = append(lines, "  "+row)
@@ -1351,8 +1418,17 @@ func (m sshModel) View() string {
 	default:
 		action := func(k, label string) string { return accent.Render("["+k+"]") + dim.Render(" "+label) }
 		var bar []string
-		if len(m.clients) > 0 {
-			// Managing connected boxes (host side).
+		// The action bar reflects WHAT the cursor is on so both lists stay usable.
+		if _, onRemote := m.cursorOnRemote(); onRemote {
+			// A consumer remote (this machine → another host).
+			bar = []string{
+				action("c", "Connect new"),
+				action("t", "Test"),
+				action("p", "Print config"),
+				action("d", "Remove"),
+			}
+		} else if m.clientCount() > 0 {
+			// A connected box (host side).
 			bar = []string{
 				action("c", "Connect new"),
 				action("d", "Disconnect"),
@@ -1369,11 +1445,14 @@ func (m sshModel) View() string {
 			}
 		}
 		lines = append(lines, strings.Join(bar, dim.Render("   ")))
-		if m.status != "" {
+		switch {
+		case m.status != "":
 			lines = append(lines, lipgloss.NewStyle().Foreground(ColorWarning).Render(m.status))
-		} else if len(m.clients) > 0 {
+		case m.clientCount() > 0 && len(m.remotes) > 0:
+			lines = append(lines, dim.Render("Select with ")+accent.Render("↑/↓")+dim.Render(" — boxes you host and hosts you use. Restart that box's agent after changes."))
+		case m.clientCount() > 0:
 			lines = append(lines, dim.Render("Select a box with ")+accent.Render("↑/↓")+dim.Render(" or a click, then act. Restart that box's agent after changes."))
-		} else {
+		default:
 			lines = append(lines, dim.Render("`auxly connect` in a terminal does the same — this tab is a front-end for it."))
 		}
 	}
