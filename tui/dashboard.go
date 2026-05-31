@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
@@ -52,9 +54,10 @@ type dashboardModel struct {
 	agyAuthStatus  string // last Antigravity auth result/status
 
 	// Interactive Popup & Grid Selection State
-	selectedAgent  string // E.g., "claude", "cursor", etc.
-	activeAgentTab int    // 0 = Info, 1 = Recent Writes, 2 = Connected, 3 = Usage
-	gridCursor     int    // 0 to 5 for selecting the grid box
+	selectedAgent  string      // E.g., "claude", "cursor", etc.
+	activeAgentTab int         // 0 = Info, 1 = Recent Writes, 2 = Connected, 3 = Usage
+	gridCursor     int         // index into cards
+	cards          []agentCard // detected agent brands shown in the grid (dynamic)
 }
 
 type dashboardRefreshMsg struct {
@@ -69,6 +72,7 @@ type dashboardRefreshMsg struct {
 	updateLatest    string
 	at              time.Time
 	mcpError        string
+	cards           []agentCard
 }
 
 // dashboardUpdateDoneMsg carries the result of a one-click [u] self-update.
@@ -144,7 +148,22 @@ func newDashboardModel(logger *audit.Logger, mgr *pending.Manager, memoryPath st
 		usageMgr:         usageMgr,
 		usageReports:     map[string]usage.Report{},
 		liveUsage:        config.LoadSettings().LiveUsage,
+		cards:            agentCardOrder(initialActivity(logger)),
 	}
+}
+
+// initialActivity loads the activity-provider list once at construction so a
+// manually-wired agent (e.g. Android Studio) shows on the very first paint,
+// before the first Refresh tick fills it in again.
+func initialActivity(logger *audit.Logger) []string {
+	if logger == nil {
+		return nil
+	}
+	s, err := logger.Stats()
+	if err != nil || s == nil {
+		return nil
+	}
+	return providersWithActivity(s)
 }
 
 func (m dashboardModel) Refresh() tea.Cmd {
@@ -197,6 +216,7 @@ func (m dashboardModel) Refresh() tea.Cmd {
 			updateLatest:    latest,
 			at:              time.Now(),
 			mcpError:        mcpError,
+			cards:           agentCardOrder(providersWithActivity(stats)),
 		}
 	}
 }
@@ -221,6 +241,12 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		}
 		m.lastRefresh = msg.at
 		m.mcpError = msg.mcpError
+		if len(msg.cards) > 0 {
+			m.cards = msg.cards
+		}
+		if m.gridCursor >= len(m.cards) {
+			m.gridCursor = 0
+		}
 		if m.reloaded && time.Since(m.reloadedAt) > 3*time.Second {
 			m.reloaded = false
 		}
@@ -337,7 +363,7 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			// so two-up cards and any future layout shift still hit-test cleanly.
 			const cardWidth = 30 // card content width; border/padding add a small margin
 			clickLineIdx := msg.Y - contentOffsetY
-			for _, b := range agentCardOrder() {
+			for _, b := range m.cards {
 				for idx, line := range viewLines {
 					clean := stripANSI(line)
 					col := visibleColumnOf(clean, b.name)
@@ -426,7 +452,7 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 				m.gridCursor--
 			}
 		case "right", "l":
-			if m.gridCursor%2 == 0 {
+			if m.gridCursor%2 == 0 && m.gridCursor+1 < len(m.cards) {
 				m.gridCursor++
 			}
 		case "up", "k":
@@ -434,13 +460,12 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 				m.gridCursor -= 2
 			}
 		case "down", "j":
-			if m.gridCursor <= 3 {
+			if m.gridCursor+2 < len(m.cards) {
 				m.gridCursor += 2
 			}
 		case "enter", " ":
-			brands := []string{"claude", "claude-code", "antigravity", "cursor", "codex", "gemini"}
-			if m.gridCursor >= 0 && m.gridCursor < len(brands) {
-				m.selectedAgent = brands[m.gridCursor]
+			if m.gridCursor >= 0 && m.gridCursor < len(m.cards) {
+				m.selectedAgent = m.cards[m.gridCursor].id
 				m.activeAgentTab = 0
 				if m.liveUsage {
 					return m, usageFetchCmd(m.usageMgr)
@@ -533,8 +558,9 @@ func (m dashboardModel) View() string {
 	)
 	leftCol := diagStyle.Render(diagContent)
 
-	// Right Column: Connected Agent Grid (shared order/names with the hit-tester)
-	brands := agentCardOrder()
+	// Right Column: Connected Agent Grid — only DETECTED brands (shared with the
+	// hit-tester via m.cards), so the grid scales to whatever is installed.
+	brands := m.cards
 
 	var brandCards []string
 	for idx, b := range brands {
@@ -632,6 +658,9 @@ func (m dashboardModel) View() string {
 		}
 	}
 	gridSection := strings.Join(grid, "\n")
+	if len(brands) == 0 {
+		gridSection = lipgloss.NewStyle().Foreground(ColorDim).Render("No AI agents detected on this machine.\nRun  auxly setup  to wire one up.")
+	}
 
 	rightCol := fmt.Sprintf("%s\n%s", StyleHeader.Render("📡 Connected Agent Brands"), gridSection)
 
@@ -1153,15 +1182,146 @@ type agentCard struct {
 
 // agentCardOrder is the single source of truth for the agent grid: its order,
 // ids, display names, icons, and accent colors.
-func agentCardOrder() []agentCard {
-	return []agentCard{
-		{"claude", "Claude Desktop", "🧠", "99"},
-		{"claude-code", "Claude Code CLI", "💻", "39"},
-		{"antigravity", "Antigravity", "🌌", "205"},
-		{"cursor", "Cursor", "🎯", "39"},
-		{"codex", "Codex", "💻", "34"},
-		{"gemini", "Gemini", "✨", "220"},
+// brandMeta is the display metadata per provider brand. Adding a provider to
+// detect.InstalledAgents() makes it appear here automatically; an unknown brand
+// still renders via a neutral default, so nothing is ever silently hidden.
+var brandMeta = map[string]agentCard{
+	"claude":         {"claude", "Claude Desktop", "🧠", "99"},
+	"claude-code":    {"claude-code", "Claude Code CLI", "💻", "39"},
+	"antigravity":    {"antigravity", "Antigravity", "🌌", "205"},
+	"cursor":         {"cursor", "Cursor", "🎯", "39"},
+	"codex":          {"codex", "Codex", "💻", "34"},
+	"gemini":         {"gemini", "Gemini", "✨", "220"},
+	"copilot":        {"copilot", "Copilot", "🐙", "240"},
+	"warp":           {"warp", "Warp", "⚡", "39"},
+	"void":           {"void", "Void", "🕳️", "205"},
+	"android-studio": {"android-studio", "Android Studio", "🤖", "34"},
+	"kimi":           {"kimi", "Kimi", "🌙", "34"},
+	"trae":           {"trae", "Trae", "🔷", "39"},
+}
+
+// brandOrder is the canonical card order; detected brands not listed fall to the
+// end (in detection order) so newly-added providers never need a code change here.
+var brandOrder = []string{"claude", "claude-code", "antigravity", "cursor", "codex", "gemini", "copilot", "warp", "void", "android-studio", "kimi", "trae"}
+
+// agentCardOrder returns one card per brand that is either DETECTED on this
+// machine (config/binary present) OR has audit activity (it connected and wrote,
+// even if we don't statically detect it — e.g. Android Studio, wired by hand via
+// the JetBrains AI Assistant stdio dialog, which leaves no config file to detect).
+// Deduped, in canonical order. This keeps the dashboard showing only relevant
+// agents: with 100 supported, it still shows only the ones installed or active.
+func agentCardOrder(activity []string) []agentCard {
+	var providers []string
+	for _, a := range detect.InstalledAgents() {
+		providers = append(providers, a.Provider)
 	}
+	providers = append(providers, activity...)
+	return buildAgentCards(providers)
+}
+
+// providersWithActivity returns every provider that has ANY audit history (writes
+// or connect/skill/disconnect events), sorted for determinism. This is the signal
+// that surfaces a manually-wired agent on the dashboard the moment it has activity
+// — independent of whether it can be statically detected or auto-configured.
+func providersWithActivity(stats *audit.Stats) []string {
+	if stats == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range []map[string]int{stats.TotalLogsByProvider, stats.ByProvider} {
+		for p := range m {
+			if p != "" && !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// providerAlias folds finer-grained audit provider tags onto their dashboard
+// brand so one brand shows one card. The audit log records per-surface tags
+// (e.g. antigravity-ide / -cli / -agent) and the occasional hand-typed variant;
+// the dashboard groups them under the brand. Keep keys lowercase.
+var providerAlias = map[string]string{
+	"antigravity-ide":   "antigravity",
+	"antigravity-cli":   "antigravity",
+	"antigravity-agent": "antigravity",
+	"as":                "android-studio",
+}
+
+// nonAgentProviders are audit "providers" that are not user-facing agents and
+// must never get a dashboard card (internal bookkeeping / empty).
+var nonAgentProviders = map[string]bool{"system": true, "": true}
+
+// canonicalProvider normalizes an audit/detect provider tag to its dashboard
+// brand id, returning "" for tags that should not produce a card at all.
+func canonicalProvider(p string) string {
+	p = strings.ToLower(strings.TrimSpace(p))
+	if nonAgentProviders[p] {
+		return ""
+	}
+	if a, ok := providerAlias[p]; ok {
+		return a
+	}
+	return p
+}
+
+// buildAgentCards is the pure mapping behind agentCardOrder (split out so it's
+// testable without depending on what's installed on the test machine): known
+// brands first in canonical brandOrder, then any unknown providers appended in
+// order with a neutral card. Provider tags are canonicalized (per-surface tags
+// folded to their brand, internal tags dropped). Deduped, deterministic.
+func buildAgentCards(detected []string) []agentCard {
+	canon := make([]string, 0, len(detected))
+	for _, p := range detected {
+		if c := canonicalProvider(p); c != "" {
+			canon = append(canon, c)
+		}
+	}
+	detected = canon
+
+	present := map[string]bool{}
+	for _, p := range detected {
+		if p != "" {
+			present[p] = true
+		}
+	}
+
+	var cards []agentCard
+	emitted := map[string]bool{}
+	for _, id := range brandOrder {
+		if present[id] && !emitted[id] {
+			emitted[id] = true
+			cards = append(cards, brandMeta[id])
+		}
+	}
+	for _, p := range detected {
+		if p == "" || emitted[p] {
+			continue
+		}
+		emitted[p] = true
+		if meta, ok := brandMeta[p]; ok {
+			cards = append(cards, meta)
+		} else {
+			cards = append(cards, agentCard{id: p, name: titleCaseBrand(p), icon: "🔌", color: "240"})
+		}
+	}
+	return cards
+}
+
+// titleCaseBrand turns a provider key like "my-agent" into "My Agent" for display.
+func titleCaseBrand(s string) string {
+	s = strings.ReplaceAll(s, "-", " ")
+	parts := strings.Fields(s)
+	for i, p := range parts {
+		if len(p) > 0 {
+			parts[i] = strings.ToUpper(p[:1]) + p[1:]
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // visibleColumnOf returns the visible (terminal cell) column at which substr

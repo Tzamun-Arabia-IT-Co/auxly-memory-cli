@@ -1,6 +1,33 @@
 package tui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+)
+
+func TestProvidersWithActivity(t *testing.T) {
+	// nil stats → no providers (no panic).
+	if got := providersWithActivity(nil); got != nil {
+		t.Errorf("providersWithActivity(nil) = %v, want nil", got)
+	}
+	// Unions both maps, dedupes, sorts deterministically. android-studio appears
+	// from activity even though it is never statically detected.
+	stats := &audit.Stats{
+		TotalLogsByProvider: map[string]int{"android-studio": 4, "claude": 2, "": 9},
+		ByProvider:          map[string]int{"claude": 1, "void": 3},
+	}
+	got := providersWithActivity(stats)
+	want := []string{"android-studio", "claude", "void"}
+	if len(got) != len(want) {
+		t.Fatalf("providersWithActivity = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("providersWithActivity = %v, want %v", got, want)
+		}
+	}
+}
 
 func TestVisibleColumnOf(t *testing.T) {
 	// Border + space + 2-cell emoji + space => name begins at column 5.
@@ -48,15 +75,65 @@ func TestTabAtColumn(t *testing.T) {
 	}
 }
 
-func TestAgentCardOrderStable(t *testing.T) {
-	cards := agentCardOrder()
-	if len(cards) != 6 {
-		t.Fatalf("expected 6 agent cards, got %d", len(cards))
+func ids(cards []agentCard) []string {
+	out := make([]string, len(cards))
+	for i, c := range cards {
+		out[i] = c.id
 	}
-	// The hit-tester scans rendered lines for these exact names; a rename in the
-	// renderer without updating the shared list would silently break clicks.
-	wantFirst := agentCard{"claude", "Claude Desktop", "🧠", "99"}
-	if cards[0] != wantFirst {
-		t.Errorf("first card = %+v, want %+v", cards[0], wantFirst)
+	return out
+}
+
+func TestBuildAgentCards(t *testing.T) {
+	// Canonical order regardless of input order, deduped.
+	cards := buildAgentCards([]string{"gemini", "claude", "cursor", "claude"})
+	if got := ids(cards); len(got) != 3 || got[0] != "claude" || got[1] != "cursor" || got[2] != "gemini" {
+		t.Fatalf("order/dedup = %v, want [claude cursor gemini]", got)
+	}
+	// Known brand carries its display metadata (the hit-tester scans for c.name).
+	if cards[0] != (agentCard{"claude", "Claude Desktop", "🧠", "99"}) {
+		t.Errorf("claude card = %+v", cards[0])
+	}
+	// Newly added IDEs are known brands.
+	if got := ids(buildAgentCards([]string{"void", "warp"})); len(got) != 2 || got[0] != "warp" || got[1] != "void" {
+		t.Errorf("warp/void order = %v, want [warp void]", got)
+	}
+	// Android Studio is a known brand (surfaced via audit activity, not detection).
+	asCards := buildAgentCards([]string{"android-studio"})
+	if len(asCards) != 1 || asCards[0].name != "Android Studio" || asCards[0].icon != "🤖" {
+		t.Errorf("android-studio card = %+v, want name 'Android Studio' icon 🤖", asCards)
+	}
+	// Unknown provider → neutral card appended AFTER known ones.
+	cards = buildAgentCards([]string{"mystery-agent", "claude"})
+	if got := ids(cards); len(got) != 2 || got[0] != "claude" || got[1] != "mystery-agent" {
+		t.Fatalf("unknown append = %v, want [claude mystery-agent]", got)
+	}
+	if cards[1].name != "Mystery Agent" || cards[1].icon != "🔌" {
+		t.Errorf("unknown card = %+v, want name 'Mystery Agent' icon 🔌", cards[1])
+	}
+	// Empty input → no cards (dashboard shows the empty-state).
+	if got := buildAgentCards(nil); len(got) != 0 {
+		t.Errorf("nil input → %d cards, want 0", len(got))
+	}
+	// Canonicalization: the four antigravity surface tags collapse to ONE card,
+	// "system" is dropped, and the stray "AS" tag folds into android-studio.
+	cards = buildAgentCards([]string{"antigravity-ide", "antigravity-cli", "antigravity-agent", "antigravity", "system", "AS", "android-studio"})
+	if got := ids(cards); len(got) != 2 || got[0] != "antigravity" || got[1] != "android-studio" {
+		t.Fatalf("canonicalization = %v, want [antigravity android-studio]", got)
+	}
+}
+
+func TestCanonicalProvider(t *testing.T) {
+	cases := map[string]string{
+		"antigravity-ide": "antigravity",
+		"AS":              "android-studio",
+		"system":          "",
+		"":                "",
+		"  Claude ":       "claude",
+		"mystery":         "mystery",
+	}
+	for in, want := range cases {
+		if got := canonicalProvider(in); got != want {
+			t.Errorf("canonicalProvider(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -60,6 +60,14 @@ func InstalledAgents() []Agent {
 			[]string{filepath.Join(home, "Library/Application Support/GitHub Copilot")}, nil},
 		{"Gemini Desktop", "gemini", "Shell",
 			[]string{filepath.Join(home, "Library/Application Support/Gemini")}, nil},
+		// Warp terminal — detected by its config dir (created once Warp runs); MCP
+		// config is wired at ~/.warp/.mcp.json by knownIDETargets.
+		{"Warp", "warp", "MCP",
+			[]string{filepath.Join(home, ".warp")}, []string{"warp"}},
+		// Void editor (open-source VS Code fork) — detected by its data dir; MCP
+		// config is wired at ~/.void-editor/mcp.json.
+		{"Void", "void", "MCP",
+			[]string{filepath.Join(home, ".void-editor")}, []string{"void"}},
 	}
 
 	for _, c := range checks {
