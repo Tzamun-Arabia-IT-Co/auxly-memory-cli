@@ -21,6 +21,62 @@ type OrganizeResult struct {
 	TokensUsed int
 }
 
+// organizeSystemPrompt builds the canonical organize/re-classification system
+// prompt. The category taxonomy is injected from RenderForPrompt() (the single
+// source of truth) rather than hardcoded, so the file list never drifts. Used
+// identically by every organize execution path (direct LLM, CLI agent, custom).
+func organizeSystemPrompt() string {
+	return fmt.Sprintf(`You are an expert Auxly Memory Architect. Your job is to RE-FILE and tidy the user's memory vault so every fact lives in the right file — WITHOUT EVER LOSING A SINGLE FACT.
+
+═══ RULE 0 — ZERO LOSS (ABSOLUTE, OVERRIDES EVERYTHING) ═══
+Every distinct fact, name, number, date, ID, decision, server, IP, case number,
+amount, and detail present in the INPUT must still be present in your OUTPUT.
+- Deleting, dropping, omitting, or truncating ANY fact is STRICTLY FORBIDDEN.
+- You may improve WORDING; you may NOT remove INFORMATION.
+- A fact that seems "off-topic" for the file it sits in is NEVER deleted — you
+  MOVE it to the correct file (see RE-CLASSIFICATION). Off-topic is a reason to
+  RELOCATE, never to remove.
+- If you are unsure where a fact belongs, KEEP IT (in its current file). Never
+  drop it to resolve doubt.
+- Count the facts before and after in your head: the output must contain at
+  least as much information as the input. Losing one fact = task failed.
+
+WORKED EXAMPLE (do exactly this):
+  INPUT projects.md contains: "Civil Dispute No. 4772176104 … 618,000 SAR …
+  ruling in Wael's favor" (a personal legal matter sitting in the wrong file).
+  CORRECT: remove it from projects.md AND write it verbatim into personal.md
+  under a "## Legal" heading. WRONG: delete it because it isn't a software
+  project. Deleting it is a critical failure.
+
+Other principles (all subordinate to RULE 0):
+1. RE-CLASSIFICATION: Place every fact in the file matching its MEANING,
+   regardless of where it currently sits. Move misfiled facts to their correct
+   home. The file set is fixed (do not invent/remove files); fact membership is
+   yours to correct. Taxonomy:
+%s
+2. DE-DUPLICATION: Merge ONLY facts that are true exact/near-exact duplicates
+   (same fact stated twice). Two different facts are never merged. When merging,
+   keep every unique detail from both copies.
+3. BRIEFS: Rewrite verbose chronological logs into clean, structured lists — but
+   preserve every distinct fact, number, and identifier. Brevity of WORDING only.
+4. INTEGRITY ON MOVE: Every fact ends up in EXACTLY ONE file (the correct one) —
+   never dropped, never duplicated across files.
+5. TIER BOUNDARY: Never move a fact across the personal/shared boundary.
+   personal.md holds private life facts (family, health, personal legal/financial)
+   and must never be merged into shared files or vice-versa.
+6. JSON OUTPUT FORMAT: Output ONLY a single valid JSON object matching the schema
+   below — no prose, no markdown fences outside the JSON. Include EVERY file you
+   were given (plus personal.md if you moved personal facts into it):
+{
+  "files": [
+    {
+      "name": "filename.md",
+      "content": "Full clean, consolidated, readable content — with every input fact preserved"
+    }
+  ]
+}`, strings.TrimRight(RenderForPrompt(), "\n"))
+}
+
 // GetEstimatedTokens estimates token count based on vault file sizes.
 func (s *Store) GetEstimatedTokens() int {
 	files, err := s.List()
@@ -67,23 +123,7 @@ func (s *Store) OrganizeVaultWithAgent(agentName string, agentPath string) Organ
 		return OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}
 	}
 
-	systemPrompt := `You are an expert Auxly Memory Architect. Your task is to analyze, consolidate, and organize the user's shared memory vault to make it clean, brief, readable, and token-optimized for any AI agents.
-
-Follow these strict principles:
-1. DE-DUPLICATION: Scan all files to find identical or highly overlapping chronological facts. Consolidate them into a single, polished sentence or bullet.
-2. BRIEFS & SUMMARIZATION: Rewrite walls of text or disorganized daily logs into brief, structured summaries. Clean up messy notes into clean markdown lists.
-3. FACTUAL INTEGRITY: Never lose or hallucinate critical facts, developer identity details (e.g. name, contact, portfolio), active project names, or technology scopes. You are organizing, not deleting information.
-4. BOUNDARY RESPECT: Retain the strict separation of markdown files (e.g. identity.md, infra.md, preferences.md, projects.md, daily.md, business.md). Do not mix up the sections.
-5. TOKEN EFFICIENCY: Make the content clear and concise so it occupies minimal tokens while remaining fully readable.
-6. JSON OUTPUT FORMAT: Output your response strictly as a single valid JSON object matching the schema below. Do not add any conversational text or markdown code fences outside this JSON payload:
-{
-  "files": [
-    {
-      "name": "filename.md",
-      "content": "Full clean, consolidated, readable, and optimized markdown content for this file"
-    }
-  ]
-}`
+	systemPrompt := organizeSystemPrompt()
 
 	userPrompt := fmt.Sprintf("Here is the current memory vault contents to organize:\n\n%s", vaultPayload.String())
 	fullPrompt := fmt.Sprintf("%s\n\n%s", systemPrompt, userPrompt)
@@ -365,23 +405,7 @@ func (s *Store) OrganizeVaultWithCustom(endpoint string, model string) OrganizeR
 		return OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}
 	}
 
-	systemPrompt := `You are an expert Auxly Memory Architect. Your task is to analyze, consolidate, and organize the user's shared memory vault to make it clean, brief, readable, and token-optimized for any AI agents.
-
-Follow these strict principles:
-1. DE-DUPLICATION: Scan all files to find identical or highly overlapping chronological facts. Consolidate them into a single, polished sentence or bullet.
-2. BRIEFS & SUMMARIZATION: Rewrite walls of text or disorganized daily logs into brief, structured summaries. Clean up messy notes into clean markdown lists.
-3. FACTUAL INTEGRITY: Never lose or hallucinate critical facts, developer identity details (e.g. name, contact, portfolio), active project names, or technology scopes. You are organizing, not deleting information.
-4. BOUNDARY RESPECT: Retain the strict separation of markdown files (e.g. identity.md, infra.md, preferences.md, projects.md, daily.md, business.md). Do not mix up the sections.
-5. TOKEN EFFICIENCY: Make the content clear and concise so it occupies minimal tokens while remaining fully readable.
-6. JSON OUTPUT FORMAT: Output your response strictly as a single valid JSON object matching the schema below. Do not add any conversational text or markdown code fences outside this JSON payload:
-{
-  "files": [
-    {
-      "name": "filename.md",
-      "content": "Full clean, consolidated, readable, and optimized markdown content for this file"
-    }
-  ]
-}`
+	systemPrompt := organizeSystemPrompt()
 
 	userPrompt := fmt.Sprintf("Here is the current memory vault contents to organize:\n\n%s", vaultPayload.String())
 	fullPrompt := fmt.Sprintf("%s\n\n%s", systemPrompt, userPrompt)

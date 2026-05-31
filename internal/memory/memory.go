@@ -252,6 +252,83 @@ func (s *Store) PendingDir() string {
 	return filepath.Join(s.Root, ".pending")
 }
 
+// MigratePersonal moves a `## Family` section out of identity.md into
+// personal.md, seeding the private bucket (see the memory-rework plan §3).
+//
+// This is a manual, opt-in helper: it is NOT wired into any automatic flow and
+// must be invoked explicitly. It is non-destructive in spirit — the Family
+// section is RELOCATED (removed from identity.md, appended to personal.md), never
+// dropped. If identity.md has no `## Family` section, it returns nil (no-op).
+//
+// The `path` argument selects which root to operate on; pass the store Root (or a
+// workspace memory dir). Both files are read/written within that directory.
+func (s *Store) MigratePersonal(path string) error {
+	identityPath := filepath.Join(path, "identity.md")
+	identityRaw, err := os.ReadFile(identityPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // nothing to migrate
+		}
+		return fmt.Errorf("read identity.md: %w", err)
+	}
+
+	section, remaining, found := extractSection(string(identityRaw), "## Family")
+	if !found {
+		return nil // no Family section — no-op
+	}
+
+	personalPath := filepath.Join(path, "personal.md")
+	var personalBuf strings.Builder
+	if existing, err := os.ReadFile(personalPath); err == nil {
+		personalBuf.Write(existing)
+		if !strings.HasSuffix(personalBuf.String(), "\n") {
+			personalBuf.WriteString("\n")
+		}
+		personalBuf.WriteString("\n")
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read personal.md: %w", err)
+	}
+	personalBuf.WriteString(strings.TrimRight(section, "\n"))
+	personalBuf.WriteString("\n")
+
+	if err := os.WriteFile(personalPath, []byte(personalBuf.String()), 0644); err != nil {
+		return fmt.Errorf("write personal.md: %w", err)
+	}
+	if err := os.WriteFile(identityPath, []byte(remaining), 0644); err != nil {
+		return fmt.Errorf("write identity.md: %w", err)
+	}
+	return nil
+}
+
+// extractSection splits a markdown document at the given `##`-level heading,
+// returning the heading's block (heading + body up to the next `## ` heading or
+// EOF), the document with that block removed, and whether the heading was found.
+func extractSection(doc, heading string) (section, remaining string, found bool) {
+	lines := strings.Split(doc, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == heading {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		return "", doc, false
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], "## ") {
+			end = i
+			break
+		}
+	}
+	section = strings.Join(lines[start:end], "\n")
+	kept := append([]string{}, lines[:start]...)
+	kept = append(kept, lines[end:]...)
+	remaining = strings.TrimRight(strings.Join(kept, "\n"), "\n") + "\n"
+	return section, remaining, true
+}
+
 func (s *Store) resolvePath(filename string) (string, error) {
 	cleaned := filepath.Clean(filename)
 	if filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "..") {
