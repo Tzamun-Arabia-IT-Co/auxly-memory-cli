@@ -12,6 +12,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"gopkg.in/yaml.v3"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 )
 
 // ─────────────────────────────────────────────────────────────────
@@ -64,6 +66,7 @@ const (
 	sshModeResult   = "result"   // showing its captured output
 	sshModePassword = "password" // masked SSH-password entry (PTY key install)
 	sshModeRename   = "rename"   // inline rename of a selected connection
+	sshModeShare    = "share"    // per-remote file-sharing checklist (§10)
 )
 
 // form steps.
@@ -115,6 +118,14 @@ type sshModel struct {
 	// delivered to this model (so the in-TUI add-host form can capture text). It
 	// is set only while the form is open.
 	editingHost bool
+
+	// per-remote file-sharing modal state (mode == sshModeShare, §10)
+	shareOpen    bool            // modal visible
+	shareClient  clientRow       // the inbound client being edited
+	shareFiles   []string        // checklist rows, in taxonomy order
+	shareChecked map[string]bool // file → checked (effective shared set)
+	shareCursor  int             // highlighted row within the modal
+	shareWrite   bool            // access toggle: true = read & write
 }
 
 // sshRefreshMsg carries the freshly read remotes list + host config into Update.
@@ -202,6 +213,12 @@ type clientRow struct {
 	Target   string `yaml:"target"`
 	Method   string `yaml:"method"`
 	Hostname string `yaml:"hostname"` // box's self-reported hostname (matches session RemoteHost)
+	// Per-remote file-sharing selection (§10). SharedFiles is the explicit set of
+	// memory files this inbound client may read; an empty/unset slice means "use
+	// the default" (all non-personal files, personal off). Access governs writes to
+	// those files: "write" = read & write, anything else = read-only.
+	SharedFiles []string `yaml:"shared_files,omitempty"`
+	Access      string   `yaml:"access,omitempty"`
 }
 
 type clientsYAML struct {
@@ -664,6 +681,9 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 	case sshModeRename:
 		return m.handleRenameKey(msg)
 
+	case sshModeShare:
+		return m.handleShareKey(msg)
+
 	case sshModeForm:
 		return m.handleFormKey(msg)
 
@@ -759,6 +779,8 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 				m.mode = sshModeRename
 				m.editingHost = true
 				return m, nil
+			case "s":
+				return m.openShare(c), nil
 			case "x":
 				m.mode = sshModeConfirm
 				return m, nil
@@ -1051,6 +1073,226 @@ func renameClient(old, newName string) {
 }
 
 // ─────────────────────────────────────────────────────────────────
+//  Per-remote file sharing (§10)
+// ─────────────────────────────────────────────────────────────────
+
+// shareDefaultChecked is the §10 default selection for a client that has no
+// explicit shared_files yet: every NON-personal file checked, personal files
+// unchecked.
+func shareDefaultChecked() map[string]bool {
+	checked := map[string]bool{}
+	for _, f := range memory.OrderedFiles() {
+		checked[f] = !memory.IsPersonalFile(f)
+	}
+	return checked
+}
+
+// openShare builds the file-sharing modal state for the given inbound client and
+// returns the updated model. The checklist is seeded from the client's explicit
+// SharedFiles when present, otherwise from the §10 default.
+func (m sshModel) openShare(c clientRow) sshModel {
+	files := memory.OrderedFiles()
+	checked := map[string]bool{}
+	if len(c.SharedFiles) == 0 {
+		checked = shareDefaultChecked()
+	} else {
+		shared := map[string]bool{}
+		for _, f := range c.SharedFiles {
+			shared[f] = true
+		}
+		for _, f := range files {
+			checked[f] = shared[f]
+		}
+	}
+	m.shareOpen = true
+	m.shareClient = c
+	m.shareFiles = files
+	m.shareChecked = checked
+	m.shareCursor = 0
+	m.shareWrite = strings.EqualFold(strings.TrimSpace(c.Access), "write")
+	m.mode = sshModeShare
+	m.editingHost = true // route ALL keys here so digits/letters don't leak to app.go
+	m.status = ""
+	return m
+}
+
+// closeShare clears the modal state and returns to the list.
+func (m sshModel) closeShare() sshModel {
+	m.shareOpen = false
+	m.shareChecked = nil
+	m.shareFiles = nil
+	m.shareCursor = 0
+	m.editingHost = false
+	m.mode = sshModeList
+	return m
+}
+
+// handleShareKey drives the file-sharing checklist modal.
+func (m sshModel) handleShareKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		return m.closeShare(), nil
+	case tea.KeyEnter:
+		return m.saveShare()
+	case tea.KeyUp:
+		if m.shareCursor > 0 {
+			m.shareCursor--
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.shareCursor < len(m.shareFiles)-1 {
+			m.shareCursor++
+		}
+		return m, nil
+	case tea.KeySpace:
+		if m.shareCursor >= 0 && m.shareCursor < len(m.shareFiles) {
+			f := m.shareFiles[m.shareCursor]
+			m.shareChecked[f] = !m.shareChecked[f]
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "k":
+		if m.shareCursor > 0 {
+			m.shareCursor--
+		}
+	case "j":
+		if m.shareCursor < len(m.shareFiles)-1 {
+			m.shareCursor++
+		}
+	case "w":
+		m.shareWrite = !m.shareWrite
+	case "a":
+		for _, f := range m.shareFiles {
+			m.shareChecked[f] = true
+		}
+	case "n":
+		for _, f := range m.shareFiles {
+			m.shareChecked[f] = false
+		}
+	}
+	return m, nil
+}
+
+// saveShare writes the modal's selection back to ~/.auxly/clients.yaml (round-trip
+// safe: only the matching entry's shared_files + access are mutated) and reloads
+// the in-memory client list.
+func (m sshModel) saveShare() (sshModel, tea.Cmd) {
+	shared := make([]string, 0, len(m.shareFiles))
+	for _, f := range m.shareFiles {
+		if m.shareChecked[f] {
+			shared = append(shared, f)
+		}
+	}
+	access := "read"
+	if m.shareWrite {
+		access = "write"
+	}
+	name := m.shareClient.Name
+	saveClientSharing(m.shareClient, shared, access)
+	m.clients = readClients()
+	m.cursor = clampCursor(m.cursor, m.listLen())
+	m.status = "Updated sharing for " + name
+	return m.closeShare(), nil
+}
+
+// saveClientSharing updates one inbound client's shared_files + access in
+// clients.yaml, preserving every other field and entry untouched. The match is by
+// Target first (stable), falling back to Name.
+func saveClientSharing(c clientRow, shared []string, access string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(home, ".auxly", "clients.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	// Round-trip via yaml.Node so unknown-to-us keys on each entry survive.
+	var doc yaml.Node
+	if yaml.Unmarshal(data, &doc) != nil || len(doc.Content) == 0 {
+		return
+	}
+	root := doc.Content[0]
+	clientsSeq := mappingValue(root, "clients")
+	if clientsSeq == nil || clientsSeq.Kind != yaml.SequenceNode {
+		return
+	}
+	for _, entry := range clientsSeq.Content {
+		if entry.Kind != yaml.MappingNode {
+			continue
+		}
+		target := scalarValue(entry, "target")
+		name := scalarValue(entry, "name")
+		match := (c.Target != "" && target == c.Target) || (c.Target == "" && name == c.Name)
+		if !match {
+			continue
+		}
+		setSequenceField(entry, "shared_files", shared)
+		setScalarField(entry, "access", access)
+		break
+	}
+	out, merr := yaml.Marshal(&doc)
+	if merr != nil {
+		return
+	}
+	_ = os.WriteFile(path, out, 0644)
+}
+
+// mappingValue returns the value node for key within a mapping node, or nil.
+func mappingValue(m *yaml.Node, key string) *yaml.Node {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// scalarValue returns the string value for key in a mapping node, or "".
+func scalarValue(m *yaml.Node, key string) string {
+	if v := mappingValue(m, key); v != nil {
+		return v.Value
+	}
+	return ""
+}
+
+// setScalarField sets (or inserts) a scalar key on a mapping node.
+func setScalarField(m *yaml.Node, key, val string) {
+	if v := mappingValue(m, key); v != nil {
+		v.Kind = yaml.ScalarNode
+		v.Tag = "!!str"
+		v.Value = val
+		v.Content = nil
+		return
+	}
+	m.Content = append(m.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: val},
+	)
+}
+
+// setSequenceField sets (or inserts) a string-sequence key on a mapping node.
+func setSequenceField(m *yaml.Node, key string, vals []string) {
+	seq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	for _, v := range vals {
+		seq.Content = append(seq.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v})
+	}
+	if v := mappingValue(m, key); v != nil {
+		*v = *seq
+		return
+	}
+	m.Content = append(m.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		seq,
+	)
+}
+
+// ─────────────────────────────────────────────────────────────────
 //  View
 // ─────────────────────────────────────────────────────────────────
 
@@ -1201,6 +1443,53 @@ func (m sshModel) View() string {
 		lines = append(lines, cyan.Render("RENAME CONNECTION")+dim.Render("   Enter: save · esc: cancel"))
 		lines = append(lines, "")
 		lines = append(lines, "  "+dim.Render("New name:  ")+m.rename+accent.Render("▌"))
+	case sshModeShare:
+		warn := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning)
+		ok := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess)
+		target := m.shareClient.Target
+		if target == "" {
+			target = m.shareClient.Hostname
+		}
+		name := m.shareClient.Name
+		if name == "" {
+			name = "(unnamed)"
+		}
+		title := "Share files with: " + name
+		if target != "" {
+			title += " (" + target + ")"
+		}
+		lines = append(lines, cyan.Render(title))
+		lines = append(lines, "")
+		// Access toggle (w).
+		ro, rw := "( ) Read-only", "( ) Read & write"
+		if m.shareWrite {
+			rw = "(•) Read & write"
+			lines = append(lines, "  "+dim.Render("Access:   ")+dim.Render(ro)+"   "+ok.Render(rw)+dim.Render("   [w] toggle"))
+		} else {
+			ro = "(•) Read-only"
+			lines = append(lines, "  "+dim.Render("Access:   ")+ok.Render(ro)+"   "+dim.Render(rw)+dim.Render("   [w] toggle"))
+		}
+		lines = append(lines, "")
+		// Checklist.
+		for i, f := range m.shareFiles {
+			box := dim.Render("[ ]")
+			if m.shareChecked[f] {
+				box = ok.Render("[x]")
+			}
+			label := fmt.Sprintf("%-16s", f)
+			tag := ""
+			if memory.IsPersonalFile(f) {
+				tag = "  " + warn.Render("PRIVATE ⚠")
+			}
+			row := box + " " + label + tag
+			if i == m.shareCursor {
+				lines = append(lines, accent.Render("▸ ")+selRow.Render(row))
+			} else {
+				lines = append(lines, "  "+row)
+			}
+		}
+		lines = append(lines, "")
+		lines = append(lines, dim.Render("space toggle · ")+accent.Render("↑/↓")+dim.Render(" move · a all · n none · w access · ")+accent.Render("enter")+dim.Render(" save · esc cancel"))
 	case sshModeProgress:
 		spin := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render(spinnerFrame(m.spin))
 		lines = append(lines, spin+"  "+cyan.Render(m.progressTitle))
@@ -1434,6 +1723,7 @@ func (m sshModel) View() string {
 				action("d", "Disconnect"),
 				action("r", "Reconnect"),
 				action("e", "Rename"),
+				action("s", "Share files"),
 				action("x", "Remove"),
 			}
 		} else {

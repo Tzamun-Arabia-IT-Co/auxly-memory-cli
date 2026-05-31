@@ -59,11 +59,19 @@ func newSkillsModel() skillsModel {
 		},
 		{
 			cmd:     "/auxly-max",
-			name:    "Bootstrap Sync",
-			desc:    "Generates prompt sync configurations dynamically",
+			name:    "Memory Harvest",
+			desc:    "Pushes everything this agent knows into the vault",
 			params:  "None",
-			useCase: "Creates a copyable Maximum Memory alignment instructions block, pre-configured with active local gateway ports, enabling instant multi-agent sync (e.g. copying prompt to other local agents or Claude sessions).",
-			example: "User: `/auxly-max` \nAgent: \"Onboarding Prompt for AI Assistants: Extract and synthesize ALL possible context...\"",
+			useCase: "Exhaustive self-harvest: the agent scans its entire session and writes up every fact it knows, slice-by-category (personal facts → personal.md, infra facts → infra.md, etc.) for correct placement the first time. Does NOT pull memory — this is push-only.",
+			example: "User: `/auxly-max` \nAgent: \"Harvesting session → infra.md, projects.md, personal.md … saved N facts\"",
+		},
+		{
+			cmd:     "/auxly-bootstrap",
+			name:    "Bootstrap Sync",
+			desc:    "Copyable onboarding block for tools without Auxly",
+			params:  "None",
+			useCase: "Generates a paste-ready prompt to drop into a tool that doesn't have Auxly installed (e.g. ChatGPT) so it can read/write your memory. Only SHOWS the block — it does not sync by itself; the foreign agent does the reading/writing by following the block.",
+			example: "User: `/auxly-bootstrap` \nAgent: \"Onboarding Prompt for AI Assistants: ...\"",
 		},
 		{
 			cmd:     "/auxly-sync [content]",
@@ -98,12 +106,12 @@ func newSkillsModel() skillsModel {
 			example: "User: `/auxly-forget dark mode` \nAgent: \"- 🗑️ ~~Smart Sync: I strictly prefer dark mode~~ \n✓ Pruned 1 statement.\"",
 		},
 		{
-			cmd:     "/auxly-learn [context]",
-			name:    "Extract Facts",
-			desc:    "Extracts structured bullet ideas for review",
-			params:  "context (Raw discussion text, code, or git diffs)",
-			useCase: "Scans recent development context, chat history, or local code snippets to extract structured habits or environment adjustments automatically. Outputs them for manual confirmation before saving.",
-			example: "User: `/auxly-learn I migrated to Go 1.22 and TailwindCSS today.` \nAgent: \"💡 Propose: Go 1.22 environment configured, tailwindcss preference loaded...\"",
+			cmd:     "/auxly-learn [folder] [topic]",
+			name:    "Read & Internalize",
+			desc:    "Reads the vault and grounds the agent in it",
+			params:  "[folder] [topic] (both optional)",
+			useCase: "Inbound read & internalize: the agent reads the unified memory vault and grounds itself in it for the rest of the session. Empty = learn everything; `folder` = read one category (e.g. infra); `folder topic` = focused read on a topic within that file.",
+			example: "User: `/auxly-learn infra nginx` \nAgent: reads infra.md focused on nginx and operates with it loaded.",
 		},
 	}
 
@@ -530,11 +538,19 @@ You must immediately invoke the 'auxly_skill_memory' MCP tool to retrieve and di
 
 		"auxly-max": `---
 name: auxly-max
-description: Obtain the dynamic Maximum Memory sync instructions block to sync other local agents (e.g. Cursor, Codex) E2E.
+description: Exhaustively harvest everything this agent knows from the current session and push it up into the memory vault, slice-by-category.
 ---
 # /auxly-max
 
-You must immediately invoke the 'auxly_skill_max' MCP tool to align your session, and then immediately call 'auxly_skill_memory' to pull down and load the complete memory vault. Finally, present a beautiful success message confirming that unified memory alignment is fully complete!`,
+You must immediately invoke the 'auxly_skill_max' MCP tool to obtain the harvest directive. Then scan your ENTIRE session, extract every fact you know about the user, and write them all up slice-by-category (personal facts → personal.md, infra facts → infra.md, projects → projects.md, etc.) via the sync/write tools. This is push-only — do NOT pull memory. Finally, present a beautiful success message confirming how many facts were harvested into which files!`,
+
+		"auxly-bootstrap": `---
+name: auxly-bootstrap
+description: Generate a copyable onboarding block to paste into a tool that does not have Auxly installed (e.g. ChatGPT) so it can read/write your memory.
+---
+# /auxly-bootstrap
+
+You must immediately invoke the 'auxly_skill_bootstrap' MCP tool to generate the dynamic, paste-ready onboarding prompt block (tailored with the live binary path, provider, and gateway port). Only SHOW the copyable block — do NOT sync anything yourself. The user copies it into a foreign agent, which then reads/writes their memory by following the block's instructions!`,
 
 		"auxly-sync": `---
 name: auxly-sync
@@ -573,12 +589,12 @@ You must immediately invoke the 'auxly_skill_forget' MCP tool, passing the user'
 
 		"auxly-learn": `---
 name: auxly-learn
-description: Intercept recent edits or context to extract and propose structured new facts to save into memory files.
-argument-hint: "[raw context text or snippet]"
+description: Read the unified memory vault and internalize it, grounding the agent in everything already known about the user for the rest of the session.
+argument-hint: "[folder] [topic]"
 ---
 # /auxly-learn
 
-You must immediately invoke the 'auxly_skill_learn' MCP tool, passing the provided raw context text or snippet as the 'context' argument, to parse and extract structured new facts. Simply run the tool and display the proposed facts!`,
+You must immediately invoke the 'auxly_skill_learn' MCP tool to read the memory vault and internalize it. Pass the optional 'folder' (a category like infra/projects) and 'topic' arguments to scope the read: no args = learn everything; folder only = read that category; folder + topic = focused read. Absorb the returned content and operate with it loaded for the rest of the session!`,
 	}
 
 	updateReminder := "\n\nIMPORTANT: You are expected to proactively update the user's unified Auxly memory vault. Whenever you learn new developer preferences, system configs, product scopes, decisions, or work habits during our active conversation, you MUST immediately execute the 'auxly_skill_sync' tool to save it into their memory files. Keep the memory synchronized!"
