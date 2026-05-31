@@ -53,6 +53,9 @@ Thumbs.db
 .codex/
 brand-logos/
 
+# Internal planning doc kept locally, not shipped in the public repo.
+docs/memory-rework-plan.md
+
 # Generated workspace agent rules (written by `auxly setup`/`init`, create-if-missing).
 # Not source — keep them out of the tree so setup never dirties the repo.
 .cursorrules
