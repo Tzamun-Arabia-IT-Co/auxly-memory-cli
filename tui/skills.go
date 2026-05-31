@@ -9,9 +9,18 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/skills"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// downloadsSkillsDir is the versioned download folder for exported skill ZIPs.
+// The version lives on the FOLDER (not the .zip names) so a skills update lands
+// as a fresh folder the user can recognise, while the zip filenames stay stable
+// for in-place Claude updates. See internal/skills.Version.
+func downloadsSkillsDir(home string) string {
+	return filepath.Join(home, "Downloads", "auxly-skills-v"+skills.Version)
+}
 
 type skillDetail struct {
 	cmd     string
@@ -447,7 +456,7 @@ func (m skillsModel) View(width int, height int) string {
 		guideLines = append(guideLines, orangeDimStyle.Render("2. Select 'Customize' -> 'Skills' in the sidebar."))
 		guideLines = append(guideLines, orangeDimStyle.Render("3. Click the 'Upload a skill' button."))
 		guideLines = append(guideLines, orangeDimStyle.Render("4. Choose the .zip files from your Downloads folder:"))
-		guideLines = append(guideLines, orangeStyle.Render("   ↳ "+filepath.Join(home, "Downloads", "auxly-skills", "auxly-memory.zip")))
+		guideLines = append(guideLines, orangeStyle.Render("   ↳ "+filepath.Join(downloadsSkillsDir(home), "auxly-memory.zip")))
 		guideLines = append(guideLines, orangeDimStyle.Render("5. Press any arrow key to dismiss this guide."))
 
 		var wrappedGuide []string
@@ -475,7 +484,7 @@ func (m skillsModel) View(width int, height int) string {
 
 	var statusBanner string
 	if m.exportSuccess && time.Since(m.exportTime) < 15*time.Second {
-		statusBanner = green.Bold(true).Render("  ✓ Exported Claude Skills ZIPs to ~/Downloads/auxly-skills/! 🎉")
+		statusBanner = green.Bold(true).Render("  ✓ Exported Claude Skills ZIPs to ~/Downloads/auxly-skills-v" + skills.Version + "/! 🎉")
 	} else {
 		btnStyle := lipgloss.NewStyle().
 			Background(ColorPrimary).
@@ -542,7 +551,7 @@ description: Exhaustively harvest everything this agent knows from the current s
 ---
 # /auxly-max
 
-You must immediately invoke the 'auxly_skill_max' MCP tool to obtain the harvest directive. Then scan your ENTIRE session, extract every fact you know about the user, and write them all up slice-by-category (personal facts → personal.md, infra facts → infra.md, projects → projects.md, etc.) via the sync/write tools. This is push-only — do NOT pull memory. Finally, present a beautiful success message confirming how many facts were harvested into which files!`,
+You must immediately invoke the 'auxly_skill_max' MCP tool to obtain the harvest directive. Then scan your ENTIRE session, extract every fact you know about the user, and write them all up slice-by-category via the sync/write tools (pass the matching 'category' for each slice). Route the user's OWN private-life facts — family, relationships, health, and their personal legal/financial matters (their own lawsuit/court case, divorce, custody, personal loan, salary) — into personal.md via category 'personal'; a company/business legal or money matter is NOT personal. Judge by context: a personal legal case is never a 'project' or 'business' entry. This is push-only — do NOT pull memory. Finally, present a beautiful success message confirming how many facts were harvested into which files!`,
 
 		"auxly-bootstrap": `---
 name: auxly-bootstrap
@@ -554,12 +563,12 @@ You must immediately invoke the 'auxly_skill_bootstrap' MCP tool to generate the
 
 		"auxly-sync": `---
 name: auxly-sync
-description: Append and synchronize a new fact, preference, or system detail using smart automated delta-merges into preferences.md.
+description: Append and synchronize a new fact, preference, or system detail using smart automated delta-merges into memory files (preferences.md, identity.md, infra.md, products.md, projects.md, daily.md, personal.md, etc.).
 argument-hint: "<fact or preference statement to sync>"
 ---
 # /auxly-sync
 
-You must immediately invoke the 'auxly_skill_sync' MCP tool, passing the user's provided input statement as the 'content' argument. This performs a smart automated delta-merge to update the preferences.md file. Simply run the tool and display the confirmation output!`,
+You must immediately invoke the 'auxly_skill_sync' MCP tool. Pass the user's statement as the 'content' argument AND set the 'category' argument to the best-fit category from the taxonomy shown in the tool's footer (identity, personal, preferences, infra, products, projects, daily, business, agents) — you understand the fact, so you pick the file; only omit 'category' if you are genuinely unsure, in which case the router will guess. Route the user's OWN private-life facts — their family, health, relationships, and their PERSONAL legal/financial matters (their own lawsuit, court case, divorce, custody, personal loan, salary) — to category 'personal'; a company/business legal or money matter is NOT personal (use 'business'). Judge by context, not the topic word, and when a fact is about the user's private life, 'personal' wins over any topical category (a personal legal case is never a 'project'). This performs a smart automated delta-merge into the chosen memory file. Run the tool and display the confirmation output!`,
 
 		"auxly-pending": `---
 name: auxly-pending
@@ -604,8 +613,8 @@ You must immediately invoke the 'auxly_skill_learn' MCP tool to read the memory 
 		zipPath1 := filepath.Join(auxlySkillsDir, skillName+".zip")
 		writeZipFile(zipPath1, skillName, content+updateReminder)
 
-		// 2. Write to ~/Downloads/auxly-skills/
-		downloadsDir := filepath.Join(home, "Downloads", "auxly-skills")
+		// 2. Write to ~/Downloads/auxly-skills-v<Version>/ (version on the folder)
+		downloadsDir := downloadsSkillsDir(home)
 		_ = os.MkdirAll(downloadsDir, 0755)
 		zipPath2 := filepath.Join(downloadsDir, skillName+".zip")
 		writeZipFile(zipPath2, skillName, content+updateReminder)

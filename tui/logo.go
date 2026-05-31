@@ -10,7 +10,7 @@ import (
 
 func renderBanner(width int) string {
 	// Clickable hyperlinks in modern terminal emulators (OSC 8)
-	auxlyLink := fmt.Sprintf("\x1b]8;;https://auxly.io\x1b\\Auxly-Memory CLI\x1b]8;;\x1b\\")
+	auxlyLink := fmt.Sprintf("\x1b]8;;https://auxly.io/unified-memory\x1b\\Auxly-Memory CLI\x1b]8;;\x1b\\")
 	title := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorPrimary).
