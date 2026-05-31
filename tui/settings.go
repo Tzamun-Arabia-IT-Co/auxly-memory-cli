@@ -53,6 +53,9 @@ type settingsModel struct {
 	showingDiff  bool
 	diffScrollY  int
 
+	// Animated spinner frame while an organize run is in flight.
+	organizeSpin int
+
 	// Persistent Stats State
 	lastRun        string
 	lastTokensUsed int
@@ -85,6 +88,13 @@ type customModelsFetchedMsg struct {
 	success bool
 	models  []string
 	err     string
+}
+
+// settingsSpinTickMsg drives the animated "Organizing…" spinner.
+type settingsSpinTickMsg struct{}
+
+func settingsSpinTick() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return settingsSpinTickMsg{} })
 }
 
 func (m settingsModel) fetchCustomModels(url string) tea.Cmd {
@@ -251,6 +261,40 @@ func (m settingsModel) runOrganize() tea.Cmd {
 	}
 }
 
+// diffPopupWidth bounds the results popup to the terminal so a wide diff can
+// never push the box past the screen edge.
+func (m settingsModel) diffPopupWidth() int {
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	pw := w - 8
+	if pw > 64 {
+		pw = 64
+	}
+	if pw < 34 {
+		pw = 34
+	}
+	return pw
+}
+
+// diffViewportHeight bounds how many diff lines the popup shows at once, scaled
+// to the terminal height and capped so the popup never dominates the screen.
+func (m settingsModel) diffViewportHeight() int {
+	h := m.height
+	if h <= 0 {
+		h = 24
+	}
+	vp := h - 14 // leave room for title, header, footer, borders, margins
+	if vp < 6 {
+		vp = 6
+	}
+	if vp > 14 {
+		vp = 14
+	}
+	return vp
+}
+
 func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case customModelsFetchedMsg:
@@ -262,6 +306,13 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		} else {
 			m.customError = msg.err
 			m.customModels = nil
+		}
+		return m, nil
+	case settingsSpinTickMsg:
+		// Keep animating only while a run is in flight; stop cleanly otherwise.
+		if m.organizing {
+			m.organizeSpin++
+			return m, settingsSpinTick()
 		}
 		return m, nil
 	case tea.WindowSizeMsg:
@@ -296,16 +347,21 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			}
 			if msg.Type == tea.MouseWheelDown {
 				lines := strings.Split(m.organizeDiff, "\n")
-				if m.diffScrollY < len(lines)-12 {
+				if m.diffScrollY < len(lines)-m.diffViewportHeight() {
 					m.diffScrollY++
 				}
 				return m, nil
 			}
 			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
-				// Click outside the 60x20 popup starting at X=8, Y=4 closes it
-				popupWidth := 60
-				popupHeight := 20
-				if msg.X < 8 || msg.X > 8+popupWidth || msg.Y < 4 || msg.Y > 4+popupHeight {
+				// Click outside the (dynamically sized) popup closes it.
+				popW := m.diffPopupWidth()
+				popH := m.diffViewportHeight() + 10 // title+header+footer+borders
+				popX := (m.width - popW) / 2
+				if popX < 2 {
+					popX = 2
+				}
+				popY := 3
+				if msg.X < popX || msg.X > popX+popW || msg.Y < popY || msg.Y > popY+popH {
 					m.showingDiff = false
 					return m, nil
 				}
@@ -446,7 +502,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				return m, nil
 			case "down", "j":
 				lines := strings.Split(m.organizeDiff, "\n")
-				if m.diffScrollY < len(lines)-12 {
+				if m.diffScrollY < len(lines)-m.diffViewportHeight() {
 					m.diffScrollY++
 				}
 				return m, nil
@@ -464,7 +520,8 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				m.confirmingRun = false
 				m.organizing = true
 				m.organizeResult = ""
-				return m, m.runOrganize()
+				m.organizeSpin = 0
+				return m, tea.Batch(m.runOrganize(), settingsSpinTick())
 			case "n", "N", "esc":
 				m.confirmingRun = false
 				return m, nil
@@ -792,7 +849,8 @@ func (m settingsModel) View() string {
 	rightLines = append(rightLines, "")
 
 	if m.organizing {
-		rightLines = append(rightLines, fmt.Sprintf("  %s", yellow.Render("Organizing memory vault... Please wait...")))
+		spin := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary).Render(spinnerFrame(m.organizeSpin))
+		rightLines = append(rightLines, fmt.Sprintf("  %s  %s", spin, yellow.Render("Organizing memory vault… please wait")))
 	} else {
 		// A beautiful clickable button styling
 		btnStyle := lipgloss.NewStyle().
@@ -973,56 +1031,70 @@ func (m settingsModel) View() string {
 	}
 
 	if m.showingDiff {
+		popW := m.diffPopupWidth()
+		innerW := popW - 6 // account for border (2) + horizontal padding (4)
+		if innerW < 20 {
+			innerW = 20
+		}
+		viewportHeight := m.diffViewportHeight()
+
 		var pb strings.Builder
-		pb.WriteString(bold.Render("🎉 Memory Vault Organization Results") + "\n")
-		pb.WriteString(dim.Render("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n\n")
-		pb.WriteString(green.Render(" ✓ Deduplication & Consolidation Summary:") + "\n\n")
+		pb.WriteString(bold.Render("🎉 Organization Results") + "\n")
+		pb.WriteString(dim.Render(strings.Repeat("━", innerW)) + "\n\n")
+		pb.WriteString(green.Render("✓ Deduplication & consolidation summary:") + "\n\n")
 
 		lines := strings.Split(m.organizeDiff, "\n")
-		viewportHeight := 12
 
+		// Clamp scroll to the dynamic viewport.
+		maxScroll := len(lines) - viewportHeight
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if m.diffScrollY > maxScroll {
+			m.diffScrollY = maxScroll
+		}
 		if m.diffScrollY < 0 {
 			m.diffScrollY = 0
 		}
-		if m.diffScrollY > len(lines)-viewportHeight {
-			m.diffScrollY = len(lines) - viewportHeight
-		}
-		if m.diffScrollY < 0 {
-			m.diffScrollY = 0
-		}
-
 		endIdx := m.diffScrollY + viewportHeight
 		if endIdx > len(lines) {
 			endIdx = len(lines)
 		}
 
 		for i := m.diffScrollY; i < endIdx; i++ {
-			line := lines[i]
-			if strings.HasPrefix(line, "- ") {
+			// Truncate each line to the inner width so a long diff line can never
+			// widen the popup past the terminal.
+			line := clampLine(lines[i], innerW)
+			switch {
+			case strings.HasPrefix(lines[i], "- "):
 				pb.WriteString(red.Render(line) + "\n")
-			} else if strings.HasPrefix(line, "+ ") {
+			case strings.HasPrefix(lines[i], "+ "):
 				pb.WriteString(green.Render(line) + "\n")
-			} else {
+			default:
 				pb.WriteString(dim.Render(line) + "\n")
 			}
 		}
 
 		if len(lines) > viewportHeight {
-			pb.WriteString(dim.Render(fmt.Sprintf(" (Line %d-%d of %d) • Scroll via Up/Down/j/k or Mouse Wheel", m.diffScrollY+1, endIdx, len(lines))) + "\n")
+			pb.WriteString(dim.Render(fmt.Sprintf(" (%d-%d of %d) • ↑/↓ · j/k · wheel", m.diffScrollY+1, endIdx, len(lines))) + "\n")
 		} else {
 			pb.WriteString("\n")
 		}
-		pb.WriteString(dim.Render(" Press [Esc], [Enter], or click outside to close"))
+		pb.WriteString(dim.Render(" [Esc]/[Enter] or click outside to close"))
 
 		popupStyle := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(ColorSuccess).
 			Background(lipgloss.Color("0")).
 			Padding(1, 2).
-			Width(60)
+			Width(popW)
 
 		popupStr := popupStyle.Render(pb.String())
-		fullView = overlayPopup(fullView, popupStr, 8, 4)
+		popX := (m.width - popW) / 2
+		if popX < 2 {
+			popX = 2
+		}
+		fullView = overlayPopup(fullView, popupStr, popX, 3)
 	}
 
 	if m.confirmingRun {
