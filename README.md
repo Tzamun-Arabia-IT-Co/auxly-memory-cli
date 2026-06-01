@@ -9,6 +9,8 @@
 No cloud. No database. No vendor lock-in. Just Markdown files you own, with an audit trail you can read and a review queue you control.
 
 [![Release](https://img.shields.io/github/v/release/Tzamun-Arabia-IT-Co/auxly-memory-cli?label=release)](https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases)
+[![Downloads](https://img.shields.io/github/downloads/Tzamun-Arabia-IT-Co/auxly-memory-cli/total?label=downloads&color=brightgreen)](https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases)
+[![Stars](https://img.shields.io/github/stars/Tzamun-Arabia-IT-Co/auxly-memory-cli?style=flat)](https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8.svg)](go.mod)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
