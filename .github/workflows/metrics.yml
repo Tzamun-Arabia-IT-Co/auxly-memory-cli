@@ -23,7 +23,11 @@ jobs:
   snapshot:
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Traffic endpoints (clones/views) are NOT accessible to the default
+      # GITHUB_TOKEN ("Resource not accessible by integration"). Add a PAT with
+      # repo/admin-read as secret METRICS_PAT to capture them; without it the run
+      # still records downloads + stars and simply skips traffic.
+      GH_TOKEN: ${{ secrets.METRICS_PAT || secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
     steps:
       - name: Checkout main (the merge script lives here)
@@ -33,10 +37,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .metrics-raw
-          gh api "repos/$REPO/releases"       > .metrics-raw/releases.json
-          gh api "repos/$REPO"                > .metrics-raw/repo.json
-          gh api "repos/$REPO/traffic/clones" > .metrics-raw/clones.json
-          gh api "repos/$REPO/traffic/views"  > .metrics-raw/views.json
+          # Always-available with any token:
+          gh api "repos/$REPO/releases" > .metrics-raw/releases.json
+          gh api "repos/$REPO"          > .metrics-raw/repo.json
+          # Traffic needs a PAT (METRICS_PAT). Degrade gracefully to empty data
+          # so the run still succeeds and records downloads/stars without it.
+          if gh api "repos/$REPO/traffic/clones" > .metrics-raw/clones.json 2>/dev/null; then
+            echo "traffic: clones captured"
+          else
+            echo '{"clones":[]}' > .metrics-raw/clones.json
+            echo "::notice::traffic clones skipped — set a METRICS_PAT secret (repo/admin-read) to capture clones/views"
+          fi
+          if gh api "repos/$REPO/traffic/views" > .metrics-raw/views.json 2>/dev/null; then
+            echo "traffic: views captured"
+          else
+            echo '{"views":[]}' > .metrics-raw/views.json
+          fi
 
       - name: Merge into CSV history on the metrics branch
         run: |
