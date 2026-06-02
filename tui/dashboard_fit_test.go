@@ -7,6 +7,7 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -178,11 +179,18 @@ func TestSettingsFitsWithoutScroll(t *testing.T) {
 	}
 }
 
-// TestAgentGridColumnsScaleWithWidth locks the dynamic grid: wider terminals get
-// more columns (fewer rows), and compact mode packs one extra.
+// TestAgentGridColumnsScaleWithWidth locks the dynamic grid AND the hard 3-column
+// cap: however wide the terminal, the grid never exceeds 3 columns (wider cards
+// instead), so the status line has room and never wraps to a third row.
 func TestAgentGridColumnsScaleWithWidth(t *testing.T) {
-	if c, _ := agentGridLayout(200, 12, false); c < 3 {
-		t.Errorf("200-wide should yield >= 3 columns, got %d", c)
+	// The cap holds at any width — even an enormous terminal stays at 3 columns.
+	for _, w := range []int{200, 240, 400} {
+		if c, _ := agentGridLayout(w, 12, false); c != 3 {
+			t.Errorf("%d-wide should be capped at exactly 3 columns, got %d", w, c)
+		}
+		if c, _ := agentGridLayout(w, 12, true); c != 3 {
+			t.Errorf("%d-wide compact should be capped at exactly 3 columns, got %d", w, c)
+		}
 	}
 	// Compact packs at least as many columns as non-compact at the same width.
 	cNormal, _ := agentGridLayout(131, 12, false)
@@ -190,9 +198,70 @@ func TestAgentGridColumnsScaleWithWidth(t *testing.T) {
 	if cCompact < cNormal {
 		t.Errorf("compact should not have fewer columns (normal=%d compact=%d)", cNormal, cCompact)
 	}
-	// Never more columns than cards.
+	// Never more columns than cards (the cap must not invent columns).
 	if c, _ := agentGridLayout(240, 2, false); c > 2 {
 		t.Errorf("2 cards must not exceed 2 columns, got %d", c)
+	}
+}
+
+// TestAgentCardNeverWrapsToThreeLines is the reported bug: an active card with the
+// widest trust badge ("read-only") must still render as exactly two content lines
+// (4 rows incl. border) at every terminal size — the status line degrades (drops
+// ⇄N, then the badge) rather than wrapping a trust badge onto a third row.
+func TestAgentCardNeverWrapsToThreeLines(t *testing.T) {
+	m := populatedDashboard(t)
+	// Real brand names (the longest, e.g. "Android Studio") + the widest trust badge
+	// + every card active = the worst case for the status line.
+	var cards []agentCard
+	for _, id := range brandOrder {
+		cards = append(cards, brandMeta[id])
+	}
+	m.dashboard.cards = cards
+	m.dashboard.trustCfg = &trust.Config{Default: trust.LevelReadOnly, Providers: map[string]trust.ProviderConfig{}}
+	m.dashboard.sessions = nil
+	for _, c := range cards {
+		m.dashboard.sessions = append(m.dashboard.sessions, agentSession{Provider: c.id})
+	}
+
+	for _, sz := range []struct{ w, h int }{{175, 38}, {140, 32}, {124, 24}, {90, 40}} {
+		u, _ := m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
+		mm := u.(model)
+		mm.dashboard.cards = cards
+		_, cardW := agentGridLayout(sz.w, len(cards), mm.dashboard.bodyCompact())
+		for i, c := range cards {
+			card := mm.dashboard.renderAgentCard(c, i, cardW)
+			if h := lipgloss.Height(card); h != 4 {
+				t.Errorf("%dx%d card %q (w=%d): height %d, want 4 — it wrapped to a 3rd line:\n%s",
+					sz.w, sz.h, c.name, cardW, h, card)
+			}
+		}
+	}
+}
+
+// TestConnectionsSummaryDedupsSameServer locks the dedup: three live sessions from
+// the same remote box collapse to one row with ×3, while a distinct host shows once
+// with no count.
+func TestConnectionsSummaryDedupsSameServer(t *testing.T) {
+	m := *NewApp(t.TempDir())
+	m.dashboard.sessions = []agentSession{
+		{Provider: "claude-code", Remote: true, Host: "motormind.autos", IP: "192.168.1.166", OS: "linux", PID: 1},
+		{Provider: "claude-code", Remote: true, Host: "motormind.autos", IP: "192.168.1.166", OS: "linux", PID: 2},
+		{Provider: "claude-code", Remote: true, Host: "motormind.autos", IP: "192.168.1.166", OS: "linux", PID: 3},
+		{Provider: "claude-code", Remote: true, Host: "erp.tzamun.ai", IP: "192.168.1.168", OS: "linux", PID: 4},
+	}
+	out := stripANSI(m.dashboard.renderConnectionsSummary(false))
+	if c := strings.Count(out, "motormind.autos"); c != 1 {
+		t.Errorf("motormind.autos should appear once (deduped), got %d:\n%s", c, out)
+	}
+	if c := strings.Count(out, "erp.tzamun.ai"); c != 1 {
+		t.Errorf("erp.tzamun.ai should appear once, got %d:\n%s", c, out)
+	}
+	if !strings.Contains(out, "×3") {
+		t.Errorf("the tripled host must show a ×3 count:\n%s", out)
+	}
+	// Only the tripled host carries a count; the singleton has none.
+	if c := strings.Count(out, "×"); c != 1 {
+		t.Errorf("exactly one ×N count expected, got %d:\n%s", c, out)
 	}
 }
 

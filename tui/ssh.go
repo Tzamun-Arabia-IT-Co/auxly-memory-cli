@@ -171,6 +171,15 @@ type progressEvent struct {
 // sshSpinTickMsg animates the progress spinner.
 type sshSpinTickMsg struct{}
 
+// sshDataTickMsg drives a periodic re-read of the remotes/clients/host so inbound
+// connections (and drops) appear on the Remote screen automatically, without the
+// user having to generate an input event. Mirrors the dashboard/activity ticks.
+type sshDataTickMsg struct{}
+
+func sshDataTickCmd() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return sshDataTickMsg{} })
+}
+
 // ─────────────────────────────────────────────────────────────────
 //  Constructor / data
 // ─────────────────────────────────────────────────────────────────
@@ -586,6 +595,19 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 			return m, spinTick()
 		}
 		return m, nil
+
+	case sshDataTickMsg:
+		// Only refresh the passive list view. In any sub-mode (form/password/rename/
+		// share/progress/result) leave state untouched so typing and selection are
+		// never interrupted by the background poll — but always re-arm the tick so it
+		// keeps running while the Remote screen is open.
+		if m.mode == sshModeList {
+			m.remotes = readRemotes()
+			m.clients = readClients()
+			m.host, m.hostOK = readHostInfo()
+			m.cursor = clampCursor(m.cursor, m.listLen())
+		}
+		return m, sshDataTickCmd()
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)

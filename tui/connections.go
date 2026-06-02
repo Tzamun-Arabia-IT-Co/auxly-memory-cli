@@ -46,6 +46,7 @@ func gatherSessions() []agentSession {
 	alive := session.PidsAlive(registeredPIDs)
 
 	registered := make(map[int]bool, len(records))
+	seen := make(map[int]bool, len(records)) // guard against a PID recorded twice
 	var out []agentSession
 	for _, r := range records {
 		if !alive[r.PID] {
@@ -53,14 +54,19 @@ func gatherSessions() []agentSession {
 			continue
 		}
 		registered[r.PID] = true
+		if seen[r.PID] {
+			continue // one display session per live process, even if double-recorded
+		}
+		seen[r.PID] = true
 		out = append(out, sessionFromRecord(r, clients))
 	}
 
 	// Surface live servers that never registered (version skew / stale binary).
 	for _, pid := range session.LiveServerPIDs() {
-		if registered[pid] {
+		if registered[pid] || seen[pid] {
 			continue
 		}
+		seen[pid] = true
 		provider := session.InferProvider(session.AncestorCommands(pid))
 		if provider == "" {
 			provider = "claude" // matches the server's own resolveProvider default

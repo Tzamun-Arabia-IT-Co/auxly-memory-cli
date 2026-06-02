@@ -565,7 +565,6 @@ func (m dashboardModel) renderBody(compact bool) string {
 
 	dim := lipgloss.NewStyle().Foreground(ColorDim)
 	green := lipgloss.NewStyle().Foreground(ColorSuccess)
-	yellow := lipgloss.NewStyle().Foreground(ColorWarning)
 	bold := lipgloss.NewStyle().Bold(true)
 
 	// Left Column: System Status & Diagnostic Details
@@ -617,89 +616,7 @@ func (m dashboardModel) renderBody(compact bool) string {
 
 	var brandCards []string
 	for idx, b := range brands {
-		trustLevel := "auto"
-		if m.trustCfg != nil {
-			trustLevel = m.trustCfg.GetTrustLevel(b.id)
-			if b.id == "antigravity" && (trustLevel == "" || trustLevel == "auto") {
-				if tl := m.trustCfg.GetTrustLevel("antigravity-agent"); tl != "" && tl != "auto" {
-					trustLevel = tl
-				} else if tl := m.trustCfg.GetTrustLevel("antigravity-ide"); tl != "" && tl != "auto" {
-					trustLevel = tl
-				} else if tl := m.trustCfg.GetTrustLevel("antigravity-cli"); tl != "" && tl != "auto" {
-					trustLevel = tl
-				}
-			}
-		}
-
-		trustBadge := green.Render("auto")
-		if trustLevel == "require_approval" {
-			trustBadge = yellow.Render("approve")
-		} else if trustLevel == "read_only" {
-			trustBadge = dim.Render("read-only")
-		}
-
-		// Count live MCP sessions for this brand from the session registry
-		// (ground truth). "active" = at least one connection right now. We do NOT
-		// fall back to recent audit activity: background apps (e.g. the Antigravity
-		// IDE) reconnect every few minutes just to enumerate tools, which would
-		// falsely light the card as active when the user isn't using the agent.
-		connCount := 0
-		for _, sess := range m.sessions {
-			if sess.Provider == b.id ||
-				(b.id == "antigravity" && strings.HasPrefix(sess.Provider, "antigravity")) {
-				connCount++
-			}
-		}
-		isActive := connCount > 0
-
-		var cardName string
-		var cardBorderColor lipgloss.Color
-		var statusDot string
-
-		hasCursor := m.gridCursor == idx
-		if hasCursor {
-			if isActive {
-				cardBorderColor = lipgloss.Color("#917FD1") // premium brand purple for hovered active agents
-			} else {
-				cardBorderColor = lipgloss.Color("#84DCFB") // brand cyan for hovered idle agents
-			}
-		} else if isActive {
-			cardBorderColor = lipgloss.Color("#84DCFB") // clean, static brand cyan border for active agents
-		} else {
-			cardBorderColor = ColorDim // static grey border for idle agents
-		}
-
-		if isActive {
-			dotPart := lipgloss.NewStyle().Foreground(lipgloss.Color("#73CBAD")).Render("●")
-			var activePart string
-			if hasCursor {
-				activePart = renderHoverShimmerText("active", m.blinkCycle)
-			} else {
-				activePart = renderShimmerText("active", m.blinkCycle)
-			}
-			statusDot = fmt.Sprintf("%s %s", dotPart, activePart)
-			cardName = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#73CBAD")).Render(b.name)
-		} else {
-			statusDot = dim.Render("○ idle")
-			cardName = bold.Render(b.name)
-		}
-
-		// Brand-colored glyph on the name line; the status line sits below, aligned
-		// to the same left edge (Top join keeps both text lines flush regardless of
-		// the glyph's rendered width).
-		icon := brandMark(b.id)
-		connInfo := dim.Render(fmt.Sprintf("⇄%d", connCount))
-		textBlock := fmt.Sprintf("%s\n%s · %s · %s", cardName, statusDot, connInfo, trustBadge)
-		body := lipgloss.JoinHorizontal(lipgloss.Top, icon, "  ", textBlock)
-
-		card := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(cardBorderColor).
-			Padding(0, 1).
-			Width(gridCardW).
-			Render(body)
-
-		brandCards = append(brandCards, card)
+		brandCards = append(brandCards, m.renderAgentCard(b, idx, gridCardW))
 	}
 
 	var grid []string
@@ -978,6 +895,125 @@ func (m dashboardModel) writeAgyAuthHint(pb *strings.Builder) {
 // diagnostics column: remote boxes by host/IP/OS, then a local-agent count. When
 // compact (short terminal) each remote collapses to a single host+IP line so the
 // panel fits the screen height.
+// renderAgentCard renders one bordered agent-brand card at the given content width.
+// The card is always exactly two content lines (4 rows incl. border): the brand
+// name on line 1 and a status line on line 2. The status line degrades gracefully
+// (drops the ⇄N count, then the trust badge) so it never wraps onto a third line —
+// width is supplied by agentGridLayout, which caps the grid at 3 columns so cards
+// stay wide enough for the full status in the common case.
+func (m dashboardModel) renderAgentCard(b agentCard, idx, gridCardW int) string {
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	green := lipgloss.NewStyle().Foreground(ColorSuccess)
+	yellow := lipgloss.NewStyle().Foreground(ColorWarning)
+	bold := lipgloss.NewStyle().Bold(true)
+
+	trustLevel := "auto"
+	if m.trustCfg != nil {
+		trustLevel = m.trustCfg.GetTrustLevel(b.id)
+		if b.id == "antigravity" && (trustLevel == "" || trustLevel == "auto") {
+			if tl := m.trustCfg.GetTrustLevel("antigravity-agent"); tl != "" && tl != "auto" {
+				trustLevel = tl
+			} else if tl := m.trustCfg.GetTrustLevel("antigravity-ide"); tl != "" && tl != "auto" {
+				trustLevel = tl
+			} else if tl := m.trustCfg.GetTrustLevel("antigravity-cli"); tl != "" && tl != "auto" {
+				trustLevel = tl
+			}
+		}
+	}
+
+	trustBadge := green.Render("auto")
+	if trustLevel == "require_approval" {
+		trustBadge = yellow.Render("approve")
+	} else if trustLevel == "read_only" {
+		trustBadge = dim.Render("read-only")
+	}
+
+	// Count live MCP sessions for this brand from the session registry (ground
+	// truth). "active" = at least one connection right now. We do NOT fall back to
+	// recent audit activity: background apps (e.g. the Antigravity IDE) reconnect
+	// every few minutes just to enumerate tools, which would falsely light the card.
+	connCount := 0
+	for _, sess := range m.sessions {
+		if sess.Provider == b.id ||
+			(b.id == "antigravity" && strings.HasPrefix(sess.Provider, "antigravity")) {
+			connCount++
+		}
+	}
+	isActive := connCount > 0
+
+	var cardName string
+	var cardBorderColor lipgloss.Color
+	var statusDot string
+
+	hasCursor := m.gridCursor == idx
+	if hasCursor {
+		if isActive {
+			cardBorderColor = lipgloss.Color("#917FD1") // premium brand purple for hovered active agents
+		} else {
+			cardBorderColor = lipgloss.Color("#84DCFB") // brand cyan for hovered idle agents
+		}
+	} else if isActive {
+		cardBorderColor = lipgloss.Color("#84DCFB") // clean, static brand cyan border for active agents
+	} else {
+		cardBorderColor = ColorDim // static grey border for idle agents
+	}
+
+	// Brand-colored glyph on the name line; the status line sits below, aligned to
+	// the same left edge (Top join keeps both text lines flush regardless of the
+	// glyph's rendered width).
+	icon := brandMark(b.id)
+	// Width of the text column to the right of the icon: card content width minus the
+	// icon glyph, the 2-space join gutter, and the card's 1-col side padding. Keeping
+	// name and status within this budget guarantees each is exactly one row, so every
+	// card is two content lines (4 rows with the border) — never a wrapped trust
+	// badge on a third line. Conservative by design (errs toward dropping a segment,
+	// never wrapping).
+	textW := gridCardW - lipgloss.Width(icon) - 4
+	if textW < 8 {
+		textW = 8
+	}
+
+	// truncate is byte-based; brand names are ASCII so this is safe. Style only after
+	// truncation so we never cut inside an ANSI sequence.
+	nameRaw := truncate(b.name, textW)
+	if isActive {
+		dotPart := lipgloss.NewStyle().Foreground(lipgloss.Color("#73CBAD")).Render("●")
+		var activePart string
+		if hasCursor {
+			activePart = renderHoverShimmerText("active", m.blinkCycle)
+		} else {
+			activePart = renderShimmerText("active", m.blinkCycle)
+		}
+		statusDot = fmt.Sprintf("%s %s", dotPart, activePart)
+		cardName = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#73CBAD")).Render(nameRaw)
+	} else {
+		statusDot = dim.Render("○ idle")
+		cardName = bold.Render(nameRaw)
+	}
+
+	// Status line degrades gracefully to stay on one row: drop the least-essential
+	// segment first (the ⇄N connection count), then the trust badge, before it would
+	// ever wrap. We measure with lipgloss.Width (ANSI-aware) and only ever drop whole
+	// styled segments — never cut inside one.
+	connInfo := dim.Render(fmt.Sprintf("⇄%d", connCount))
+	statusLine := fmt.Sprintf("%s · %s · %s", statusDot, connInfo, trustBadge)
+	if lipgloss.Width(statusLine) > textW {
+		statusLine = fmt.Sprintf("%s · %s", statusDot, trustBadge)
+	}
+	if lipgloss.Width(statusLine) > textW {
+		statusLine = statusDot
+	}
+	textBlock := cardName + "\n" + statusLine
+	body := lipgloss.JoinHorizontal(lipgloss.Top, icon, "  ", textBlock)
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(cardBorderColor).
+		Padding(0, 1).
+		Width(gridCardW).
+		Render(body)
+}
+
 func (m dashboardModel) renderConnectionsSummary(compact bool) string {
 	dim := lipgloss.NewStyle().Foreground(ColorDim)
 	teal := lipgloss.NewStyle().Foreground(lipgloss.Color("#73CBAD"))
@@ -999,7 +1035,30 @@ func (m dashboardModel) renderConnectionsSummary(compact bool) string {
 			}
 		}
 
+		// Collapse identical remote sessions (same host + IP + provider) into a single
+		// row with a ×N count: three live MCP processes from the same box render as one
+		// "host … ×3" line instead of three duplicate rows. First-seen order is kept.
+		// NOTE: this grouping is display-only — the agent cards still count every live
+		// PID for their ⇄N badge, so a host with 3 sessions reads ⇄3 on its card and
+		// "×3" here.
+		type remoteGroup struct {
+			s     agentSession
+			count int
+		}
+		var groups []remoteGroup
+		groupIdx := make(map[string]int, len(remotes))
 		for _, s := range remotes {
+			key := strings.ToLower(s.Host + "|" + s.IP + "|" + s.Provider)
+			if i, ok := groupIdx[key]; ok {
+				groups[i].count++
+				continue
+			}
+			groupIdx[key] = len(groups)
+			groups = append(groups, remoteGroup{s: s, count: 1})
+		}
+
+		for _, g := range groups {
+			s := g.s
 			host := s.Host
 			if host == "" {
 				host = "remote"
@@ -1012,14 +1071,19 @@ func (m dashboardModel) renderConnectionsSummary(compact bool) string {
 			if osLabel == "" {
 				osLabel = "?"
 			}
+			countSuffix := ""
+			if g.count > 1 {
+				countSuffix = fmt.Sprintf("  ×%d", g.count)
+			}
 			if compact {
-				sb.WriteString(fmt.Sprintf("%s %s  %s\n",
-					teal.Render("●"), cyan.Render(host), dim.Render(loc)))
+				sb.WriteString(fmt.Sprintf("%s %s  %s%s\n",
+					teal.Render("●"), cyan.Render(host), dim.Render(loc), dim.Render(countSuffix)))
 				continue
 			}
-			sb.WriteString(fmt.Sprintf("%s %s\n   %s\n",
+			sb.WriteString(fmt.Sprintf("%s %s%s\n   %s\n",
 				teal.Render("●"),
 				cyan.Render(host),
+				dim.Render(countSuffix),
 				dim.Render(fmt.Sprintf("%s · %s · %s", loc, osLabel, s.Provider)),
 			))
 		}
@@ -1327,6 +1391,14 @@ func agentGridLayout(termWidth, numCards int, compact bool) (cols, cardContentW 
 	}
 	if cols > numCards {
 		cols = numCards
+	}
+	// Hard ceiling: never more than 3 columns regardless of how wide the terminal
+	// is. Fewer columns means wider cards, so the status line ("● active · ⇄N ·
+	// auto") always has room on a single row instead of wrapping a trust badge onto
+	// a third line. On narrow terminals the width math above still drops to 2 or 1.
+	const maxCols = 3
+	if cols > maxCols {
+		cols = maxCols
 	}
 	cellW := (avail - (cols-1)*gap) / cols
 	cardContentW = clampInt(cellW-borderPad, minContent, maxContent)

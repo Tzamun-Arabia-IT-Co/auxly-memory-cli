@@ -571,7 +571,9 @@ func (m *model) refreshCurrentScreen() tea.Cmd {
 	case screenSettings:
 		return m.settings.Refresh()
 	case screenSSH:
-		return m.ssh.Refresh()
+		// Kick off the periodic data tick alongside the one-shot refresh so inbound
+		// remote connections appear automatically while the Remote screen is open.
+		return tea.Batch(m.ssh.Refresh(), sshDataTickCmd())
 	case screenSkills:
 		return m.skills.Refresh(m.memoryPath, m.logger)
 	case screenAuditTrail:
