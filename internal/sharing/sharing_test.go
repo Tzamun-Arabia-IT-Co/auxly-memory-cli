@@ -1,6 +1,10 @@
 package sharing
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 var vault = []string{
 	"identity.md", "preferences.md", "infra.md", "projects.md",
@@ -89,6 +93,56 @@ func TestCanWrite_WriteListOverridesLegacyAccess(t *testing.T) {
 	}
 	if !CanWrite(share, "projects.md", vault) {
 		t.Error("projects.md in write_files → writable")
+	}
+}
+
+// TestLoadForRemoteHost_MatchesByHostnameNotJustTargetIP reproduces the reported
+// sharing bug: a relay box is keyed in clients.yaml by IP in `target`, but at
+// connect time it reports its OWN hostname as RemoteHost (connect.go passes
+// `--remote-host localHostname()`). The host stores that hostname in the `hostname`
+// field. The ACL lookup must match on hostname/name too — otherwise the per-file
+// write grants are silently ignored and the remote falls back to read-only
+// ("Writable: none") even though the TUI shows Read+Write.
+func TestLoadForRemoteHost_MatchesByHostnameNotJustTargetIP(t *testing.T) {
+	dir := t.TempDir()
+	clientsYAML := `clients:
+    - name: auxly-server
+      target: root@192.168.1.24
+      method: relay
+      hostname: auxly.tzamun.dev
+      shared_files:
+        - identity.md
+        - infra.md
+      write_files:
+        - identity.md
+        - infra.md
+      access: read
+`
+	if err := os.WriteFile(filepath.Join(dir, "clients.yaml"), []byte(clientsYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	memoryPath := filepath.Join(dir, "memory") // clients.yaml sits in its parent dir
+
+	// The box connects reporting its hostname (NOT the target IP) as RemoteHost.
+	share := LoadForRemoteHost(memoryPath, "auxly.tzamun.dev")
+	if share == nil {
+		t.Fatal("ACL must load when the box reports its hostname (clients.yaml `hostname`) — got nil → read-only")
+	}
+	if !CanWrite(share, "identity.md", vault) {
+		t.Error("identity.md is in write_files → must be writable for the matched client")
+	}
+
+	// Back-compat: matching by the target IP must still work.
+	if LoadForRemoteHost(memoryPath, "192.168.1.24") == nil {
+		t.Error("ACL must also load when RemoteHost is the target IP (back-compat)")
+	}
+	// And by the friendly name (clientIsLive matches it too).
+	if LoadForRemoteHost(memoryPath, "auxly-server") == nil {
+		t.Error("ACL should load when RemoteHost matches the client name")
+	}
+	// Case-insensitive: os.Hostname() casing varies across boxes.
+	if LoadForRemoteHost(memoryPath, "Auxly.Tzamun.Dev") == nil {
+		t.Error("hostname match must be case-insensitive")
 	}
 }
 

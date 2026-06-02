@@ -10,6 +10,7 @@ package sharing
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"gopkg.in/yaml.v3"
@@ -106,8 +107,14 @@ type clientsFile struct {
 }
 
 type clientEntry struct {
-	Name        string   `yaml:"name"`
-	Target      string   `yaml:"target"`
+	Name   string `yaml:"name"`
+	Target string `yaml:"target"`
+	// Hostname is the box's self-reported hostname, captured at provision time. A
+	// box keyed by IP in Target (e.g. root@192.168.1.24) reports a DIFFERENT string
+	// as its session RemoteHost (e.g. "auxly.tzamun.dev"), because the SSH launcher
+	// passes `--remote-host localHostname()`. Matching must consider this field, not
+	// just Target — otherwise the ACL never loads and write grants are dropped.
+	Hostname    string   `yaml:"hostname,omitempty"`
 	SharedFiles []string `yaml:"shared_files,omitempty"`
 	WriteFiles  []string `yaml:"write_files,omitempty"`
 	Access      string   `yaml:"access,omitempty"`
@@ -130,11 +137,31 @@ func LoadForRemoteHost(memoryPath, remoteHost string) *ClientShare {
 		return nil
 	}
 	for _, c := range cf.Clients {
-		if hostMatches(c.Target, remoteHost) {
+		if clientMatches(c, remoteHost) {
 			return &ClientShare{SharedFiles: c.SharedFiles, WriteFiles: c.WriteFiles, Access: c.Access}
 		}
 	}
 	return nil
+}
+
+// clientMatches reports whether a clients.yaml entry refers to the connecting
+// remote, matched by friendly name, the box's self-reported hostname, OR the host
+// part of its target — all case-insensitively. A relay box reports its own hostname
+// as RemoteHost (the SSH launcher passes `--remote-host localHostname()`), stored in
+// the `hostname` field, NOT the IP-keyed target; matching target alone silently
+// dropped per-file write grants. Mirrors clientIsLive in package cmd so sharing and
+// live-status agree on which box a session belongs to.
+func clientMatches(c clientEntry, remoteHost string) bool {
+	if remoteHost == "" {
+		return false
+	}
+	if c.Name != "" && strings.EqualFold(c.Name, remoteHost) {
+		return true
+	}
+	if c.Hostname != "" && strings.EqualFold(c.Hostname, remoteHost) {
+		return true
+	}
+	return hostMatches(c.Target, remoteHost)
 }
 
 // clientsYamlPath resolves ~/.auxly/clients.yaml from the memory path
@@ -156,7 +183,7 @@ func hostMatches(target, remoteHost string) bool {
 	if colon := indexByte(host, ':'); colon >= 0 {
 		host = host[:colon]
 	}
-	return host == remoteHost
+	return strings.EqualFold(host, remoteHost)
 }
 
 func lastIndexByte(s string, b byte) int {
