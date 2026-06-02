@@ -127,12 +127,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == screenSSH && m.ssh.editingHost {
 			var cmd tea.Cmd
 			m.ssh, cmd = m.ssh.Update(msg)
+			// These sub-modes early-return, so refresh the viewport here too —
+			// otherwise the page (in the content viewport) keeps showing the stale
+			// frame and the wizard looks frozen even though its state advanced.
+			if m.vpReady {
+				m.syncViewport()
+			}
 			return m, cmd
 		}
 
 		if m.screen == screenSettings && m.settings.configuringCustom {
 			var cmd tea.Cmd
 			m.settings, cmd = m.settings.Update(msg)
+			if m.vpReady {
+				m.syncViewport()
+			}
 			return m, cmd
 		}
 

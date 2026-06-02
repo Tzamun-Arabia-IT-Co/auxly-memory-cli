@@ -195,3 +195,30 @@ func TestAgentGridColumnsScaleWithWidth(t *testing.T) {
 		t.Errorf("2 cards must not exceed 2 columns, got %d", c)
 	}
 }
+
+// TestSSHWizardRepaintsInViewport is the urgent regression: a sub-mode (the SSH
+// connect wizard, editingHost=true) early-returns in the parent Update, so it must
+// still refresh the content viewport — otherwise selecting a method advances the
+// wizard's state but the screen keeps showing the stale frame ("nothing happens").
+func TestSSHWizardRepaintsInViewport(t *testing.T) {
+	m := *NewApp(t.TempDir())
+	u, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = u.(model)
+	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'7'}}) // Remote tab
+	m = u.(model)
+	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}}) // connect wizard
+	m = u.(model)
+	if !m.ssh.editingHost || m.ssh.formStep != formStepMethod {
+		t.Fatalf("'c' must open the method step (editingHost=%v step=%q)", m.ssh.editingHost, m.ssh.formStep)
+	}
+	before := stripANSI(m.contentVP.View())
+	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}}) // pick "lan"
+	m = u.(model)
+	if m.ssh.formMethod != "lan" {
+		t.Fatalf("digit '1' must select lan (got %q)", m.ssh.formMethod)
+	}
+	after := stripANSI(m.contentVP.View())
+	if after == before {
+		t.Error("viewport did NOT repaint after a wizard keypress — stale frame (the reported bug)")
+	}
+}
