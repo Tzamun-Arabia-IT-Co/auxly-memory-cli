@@ -29,7 +29,13 @@ type ClientShare struct {
 	// SharedFiles is an explicit allow-list of files this remote may read.
 	// Empty/nil means "use the safe default" (all non-personal files).
 	SharedFiles []string `yaml:"shared_files,omitempty"`
-	// Access is "read" (default) or "write".
+	// WriteFiles is the per-file writable subset (each must also be in the
+	// readable set). When non-empty it is AUTHORITATIVE: writes are allowed only
+	// to files it names, regardless of Access. Empty/nil falls back to the legacy
+	// global Access flag so older configs keep working.
+	WriteFiles []string `yaml:"write_files,omitempty"`
+	// Access is the legacy global toggle: "read" (default) or "write". Superseded
+	// by WriteFiles for new per-file grants; retained for back-compat.
 	Access string `yaml:"access,omitempty"`
 }
 
@@ -70,14 +76,25 @@ func CanRead(share *ClientShare, file string, allVaultFiles []string) bool {
 	return AllowedReads(share, allVaultFiles)[file]
 }
 
-// CanWrite reports whether a remote may write a specific file. Requires both
-// write access AND the file being in the readable set (you cannot write what you
-// cannot see). Personal files require an explicit grant to be writable at all.
+// CanWrite reports whether a remote may write a specific file. A file must first
+// be in the readable set (you cannot write what you cannot see). When the per-file
+// WriteFiles set is present it is authoritative — only its members are writable;
+// otherwise the legacy global Access flag governs. Personal files require an
+// explicit read grant to be writable at all (and the MCP layer hard-blocks them
+// regardless).
 func CanWrite(share *ClientShare, file string, allVaultFiles []string) bool {
-	if share.effectiveAccess() != AccessWrite {
+	if !AllowedReads(share, allVaultFiles)[file] {
 		return false
 	}
-	return AllowedReads(share, allVaultFiles)[file]
+	if share != nil && len(share.WriteFiles) > 0 {
+		for _, f := range share.WriteFiles {
+			if f == file {
+				return true
+			}
+		}
+		return false
+	}
+	return share.effectiveAccess() == AccessWrite
 }
 
 // --- persistence: read the host's per-client shares from clients.yaml ---
@@ -92,6 +109,7 @@ type clientEntry struct {
 	Name        string   `yaml:"name"`
 	Target      string   `yaml:"target"`
 	SharedFiles []string `yaml:"shared_files,omitempty"`
+	WriteFiles  []string `yaml:"write_files,omitempty"`
 	Access      string   `yaml:"access,omitempty"`
 }
 
@@ -113,7 +131,7 @@ func LoadForRemoteHost(memoryPath, remoteHost string) *ClientShare {
 	}
 	for _, c := range cf.Clients {
 		if hostMatches(c.Target, remoteHost) {
-			return &ClientShare{SharedFiles: c.SharedFiles, Access: c.Access}
+			return &ClientShare{SharedFiles: c.SharedFiles, WriteFiles: c.WriteFiles, Access: c.Access}
 		}
 	}
 	return nil

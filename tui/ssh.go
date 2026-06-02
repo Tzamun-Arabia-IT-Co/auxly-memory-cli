@@ -120,12 +120,27 @@ type sshModel struct {
 	editingHost bool
 
 	// per-remote file-sharing modal state (mode == sshModeShare, §10)
-	shareOpen    bool            // modal visible
-	shareClient  clientRow       // the inbound client being edited
-	shareFiles   []string        // checklist rows, in taxonomy order
-	shareChecked map[string]bool // file → checked (effective shared set)
-	shareCursor  int             // highlighted row within the modal
-	shareWrite   bool            // access toggle: true = read & write
+	shareOpen   bool           // modal visible
+	shareClient clientRow      // the inbound client being edited
+	shareFiles  []string       // rows, in taxonomy order
+	shareState  map[string]int // file → shareOff | shareRead | shareReadWrite
+	shareCursor int            // highlighted row within the modal
+}
+
+// Per-file sharing tri-state, cycled with ←/→ in the share modal.
+const (
+	shareOff       = 0 // not shared
+	shareRead      = 1 // shared, read-only
+	shareReadWrite = 2 // shared, read & write
+)
+
+// cycleShareState advances a tri-state Off→Read→Read+Write→Off (forward) or the
+// reverse, so ←/→ both walk the same loop in opposite directions.
+func cycleShareState(cur int, forward bool) int {
+	if forward {
+		return (cur + 1) % 3
+	}
+	return (cur + 2) % 3
 }
 
 // sshRefreshMsg carries the freshly read remotes list + host config into Update.
@@ -215,9 +230,11 @@ type clientRow struct {
 	Hostname string `yaml:"hostname"` // box's self-reported hostname (matches session RemoteHost)
 	// Per-remote file-sharing selection (§10). SharedFiles is the explicit set of
 	// memory files this inbound client may read; an empty/unset slice means "use
-	// the default" (all non-personal files, personal off). Access governs writes to
-	// those files: "write" = read & write, anything else = read-only.
+	// the default" (all non-personal files, personal off). WriteFiles is the
+	// per-file writable subset (each also in SharedFiles). Access is the legacy
+	// global write flag, superseded by WriteFiles but kept for back-compat.
 	SharedFiles []string `yaml:"shared_files,omitempty"`
+	WriteFiles  []string `yaml:"write_files,omitempty"`
 	Access      string   `yaml:"access,omitempty"`
 }
 
@@ -1076,40 +1093,47 @@ func renameClient(old, newName string) {
 //  Per-remote file sharing (§10)
 // ─────────────────────────────────────────────────────────────────
 
-// shareDefaultChecked is the §10 default selection for a client that has no
-// explicit shared_files yet: every NON-personal file checked, personal files
-// unchecked.
-func shareDefaultChecked() map[string]bool {
-	checked := map[string]bool{}
-	for _, f := range memory.OrderedFiles() {
-		checked[f] = !memory.IsPersonalFile(f)
-	}
-	return checked
-}
-
 // openShare builds the file-sharing modal state for the given inbound client and
-// returns the updated model. The checklist is seeded from the client's explicit
-// SharedFiles when present, otherwise from the §10 default.
+// returns the updated model. Each file is seeded to Off/Read/Read+Write from the
+// client's explicit SharedFiles + WriteFiles (or the §10 default when unset). The
+// personal tier defaults to Off but the host may deliberately share it; the modal
+// shows an exposure warning so that choice is made consciously.
 func (m sshModel) openShare(c clientRow) sshModel {
 	files := memory.OrderedFiles()
-	checked := map[string]bool{}
-	if len(c.SharedFiles) == 0 {
-		checked = shareDefaultChecked()
-	} else {
-		shared := map[string]bool{}
-		for _, f := range c.SharedFiles {
-			shared[f] = true
+	sharedSet := map[string]bool{}
+	writeSet := map[string]bool{}
+	for _, f := range c.SharedFiles {
+		sharedSet[f] = true
+	}
+	for _, f := range c.WriteFiles {
+		writeSet[f] = true
+	}
+	defaulting := len(c.SharedFiles) == 0
+	legacyWrite := len(c.WriteFiles) == 0 && strings.EqualFold(strings.TrimSpace(c.Access), "write")
+
+	state := map[string]int{}
+	for _, f := range files {
+		shared := sharedSet[f]
+		if defaulting && !memory.IsPersonalFile(f) {
+			// Default share = every non-personal file, read-only. The private tier
+			// stays Off so it is only ever exposed by a deliberate host choice.
+			shared = true
 		}
-		for _, f := range files {
-			checked[f] = shared[f]
+		switch {
+		case !shared:
+			state[f] = shareOff
+		case writeSet[f] || legacyWrite:
+			state[f] = shareReadWrite
+		default:
+			state[f] = shareRead
 		}
 	}
+
 	m.shareOpen = true
 	m.shareClient = c
 	m.shareFiles = files
-	m.shareChecked = checked
+	m.shareState = state
 	m.shareCursor = 0
-	m.shareWrite = strings.EqualFold(strings.TrimSpace(c.Access), "write")
 	m.mode = sshModeShare
 	m.editingHost = true // route ALL keys here so digits/letters don't leak to app.go
 	m.status = ""
@@ -1119,7 +1143,7 @@ func (m sshModel) openShare(c clientRow) sshModel {
 // closeShare clears the modal state and returns to the list.
 func (m sshModel) closeShare() sshModel {
 	m.shareOpen = false
-	m.shareChecked = nil
+	m.shareState = nil
 	m.shareFiles = nil
 	m.shareCursor = 0
 	m.editingHost = false
@@ -1127,8 +1151,18 @@ func (m sshModel) closeShare() sshModel {
 	return m
 }
 
-// handleShareKey drives the file-sharing checklist modal.
+// handleShareKey drives the per-file tri-state sharing modal. ↑/↓ (or j/k) move
+// between files; ←/→ (or space) cycle the highlighted file Off → Read →
+// Read+Write. Personal-tier rows cycle too — sharing them is the host's call —
+// but render with an exposure warning.
 func (m sshModel) handleShareKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
+	cycle := func(forward bool) {
+		if m.shareCursor < 0 || m.shareCursor >= len(m.shareFiles) {
+			return
+		}
+		f := m.shareFiles[m.shareCursor]
+		m.shareState[f] = cycleShareState(m.shareState[f], forward)
+	}
 	switch msg.Type {
 	case tea.KeyEsc:
 		return m.closeShare(), nil
@@ -1144,11 +1178,11 @@ func (m sshModel) handleShareKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 			m.shareCursor++
 		}
 		return m, nil
-	case tea.KeySpace:
-		if m.shareCursor >= 0 && m.shareCursor < len(m.shareFiles) {
-			f := m.shareFiles[m.shareCursor]
-			m.shareChecked[f] = !m.shareChecked[f]
-		}
+	case tea.KeyLeft:
+		cycle(false)
+		return m, nil
+	case tea.KeyRight, tea.KeySpace:
+		cycle(true)
 		return m, nil
 	}
 	switch msg.String() {
@@ -1160,15 +1194,19 @@ func (m sshModel) handleShareKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		if m.shareCursor < len(m.shareFiles)-1 {
 			m.shareCursor++
 		}
-	case "w":
-		m.shareWrite = !m.shareWrite
-	case "a":
+	case "h":
+		cycle(false)
+	case "l":
+		cycle(true)
+	case "a": // all non-personal → read-only
 		for _, f := range m.shareFiles {
-			m.shareChecked[f] = true
+			if !memory.IsPersonalFile(f) {
+				m.shareState[f] = shareRead
+			}
 		}
-	case "n":
+	case "n": // none
 		for _, f := range m.shareFiles {
-			m.shareChecked[f] = false
+			m.shareState[f] = shareOff
 		}
 	}
 	return m, nil
@@ -1179,27 +1217,30 @@ func (m sshModel) handleShareKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 // the in-memory client list.
 func (m sshModel) saveShare() (sshModel, tea.Cmd) {
 	shared := make([]string, 0, len(m.shareFiles))
+	writes := make([]string, 0, len(m.shareFiles))
 	for _, f := range m.shareFiles {
-		if m.shareChecked[f] {
+		switch m.shareState[f] {
+		case shareReadWrite:
+			shared = append(shared, f)
+			writes = append(writes, f)
+		case shareRead:
 			shared = append(shared, f)
 		}
 	}
-	access := "read"
-	if m.shareWrite {
-		access = "write"
-	}
 	name := m.shareClient.Name
-	saveClientSharing(m.shareClient, shared, access)
+	saveClientSharing(m.shareClient, shared, writes)
 	m.clients = readClients()
 	m.cursor = clampCursor(m.cursor, m.listLen())
 	m.status = "Updated sharing for " + name
 	return m.closeShare(), nil
 }
 
-// saveClientSharing updates one inbound client's shared_files + access in
+// saveClientSharing updates one inbound client's shared_files + write_files in
 // clients.yaml, preserving every other field and entry untouched. The match is by
-// Target first (stable), falling back to Name.
-func saveClientSharing(c clientRow, shared []string, access string) {
+// Target first (stable), falling back to Name. The legacy global access flag is
+// pinned to "read" so an older auxly that ignores write_files fails closed
+// (read-only) rather than granting blanket writes.
+func saveClientSharing(c clientRow, shared, writes []string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
@@ -1230,7 +1271,8 @@ func saveClientSharing(c clientRow, shared []string, access string) {
 			continue
 		}
 		setSequenceField(entry, "shared_files", shared)
-		setScalarField(entry, "access", access)
+		setSequenceField(entry, "write_files", writes)
+		setScalarField(entry, "access", "read")
 		break
 	}
 	out, merr := yaml.Marshal(&doc)
@@ -1459,29 +1501,35 @@ func (m sshModel) View() string {
 			title += " (" + target + ")"
 		}
 		lines = append(lines, cyan.Render(title))
-		lines = append(lines, "")
-		// Access toggle (w).
-		ro, rw := "( ) Read-only", "( ) Read & write"
-		if m.shareWrite {
-			rw = "(•) Read & write"
-			lines = append(lines, "  "+dim.Render("Access:   ")+dim.Render(ro)+"   "+ok.Render(rw)+dim.Render("   [w] toggle"))
+		lines = append(lines, dim.Render("  Use ")+accent.Render("←/→")+dim.Render(" to set each file:  ")+
+			dim.Render("Off")+dim.Render(" → ")+accent.Render("Read")+dim.Render(" → ")+ok.Render("Read+Write"))
+		// Caution line — emphasized while the private tier is actually shared.
+		if m.shareState["personal.md"] != shareOff {
+			lines = append(lines, "  "+warn.Render("⚠ personal.md is SHARED — your private life (family, health, finances) will be exposed to "+name))
 		} else {
-			ro = "(•) Read-only"
-			lines = append(lines, "  "+dim.Render("Access:   ")+ok.Render(ro)+"   "+dim.Render(rw)+dim.Render("   [w] toggle"))
+			lines = append(lines, "  "+dim.Render("Heads-up: personal.md is private and off by default — sharing it exposes your personal info to the remote machine."))
 		}
 		lines = append(lines, "")
-		// Checklist.
+		// Per-file tri-state list.
 		for i, f := range m.shareFiles {
-			box := dim.Render("[ ]")
-			if m.shareChecked[f] {
-				box = ok.Render("[x]")
-			}
 			label := fmt.Sprintf("%-16s", f)
-			tag := ""
-			if memory.IsPersonalFile(f) {
-				tag = "  " + warn.Render("PRIVATE ⚠")
+			var badge string
+			switch m.shareState[f] {
+			case shareReadWrite:
+				badge = ok.Render("● Read + Write")
+			case shareRead:
+				badge = accent.Render("◐ Read only  ")
+			default:
+				badge = dim.Render("○ Off        ")
 			}
-			row := box + " " + label + tag
+			row := badge + "  " + label
+			if memory.IsPersonalFile(f) {
+				if m.shareState[f] == shareOff {
+					row += "  " + dim.Render("private — off by default")
+				} else {
+					row += "  " + warn.Render("⚠ EXPOSES YOUR PRIVATE LIFE")
+				}
+			}
 			if i == m.shareCursor {
 				lines = append(lines, accent.Render("▸ ")+selRow.Render(row))
 			} else {
@@ -1489,7 +1537,7 @@ func (m sshModel) View() string {
 			}
 		}
 		lines = append(lines, "")
-		lines = append(lines, dim.Render("space toggle · ")+accent.Render("↑/↓")+dim.Render(" move · a all · n none · w access · ")+accent.Render("enter")+dim.Render(" save · esc cancel"))
+		lines = append(lines, accent.Render("←/→")+dim.Render(" cycle access · ")+accent.Render("↑/↓")+dim.Render(" move · a all-read · n none · ")+accent.Render("enter")+dim.Render(" save · esc cancel"))
 	case sshModeProgress:
 		spin := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render(spinnerFrame(m.spin))
 		lines = append(lines, spin+"  "+cyan.Render(m.progressTitle))

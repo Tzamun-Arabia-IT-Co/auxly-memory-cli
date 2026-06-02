@@ -56,8 +56,17 @@ func InstalledAgents() []Agent {
 			[]string{filepath.Join(home, ".gemini/antigravity-cli")}, []string{"agy"}},
 		{"Antigravity Agent", "antigravity", "MCP",
 			[]string{filepath.Join(home, ".gemini/antigravity-agent")}, []string{"antigravity-agent"}},
-		{"Copilot", "copilot", "Shell",
-			[]string{filepath.Join(home, "Library/Application Support/GitHub Copilot")}, nil},
+		// GitHub Copilot CLI (npm @github/copilot, binary `copilot`) — MCP servers
+		// live in ~/.copilot/mcp-config.json. Detected by that config dir or the
+		// binary on PATH. The older Copilot desktop app dir is kept as a fallback.
+		{"GitHub Copilot CLI", "copilot", "MCP",
+			[]string{filepath.Join(home, ".copilot"), filepath.Join(home, "Library/Application Support/GitHub Copilot")},
+			[]string{"copilot"}},
+		// Perplexity for macOS supports MCP via its Connectors UI (requires the
+		// PerplexityXPC helper). There is no writable config file, so auxly detects
+		// the app and surfaces a paste-in connector command during setup.
+		{"Perplexity", "perplexity", "MCP",
+			[]string{filepath.Join(home, "Library/Application Support/Perplexity")}, nil},
 		{"Gemini Desktop", "gemini", "Shell",
 			[]string{filepath.Join(home, "Library/Application Support/Gemini")}, nil},
 		// Warp terminal — detected by its config dir (created once Warp runs); MCP

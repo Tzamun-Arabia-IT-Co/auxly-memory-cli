@@ -30,7 +30,7 @@ var versionRe = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+){0,3}([-+][0-9A-Za-z.]+)?
 // It defaults to the current release version for plain `go build` / source /
 // `go install` builds (which carry no ldflags). Bump this together with the
 // VERSION file and the git tag on every release.
-var Current = "1.0.1"
+var Current = "1.0.2"
 
 const checkInterval = 24 * time.Hour
 

@@ -201,12 +201,34 @@ func IsEditableFile(file string) bool {
 // prompts, the organize re-classification prompt, and the shared skill footer, so
 // every agent files facts in the right place the first time.
 func RenderForPrompt() string {
+	return renderTaxonomy(nil, nil)
+}
+
+// RenderForPromptScoped renders the category guide limited to the files a caller
+// may actually use. `include` reports whether a file is visible at all (rows that
+// fail it are omitted entirely — a remote never even learns the file exists);
+// `writable` reports whether it may also be written, used to annotate each row
+// "read-only" vs "read & write". Passing nil for both reproduces the full,
+// unannotated local-session guide (see RenderForPrompt).
+func RenderForPromptScoped(include, writable func(file string) bool) string {
+	return renderTaxonomy(include, writable)
+}
+
+func renderTaxonomy(include, writable func(file string) bool) string {
 	var b strings.Builder
 	b.WriteString("AUXLY MEMORY CATEGORIES (file : what belongs there):\n")
 	for _, c := range Taxonomy {
+		if include != nil && !include(c.File) {
+			continue // remote scope: hide files this caller cannot access
+		}
 		tag := ""
-		if c.Tier == TierPersonal {
+		switch {
+		case include == nil && c.Tier == TierPersonal:
 			tag = "  [PRIVATE — off by default for remotes]"
+		case writable != nil && writable(c.File):
+			tag = "  [shared: read & write]"
+		case writable != nil:
+			tag = "  [shared: read-only]"
 		}
 		b.WriteString("- ")
 		b.WriteString(c.File)

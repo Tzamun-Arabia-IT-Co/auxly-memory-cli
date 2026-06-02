@@ -193,6 +193,15 @@ func knownIDETargets(home string) []ideTarget {
 	voidBaseDir := filepath.Join(home, ".void-editor")
 	targets = append(targets, ideTarget{filepath.Join(voidBaseDir, "mcp.json"), "Void", voidBaseDir, false, "void"})
 
+	// 8. GitHub Copilot CLI — ~/.copilot/mcp-config.json. Same {"mcpServers":{...}}
+	// wrapper, but each entry also needs "type":"local" and "tools":["*"] (added in
+	// runSetup for the copilot provider). COPILOT_HOME can relocate ~/.copilot.
+	copilotBaseDir := filepath.Join(home, ".copilot")
+	if ch := os.Getenv("COPILOT_HOME"); ch != "" {
+		copilotBaseDir = ch
+	}
+	targets = append(targets, ideTarget{filepath.Join(copilotBaseDir, "mcp-config.json"), "GitHub Copilot CLI", copilotBaseDir, false, "copilot"})
+
 	return targets
 }
 
@@ -249,8 +258,9 @@ func writeMCPConfigEntry(t ideTarget, serverDef map[string]interface{}) string {
 		config = make(map[string]interface{})
 	}
 
-	if t.IsClaudeDesktop || filepath.Base(path) == "settings.json" || filepath.Base(path) == "mcp_config.json" || filepath.Base(path) == "mcpServers.json" {
-		// Claude Desktop, Cursor, VS Code, and Antigravity put servers inside "mcpServers" key
+	if t.IsClaudeDesktop || filepath.Base(path) == "settings.json" || filepath.Base(path) == "mcp_config.json" || filepath.Base(path) == "mcpServers.json" || filepath.Base(path) == "mcp-config.json" {
+		// Claude Desktop, Cursor, VS Code, Antigravity, and GitHub Copilot CLI put
+		// servers inside the "mcpServers" key
 		servers, ok := config["mcpServers"].(map[string]interface{})
 		if !ok {
 			servers = make(map[string]interface{})
@@ -422,7 +432,14 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	// Inject the local MCP server definition into every known IDE/agent target.
 	for _, t := range knownIDETargets(home) {
-		if app := writeMCPConfigEntry(t, localServerDef(binaryPath, memPath, t.ProviderID)); app != "" {
+		serverDef := localServerDef(binaryPath, memPath, t.ProviderID)
+		// GitHub Copilot CLI requires an explicit transport type and tool allow-list
+		// per server entry (other clients ignore these extra keys).
+		if t.ProviderID == "copilot" {
+			serverDef["type"] = "local"
+			serverDef["tools"] = []interface{}{"*"}
+		}
+		if app := writeMCPConfigEntry(t, serverDef); app != "" {
 			configuredApps = append(configuredApps, app)
 		}
 	}
@@ -487,6 +504,18 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		} else {
 			printAl("✅ Allowed auxly-memory tools in the interactive Cursor agent.")
 		}
+		printAl("")
+	}
+
+	// 7c. Perplexity (macOS) is wired through its Connectors GUI (via the
+	// PerplexityXPC helper), not a writable config file — so we surface the exact
+	// command to paste into Settings → Connectors → Add Connector → Simple.
+	if _, err := os.Stat(filepath.Join(home, "Library/Application Support/Perplexity")); err == nil {
+		printAl("🤖 Perplexity detected. It's wired via the Connectors UI (no config file):")
+		printAl("   1. Perplexity → Settings → Connectors → Add Connector → \"Simple\" tab")
+		printAl("   2. Install the PerplexityXPC helper if prompted")
+		printAlf("   3. Command:  %s --path %s mcp-server\r\n", binaryPath, memPath)
+		printAl("   4. Save and wait for the connector to show \"Running\".")
 		printAl("")
 	}
 

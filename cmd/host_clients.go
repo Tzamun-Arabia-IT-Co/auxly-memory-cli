@@ -30,7 +30,12 @@ type clientEntry struct {
 	// files this box may READ. Empty/nil means the safe default (all non-personal
 	// files). The matching reader lives in internal/sharing.
 	SharedFiles []string `yaml:"shared_files,omitempty"`
-	// Access is "read" (default) or "write" — governs writes to shared files.
+	// WriteFiles is the per-file writable subset (each also in SharedFiles). It
+	// must be carried here so a struct round-trip via saveClients does not silently
+	// drop the per-file write grants set in the TUI sharing modal.
+	WriteFiles []string `yaml:"write_files,omitempty"`
+	// Access is the legacy global write flag ("read"/"write"), superseded by
+	// WriteFiles but preserved for back-compat.
 	Access string `yaml:"access,omitempty"`
 }
 

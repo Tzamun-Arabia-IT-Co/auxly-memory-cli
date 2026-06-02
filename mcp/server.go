@@ -135,7 +135,10 @@ func (s *Server) vaultFileNames() []string {
 }
 
 // canRead reports whether the current caller may read a file. Local sessions have
-// full access; SSH-remote sessions are gated by the per-remote sharing ACL.
+// full access; SSH-remote sessions are gated by the per-remote sharing ACL. The
+// personal tier is OFF BY DEFAULT for remotes (AllowedReads fail-closes it), but
+// the host owns the data and may deliberately grant it — an explicit shared_files
+// entry is honored. The TUI surfaces a warning before that choice is made.
 func (s *Server) canRead(file string) bool {
 	if !s.isRemote {
 		return true
@@ -144,7 +147,8 @@ func (s *Server) canRead(file string) bool {
 }
 
 // canWrite reports whether the current caller may write a file. Local sessions
-// have full access; SSH-remote sessions require an explicit write grant.
+// have full access; SSH-remote sessions require an explicit write grant. As with
+// reads, personal-tier writes are off by default but can be granted by the host.
 func (s *Server) canWrite(file string) bool {
 	if !s.isRemote {
 		return true
@@ -673,7 +677,7 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 		if s.logger != nil {
 			s.logger.LogWithSource(agentID, provider, "write", file, diff, reason, level, s.sourceMeta)
 		}
-		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(fmt.Sprintf("⏳ Change queued for approval: .pending/%s\nHuman must run 'auxly approve %s' to apply.", pendingName, pendingName))}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(fmt.Sprintf("⏳ Change queued for approval: .pending/%s\nHuman must run 'auxly approve %s' to apply.", pendingName, pendingName))}}}
 	}
 
 	// Auto trust: write directly
@@ -696,7 +700,7 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 		msgText += "\n\nHere is the updated global memory summary for your context sync:\n---\n" + data
 	}
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(msgText)}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(msgText)}}}
 }
 
 func (s *Server) toolSearch(query string) toolResult {
@@ -714,11 +718,21 @@ func (s *Server) toolSearch(query string) toolResult {
 	}
 
 	var sb strings.Builder
+	shown := 0
 	for file, lines := range results {
+		// §10: never leak unshared/private files (e.g. personal.md) to an
+		// SSH-remote peer through search. Local sessions pass canRead freely.
+		if !s.canRead(file) {
+			continue
+		}
 		sb.WriteString(fmt.Sprintf("\n📄 %s\n", file))
 		for _, line := range lines {
 			sb.WriteString(fmt.Sprintf("   %s\n", line))
 		}
+		shown++
+	}
+	if shown == 0 {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("No results for \"%s\"", query)}}}
 	}
 	return toolResult{Content: []toolContent{{Type: "text", Text: sb.String()}}}
 }
@@ -778,10 +792,59 @@ func describeRemote(meta audit.SourceMeta) string {
 	return strings.Join(parts, ", ")
 }
 
-func appendSkillSyncFooter(text string) string {
+// withFooter appends the standard Auxly sync reminder + category guide to a tool
+// reply. For a LOCAL session it shows the full taxonomy. For an SSH-REMOTE peer it
+// renders an ACL-scoped footer that lists ONLY the files that remote may read or
+// write and never even names personal/unshared files — closing the gap where the
+// onboarding text advertised personal.md to a remote whose data layer correctly
+// blocked it (the agent "saw" the category in the guide, not the contents).
+func (s *Server) withFooter(text string) string {
+	if s.isRemote {
+		return text + s.remoteScopeFooter()
+	}
 	return text +
 		"\n\n---\n🧠 **Auxly Agent Sync Active:** Remember to proactively call `auxly_skill_sync` to update the memory vault whenever you learn new preferences, system setups, or developer details!" +
 		"\n\n📂 WHERE FACTS GO (file the right place the first time):\n" + memory.RenderForPrompt()
+}
+
+// remoteScopeFooter states the host-enforced sharing scope to a connected remote
+// agent and renders a category guide limited to the files it can actually use.
+// Decisions are made against the full taxonomy (not just files that happen to
+// exist yet) so a writable-but-empty category still shows as a valid target; the
+// personal-tier hard block in canRead/canWrite means private files are never
+// listed regardless of any per-peer config.
+func (s *Server) remoteScopeFooter() string {
+	allFiles := memory.OrderedFiles()
+	readCat := func(f string) bool { return sharing.CanRead(s.share, f, allFiles) }
+	writeCat := func(f string) bool { return sharing.CanWrite(s.share, f, allFiles) }
+
+	var reads, writes []string
+	for _, f := range allFiles {
+		if readCat(f) {
+			reads = append(reads, f)
+		}
+		if writeCat(f) {
+			writes = append(writes, f)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("\n\n---\n🔒 **Remote access scope (host-enforced — do not exceed it):**\n")
+	b.WriteString("You are connected as a REMOTE consumer. The host shares a LIMITED view of its memory.\n")
+	if len(reads) == 0 {
+		b.WriteString("• Readable: none.\n")
+	} else {
+		b.WriteString("• Readable: " + strings.Join(reads, ", ") + "\n")
+	}
+	if len(writes) == 0 {
+		b.WriteString("• Writable: none — this is a READ-ONLY connection; `auxly_skill_sync` will be rejected.\n")
+	} else {
+		b.WriteString("• Writable (via `auxly_skill_sync`): " + strings.Join(writes, ", ") + "\n")
+	}
+	b.WriteString("• Private & unshared files are NOT accessible and are not listed here. Do not claim, infer, or attempt access to them.\n")
+	b.WriteString("\n📂 WHERE FACTS GO (only the categories you may use):\n")
+	b.WriteString(memory.RenderForPromptScoped(readCat, writeCat))
+	return b.String()
 }
 
 func (s *Server) toolSkillInit() toolResult {
@@ -799,7 +862,7 @@ Welcome! You are now aligned with the **Auxly Unified Memory standard**. This lo
 * If you have any existing facts about the developer (e.g. name, preferences, IDEs, servers, or keys), immediately execute the 'auxly_skill_sync' tool to save them into the vault under the appropriate category!
 * Confirm to the user that you have understood these rules and are ready to sync.`
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(onboarding)}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(onboarding)}}}
 }
 
 func (s *Server) toolSkillMemory() toolResult {
@@ -853,10 +916,10 @@ func (s *Server) toolSkillMemory() toolResult {
 	}
 
 	if !readAny {
-		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter("⚠️ No memory files populated yet. Type `/auxly-sync [content]` or paste your onboarding prompt to save your first memory!")}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter("⚠️ No memory files populated yet. Type `/auxly-sync [content]` or paste your onboarding prompt to save your first memory!")}}}
 	}
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
 }
 
 func (s *Server) toolSkillMax() toolResult {
@@ -898,7 +961,7 @@ the correct files.
 
 ` + memory.RenderForPrompt()
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(prompt)}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(prompt)}}}
 }
 
 func (s *Server) toolSkillSync(content, category, scope string) toolResult {
@@ -934,7 +997,7 @@ func (s *Server) toolSkillPending(action, targetID string) toolResult {
 	if action == "" || action == "list" {
 		res := s.toolPendingList()
 		if !res.IsError && len(res.Content) > 0 {
-			res.Content[0].Text = appendSkillSyncFooter(res.Content[0].Text)
+			res.Content[0].Text = s.withFooter(res.Content[0].Text)
 		}
 		return res
 	}
@@ -957,7 +1020,7 @@ func (s *Server) toolSkillPending(action, targetID string) toolResult {
 			agentID := fmt.Sprintf("%s-mcp", provider)
 			s.logger.LogWithSource(agentID, provider, "write", targetID, "", "Approved pending change via skill", "auto", s.sourceMeta)
 		}
-		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(fmt.Sprintf("✓ Successfully approved and committed pending entry: %s", targetID))}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(fmt.Sprintf("✓ Successfully approved and committed pending entry: %s", targetID))}}}
 	}
 
 	if action == "reject" {
@@ -965,7 +1028,7 @@ func (s *Server) toolSkillPending(action, targetID string) toolResult {
 		if err != nil {
 			return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error rejecting entry: %v", err)}}, IsError: true}
 		}
-		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(fmt.Sprintf("✗ Successfully rejected and deleted pending entry: %s", targetID))}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(fmt.Sprintf("✗ Successfully rejected and deleted pending entry: %s", targetID))}}}
 	}
 
 	return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: Unknown action '%s'. Supported actions are list, approve, reject.", action)}}, IsError: true}
@@ -992,7 +1055,7 @@ func (s *Server) toolSkillStatus() toolResult {
 		sb.WriteString(fmt.Sprintf("• **Total Memory Entries:** %d\n", stats.TotalEntries))
 	}
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
 }
 
 func (s *Server) toolSkillRemoteConnect() toolResult {
@@ -1019,7 +1082,7 @@ func (s *Server) toolSkillRemoteConnect() toolResult {
 		sb.WriteString(fmt.Sprintf("• **Memory host (vault lives here):** %s\n", memHost))
 		sb.WriteString(fmt.Sprintf("• **This machine (connected client):** %s (%s)\n", client, remoteOS))
 		sb.WriteString(fmt.Sprintf("\nReads and writes are centralized and audited on **%s**'s Auxly vault, which may be shared with other agents. No memory is stored locally on this machine.", memHost))
-		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
 	}
 
 	sb.WriteString("• **Source:** local vault\n\n")
@@ -1038,12 +1101,12 @@ func (s *Server) toolSkillRemoteConnect() toolResult {
 			sb.WriteString(fmt.Sprintf("```\nauxly connect auto %s\n```\n", offers[0]))
 		}
 		sb.WriteString("\nAfter the agent restarts, reads/writes go to the host's central, audited vault.")
-		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
 	}
 
 	sb.WriteString("This session is using a LOCAL Auxly vault, and no remote host is offered on this machine.\n")
 	sb.WriteString("To link one, run `auxly host setup` on the memory host (it publishes an offer here), then `auxly connect auto`.")
-	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
 }
 
 // detectRelayOfferNames lists the names of relay offers published in
@@ -1082,6 +1145,11 @@ func (s *Server) toolSkillForget(query string) toolResult {
 
 	for _, f := range files {
 		file := f.Name
+		// §10: an SSH-remote peer may only prune files it has write access to;
+		// never let it delete from unshared/read-only files (e.g. personal.md).
+		if !s.canWrite(file) {
+			continue
+		}
 		content, err := s.store.View(file)
 		if err != nil {
 			continue
@@ -1118,11 +1186,11 @@ func (s *Server) toolSkillForget(query string) toolResult {
 	}
 
 	if deletedCount == 0 {
-		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(fmt.Sprintf("No matching facts or bullets found in memory for query: \"%s\"", query))}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(fmt.Sprintf("No matching facts or bullets found in memory for query: \"%s\"", query))}}}
 	}
 
 	sb.WriteString(fmt.Sprintf("✓ Successfully pruned %d obsolete statement(s) from memory vault.", deletedCount))
-	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
 }
 
 // toolSkillLearn is the inbound "read & internalize" directive. It loads vault
@@ -1167,7 +1235,7 @@ func (s *Server) toolSkillLearn(folder, topic string) toolResult {
 		sb.WriteString("ABSORB this memory and operate from it for the rest of the session. Internalize these facts and behave as if you already knew them — do not ask the user to repeat what is below.\n\n")
 		sb.WriteString(fmt.Sprintf("### 📄 %s\n\n", fileName))
 		sb.WriteString(content)
-		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
 	}
 
 	// Whole-vault internalize: read every populated file in canonical order.
@@ -1217,10 +1285,10 @@ func (s *Server) toolSkillLearn(folder, topic string) toolResult {
 	}
 
 	if !readAny {
-		return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter("⚠️ No memory files populated yet. Use `/auxly-sync [content]` to save your first memory.")}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter("⚠️ No memory files populated yet. Use `/auxly-sync [content]` to save your first memory.")}}}
 	}
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
 }
 
 // toolSkillBootstrap generates a copyable onboarding block to PASTE INTO ANOTHER
@@ -1256,7 +1324,7 @@ func (s *Server) toolSkillBootstrap() toolResult {
 	sb.WriteString(memory.RenderForPrompt())
 	sb.WriteString("----------------------------------------------------------------\n")
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: appendSkillSyncFooter(sb.String())}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
 }
 
 func (s *Server) sendResult(id interface{}, result interface{}) {

@@ -300,9 +300,16 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			if w <= 0 {
 				w = 80
 			}
+			// Match the app's banner + spacing so the content offset the card
+			// hit-test relies on lines up with what's actually drawn (a compact
+			// banner and/or tight spacing on a short terminal shift every row up).
+			bodyC := m.bodyCompact()
 			banner := renderBanner(w)
 			tabRow := strings.Count(banner, "\n")
 			contentOffsetY := tabRow + 4
+			if bodyC {
+				contentOffsetY = tabRow + 2 // tight spacing removes two blank rows
+			}
 
 			// Use dynamic view rendering to locate coordinates!
 			viewStr := m.View()
@@ -446,22 +453,28 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			return m, nil // Swallow keys when popup is active
 		}
 
+		// Navigate using the SAME column count the grid renders (agentGridLayout),
+		// so arrows/vim keys land on the right card at 1–4 columns.
+		cols, _ := agentGridLayout(m.width, len(m.cards), m.bodyCompact())
+		if cols < 1 {
+			cols = 1
+		}
 		switch msg.String() {
 		case "left", "h":
-			if m.gridCursor%2 == 1 {
+			if m.gridCursor%cols > 0 {
 				m.gridCursor--
 			}
 		case "right", "l":
-			if m.gridCursor%2 == 0 && m.gridCursor+1 < len(m.cards) {
+			if m.gridCursor%cols < cols-1 && m.gridCursor+1 < len(m.cards) {
 				m.gridCursor++
 			}
 		case "up", "k":
-			if m.gridCursor >= 2 {
-				m.gridCursor -= 2
+			if m.gridCursor >= cols {
+				m.gridCursor -= cols
 			}
 		case "down", "j":
-			if m.gridCursor+2 < len(m.cards) {
-				m.gridCursor += 2
+			if m.gridCursor+cols < len(m.cards) {
+				m.gridCursor += cols
 			}
 		case "enter", " ":
 			if m.gridCursor >= 0 && m.gridCursor < len(m.cards) {
@@ -507,7 +520,35 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 	return m, nil
 }
 
+// View renders the dashboard, compacting ONLY when the full-look layout would not
+// fit the terminal height (content-aware) — so a terminal with vertical room keeps
+// the full ASCII banner and rich diagnostics even if it isn't especially tall.
 func (m dashboardModel) View() string {
+	return m.renderBody(m.bodyCompact())
+}
+
+// bodyCompact decides, by MEASURING, whether the dashboard body must tighten to
+// fit the terminal height beneath the always-full logo. The dashboard is the one
+// screen that fits rather than scrolls (a fixed overview), so it tightens the body
+// — never the logo (always shown) and never the bordered cards (kept). The body
+// compaction packs more grid columns and trims the diagnostics box; if even that
+// can't fit a very short pane, the parent's height guard keeps the chrome on screen.
+func (m dashboardModel) bodyCompact() bool {
+	if m.width > 0 && m.width < 80 {
+		return true
+	}
+	if m.height <= 0 {
+		return false
+	}
+	const chromeFull = 6 // tabs(2) + footer(1) + blank separators in the full layout
+	bFull := lipgloss.Height(renderBanner(m.width))
+	if bFull+chromeFull+lipgloss.Height(m.renderBody(false)) <= m.height {
+		return false
+	}
+	return true
+}
+
+func (m dashboardModel) renderBody(compact bool) string {
 	title := StyleTitle.Render("📊 Auxly-Memory CLI Dashboard")
 
 	clockStr := time.Now().Format("02/01/2006 15:04:05")
@@ -528,10 +569,18 @@ func (m dashboardModel) View() string {
 	bold := lipgloss.NewStyle().Bold(true)
 
 	// Left Column: System Status & Diagnostic Details
+	vPad := 1
+	sep := "\n\n"
+	memStorePath := m.memoryPath
+	if compact {
+		vPad = 0
+		sep = "\n"
+		memStorePath = filepath.Base(m.memoryPath)
+	}
 	diagStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
-		Padding(1, 2).
+		Padding(vPad, 2).
 		Width(44)
 
 	pendingColor := ColorDim
@@ -541,26 +590,30 @@ func (m dashboardModel) View() string {
 	pendingText := lipgloss.NewStyle().Bold(true).Foreground(pendingColor).Render(fmt.Sprintf("%d", m.pendingCnt))
 
 	diagContent := fmt.Sprintf(
-		"💻 %s\n\n"+
+		"💻 %s"+sep+
 			"Writes Today:   %s\n"+
 			"Total Entries:  %s\n"+
-			"Pending Queue:  %s\n\n"+
-			"📂 %s\n%s\n\n"+
+			"Pending Queue:  %s"+sep+
+			"📂 %s\n%s"+sep+
 			"🔌 %s\n%s",
 		bold.Render("System Diagnostics"),
 		green.Render(fmt.Sprintf("%d", m.stats.WritesToday)),
 		lipgloss.NewStyle().Foreground(ColorSecondary).Render(fmt.Sprintf("%d", m.stats.TotalEntries)),
 		pendingText,
 		bold.Render("Memory Store:"),
-		dim.Render(m.memoryPath),
+		dim.Render(memStorePath),
 		bold.Render("Active Connections:"),
-		m.renderConnectionsSummary(),
+		m.renderConnectionsSummary(compact),
 	)
 	leftCol := diagStyle.Render(diagContent)
 
 	// Right Column: Connected Agent Grid — only DETECTED brands (shared with the
 	// hit-tester via m.cards), so the grid scales to whatever is installed.
 	brands := m.cards
+
+	// Decide the grid shape so cards fill the available width: more columns (and
+	// thus fewer rows) on wide terminals, keeping the exact bordered-card design.
+	gridCols, gridCardW := agentGridLayout(m.width, len(brands), compact)
 
 	var brandCards []string
 	for idx, b := range brands {
@@ -643,19 +696,26 @@ func (m dashboardModel) View() string {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(cardBorderColor).
 			Padding(0, 1).
-			Width(30).
+			Width(gridCardW).
 			Render(body)
 
 		brandCards = append(brandCards, card)
 	}
 
 	var grid []string
-	for i := 0; i < len(brandCards); i += 2 {
-		if i+1 < len(brandCards) {
-			grid = append(grid, lipgloss.JoinHorizontal(lipgloss.Top, brandCards[i], " ", brandCards[i+1]))
-		} else {
-			grid = append(grid, brandCards[i])
+	for i := 0; i < len(brandCards); i += gridCols {
+		end := i + gridCols
+		if end > len(brandCards) {
+			end = len(brandCards)
 		}
+		cells := make([]string, 0, (end-i)*2-1)
+		for j := i; j < end; j++ {
+			if j > i {
+				cells = append(cells, " ")
+			}
+			cells = append(cells, brandCards[j])
+		}
+		grid = append(grid, lipgloss.JoinHorizontal(lipgloss.Top, cells...))
 	}
 	gridSection := strings.Join(grid, "\n")
 	if len(brands) == 0 {
@@ -691,8 +751,13 @@ func (m dashboardModel) View() string {
 	if banner := m.renderUpdateBanner(); banner != "" {
 		b.WriteString(banner + "\n")
 	}
-	b.WriteString("\n")
-	b.WriteString(dashboardContent + "\n\n")
+	// Drop the blank lines around the content on short terminals to reclaim rows.
+	if compact {
+		b.WriteString(dashboardContent + "\n")
+	} else {
+		b.WriteString("\n")
+		b.WriteString(dashboardContent + "\n\n")
+	}
 
 	if m.selectedAgent != "" {
 		b.WriteString(dim.Render("  Popup active: [1/2/3/4] switch tabs • [Esc] or Click outside to close"))
@@ -910,8 +975,10 @@ func (m dashboardModel) writeAgyAuthHint(pb *strings.Builder) {
 }
 
 // renderConnectionsSummary renders the live MCP sessions for the left
-// diagnostics column: remote boxes by host/IP/OS, then a local-agent count.
-func (m dashboardModel) renderConnectionsSummary() string {
+// diagnostics column: remote boxes by host/IP/OS, then a local-agent count. When
+// compact (short terminal) each remote collapses to a single host+IP line so the
+// panel fits the screen height.
+func (m dashboardModel) renderConnectionsSummary(compact bool) string {
 	dim := lipgloss.NewStyle().Foreground(ColorDim)
 	teal := lipgloss.NewStyle().Foreground(lipgloss.Color("#73CBAD"))
 	cyan := lipgloss.NewStyle().Foreground(ColorPrimary)
@@ -944,6 +1011,11 @@ func (m dashboardModel) renderConnectionsSummary() string {
 			osLabel := s.OS
 			if osLabel == "" {
 				osLabel = "?"
+			}
+			if compact {
+				sb.WriteString(fmt.Sprintf("%s %s  %s\n",
+					teal.Render("●"), cyan.Render(host), dim.Render(loc)))
+				continue
 			}
 			sb.WriteString(fmt.Sprintf("%s %s\n   %s\n",
 				teal.Render("●"),
@@ -1022,6 +1094,19 @@ func (m dashboardModel) renderPopup(provider string) string {
 		name = "Gemini"
 		icon = "✨"
 		logs = "Gemini CLI / Code Assist configured under ~/.gemini."
+	}
+
+	// Fallback for brands without a bespoke blurb (copilot, perplexity, warp, …) so
+	// the popup always shows a real name/icon instead of an empty header.
+	if name == "" {
+		if meta, ok := brandMeta[provider]; ok {
+			name, icon = meta.name, meta.icon
+		} else {
+			name, icon = provider, "🔌"
+		}
+	}
+	if logs == "" {
+		logs = "Configured via its MCP server settings."
 	}
 
 	var pb strings.Builder
@@ -1185,6 +1270,69 @@ type agentCard struct {
 // brandMeta is the display metadata per provider brand. Adding a provider to
 // detect.InstalledAgents() makes it appear here automatically; an unknown brand
 // still renders via a neutral default, so nothing is ever silently hidden.
+// clampInt bounds v to [lo, hi].
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// agentGridLayout decides how the agent-brand grid fills the width: how many
+// columns and how wide each card's content is. It fits as many minimum-width cards
+// as the space allows (more columns on wide terminals → fewer rows, so the grid is
+// shorter), then flexes the chosen cards to consume the leftover width. The card
+// design is unchanged — only the column count and width adapt.
+func agentGridLayout(termWidth, numCards int, compact bool) (cols, cardContentW int) {
+	const (
+		maxContent = 40 // ceiling so cards add columns instead of stretching sparse
+		borderPad  = 2  // rounded border adds 1 column each side
+		gap        = 1  // single space between cards in a row
+		leftCol    = 46 // rendered width of the diagnostics column (44 + border)
+		leftGap    = 4  // gutter between diagnostics and the grid when side by side
+	)
+	// In compact mode, allow slightly narrower cards so an extra column fits — fewer
+	// rows means the grid is shorter and the dashboard fits the height. 22 is the
+	// floor that still holds the status line ("○ idle · ⇄0 · auto") without wrapping
+	// (which would add height and defeat the purpose).
+	minContent := 24
+	if compact {
+		minContent = 22
+	}
+	// Before the first WindowSizeMsg, keep the original 2-up / 30-wide default so
+	// the first frame doesn't flash a degraded layout.
+	if termWidth <= 0 {
+		if numCards == 1 {
+			return 1, 30
+		}
+		return 2, 30
+	}
+	if numCards <= 0 {
+		return 1, minContent
+	}
+	avail := termWidth
+	if termWidth >= 116 { // grid sits to the right of the diagnostics column
+		avail -= leftCol + leftGap
+	}
+	minCell := minContent + borderPad
+	if avail < minCell {
+		avail = minCell
+	}
+	cols = (avail + gap) / (minCell + gap)
+	if cols < 1 {
+		cols = 1
+	}
+	if cols > numCards {
+		cols = numCards
+	}
+	cellW := (avail - (cols-1)*gap) / cols
+	cardContentW = clampInt(cellW-borderPad, minContent, maxContent)
+	return cols, cardContentW
+}
+
 var brandMeta = map[string]agentCard{
 	"claude":         {"claude", "Claude Desktop", "🧠", "99"},
 	"claude-code":    {"claude-code", "Claude Code CLI", "💻", "39"},
@@ -1192,7 +1340,8 @@ var brandMeta = map[string]agentCard{
 	"cursor":         {"cursor", "Cursor", "🎯", "39"},
 	"codex":          {"codex", "Codex", "💻", "34"},
 	"gemini":         {"gemini", "Gemini", "✨", "220"},
-	"copilot":        {"copilot", "Copilot", "🐙", "240"},
+	"copilot":        {"copilot", "GitHub Copilot", "🐙", "240"},
+	"perplexity":     {"perplexity", "Perplexity", "🔮", "37"},
 	"warp":           {"warp", "Warp", "⚡", "39"},
 	"void":           {"void", "Void", "🕳️", "205"},
 	"android-studio": {"android-studio", "Android Studio", "🤖", "34"},
@@ -1202,7 +1351,7 @@ var brandMeta = map[string]agentCard{
 
 // brandOrder is the canonical card order; detected brands not listed fall to the
 // end (in detection order) so newly-added providers never need a code change here.
-var brandOrder = []string{"claude", "claude-code", "antigravity", "cursor", "codex", "gemini", "copilot", "warp", "void", "android-studio", "kimi", "trae"}
+var brandOrder = []string{"claude", "claude-code", "antigravity", "cursor", "codex", "gemini", "copilot", "perplexity", "warp", "void", "android-studio", "kimi", "trae"}
 
 // agentCardOrder returns one card per brand that is either DETECTED on this
 // machine (config/binary present) OR has audit activity (it connected and wrote,

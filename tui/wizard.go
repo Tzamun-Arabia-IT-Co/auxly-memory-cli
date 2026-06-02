@@ -162,14 +162,22 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			name := a.agent.Name
-			if name == "Claude Code / CLI" || name == "Gemini CLI" || name == "Codex CLI" || name == "Antigravity CLI" || name == "Cursor CLI" {
+			// CLI agents we drive headlessly are handled below — skip them here.
+			if name == "Claude Code / CLI" || name == "Gemini CLI" || name == "Codex CLI" ||
+				name == "Antigravity CLI" || name == "Cursor CLI" || name == "GitHub Copilot CLI" {
 				continue
+			}
+			message := fmt.Sprintf("Open %s and run '/auxly-init'", name)
+			// Perplexity (macOS) is wired through its Connectors GUI, not a slash
+			// command — so point the user at the right place with the exact command.
+			if name == "Perplexity" {
+				message = "Perplexity → Settings → Connectors → Add (Simple): auxly --path <mem> mcp-server"
 			}
 			m.onboardStatuses = append(m.onboardStatuses, agentOnboardStatus{
 				name:    name,
 				isCLI:   false,
 				status:  "manual",
-				message: fmt.Sprintf("Open %s and run '/auxly-init'", name),
+				message: message,
 			})
 		}
 
@@ -214,6 +222,15 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.onboardCursorCmd())
 			m.onboardStatuses = append(m.onboardStatuses, agentOnboardStatus{
 				name:    "Cursor CLI",
+				isCLI:   true,
+				status:  "pending",
+				message: "✓ Connecting...",
+			})
+		}
+		if isSelected("Copilot") {
+			cmds = append(cmds, m.onboardCopilotCmd())
+			m.onboardStatuses = append(m.onboardStatuses, agentOnboardStatus{
+				name:    "GitHub Copilot CLI",
 				isCLI:   true,
 				status:  "pending",
 				message: "✓ Connecting...",
@@ -552,6 +569,53 @@ func (m wizardModel) onboardCodexCmd() tea.Cmd {
 		if isAuthError {
 			status.status = "auth_needed"
 			status.message = "Open Codex CLI and auth (run 'codex login') then run '/auxly-init'"
+		} else if runErr != nil {
+			status.status = "success"
+			status.message = "✓ MCP registered! Type '/auxly-init' in active chat to sync."
+		} else {
+			status.status = "success"
+			status.message = "✓ Synced successfully! (auto-migrated)"
+		}
+
+		return onboardAgentProgressMsg{status: status}
+	}
+}
+
+func (m wizardModel) onboardCopilotCmd() tea.Cmd {
+	return func() tea.Msg {
+		memPath, _ := filepath.Abs(m.memoryPath)
+		status := agentOnboardStatus{name: "GitHub Copilot CLI", isCLI: true}
+		copilotPath, err := lookPath("copilot")
+		if err != nil {
+			// CLI not on PATH (e.g. wired by config dir only) — the MCP server is
+			// registered; the user runs onboarding in an interactive session.
+			status.status = "success"
+			status.message = "✓ MCP registered! Type '/auxly-init' in active chat to sync."
+			return onboardAgentProgressMsg{status: status}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+
+		// Non-interactive run. Copilot doesn't read Claude-style slash skills, so we
+		// name the MCP tool explicitly; --allow-all-tools lets it call the tool and
+		// write memory without an approval prompt in this headless run.
+		prompt := "Use the auxly_skill_init tool now to run Auxly memory onboarding, then follow its instructions and call auxly_skill_sync to save any facts about me from this context."
+		cmd := exec.CommandContext(ctx, copilotPath, "-p", prompt, "--allow-all-tools")
+		cmd.Stdin = strings.NewReader("")
+		cmd.Env = append(os.Environ(), "AUXLY_MEMORY_PATH="+memPath)
+		outBytes, runErr := cmd.CombinedOutput()
+		outputLower := strings.ToLower(string(outBytes))
+
+		isAuthError := strings.Contains(outputLower, "login") ||
+			strings.Contains(outputLower, "sign in") ||
+			strings.Contains(outputLower, "not logged in") ||
+			strings.Contains(outputLower, "unauthorized") ||
+			strings.Contains(outputLower, "authenticate")
+
+		if isAuthError {
+			status.status = "auth_needed"
+			status.message = "Open GitHub Copilot CLI and sign in ('copilot'), then run '/auxly-init'"
 		} else if runErr != nil {
 			status.status = "success"
 			status.message = "✓ MCP registered! Type '/auxly-init' in active chat to sync."

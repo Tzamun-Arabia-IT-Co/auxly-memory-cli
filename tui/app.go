@@ -10,6 +10,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -65,6 +66,12 @@ type model struct {
 	logger     *audit.Logger
 	pendingMgr *pending.Manager
 	usageMgr   *usage.Manager // one Live Usage manager shared by dashboard + analytics
+
+	// contentVP scrolls long content pages within a fixed header (full logo + tabs)
+	// and footer — the standard Bubble Tea header/viewport/footer pattern. The
+	// dashboard and the file viewer manage their own height and don't use it.
+	contentVP viewport.Model
+	vpReady   bool
 }
 
 func NewApp(memoryPath string) *model {
@@ -144,62 +151,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "1":
-			m.screen = screenDashboard
-			return m, m.refreshCurrentScreen()
+			return m, m.gotoScreen(screenDashboard)
 		case "2":
-			m.screen = screenActivity
-			return m, m.refreshCurrentScreen()
+			return m, m.gotoScreen(screenActivity)
 		case "3":
-			m.screen = screenBrowser
-			return m, m.refreshCurrentScreen()
+			return m, m.gotoScreen(screenBrowser)
 		case "4":
-			m.screen = screenDiff
-			return m, m.refreshCurrentScreen()
+			return m, m.gotoScreen(screenDiff)
 		case "5":
-			m.screen = screenAnalytics
-			return m, m.refreshCurrentScreen()
+			return m, m.gotoScreen(screenAnalytics)
 		case "6":
-			m.screen = screenSettings
-			return m, m.refreshCurrentScreen()
+			return m, m.gotoScreen(screenSettings)
 		case "7":
-			m.screen = screenSSH
-			return m, m.refreshCurrentScreen()
+			return m, m.gotoScreen(screenSSH)
 		case "8":
-			m.screen = screenSkills
-			return m, m.refreshCurrentScreen()
+			return m, m.gotoScreen(screenSkills)
 		case "9":
-			m.screen = screenAuditTrail
-			return m, m.refreshCurrentScreen()
+			return m, m.gotoScreen(screenAuditTrail)
 		case "]", "tab":
 			if msg.String() == "tab" && ((m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
 				(m.screen == screenSSH && m.ssh.editingHost) ||
 				(m.screen == screenSettings && (m.settings.configuringCustom || m.settings.showingDiff || m.settings.confirmingRun))) {
 				break
 			}
-			if m.screen == screenViewer {
-				m.screen = screenBrowser
+			next := m.screen
+			if next == screenViewer {
+				next = screenBrowser
 			}
-			m.screen = (m.screen + 1) % 9
-			return m, m.refreshCurrentScreen()
+			return m, m.gotoScreen((next + 1) % 9)
 		case "[", "shift+tab", "backtab":
 			if (msg.String() == "shift+tab" || msg.String() == "backtab") && ((m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
 				(m.screen == screenSSH && m.ssh.editingHost) ||
 				(m.screen == screenSettings && (m.settings.configuringCustom || m.settings.showingDiff || m.settings.confirmingRun))) {
 				break
 			}
-			if m.screen == screenViewer {
-				m.screen = screenBrowser
+			prev := m.screen
+			if prev == screenViewer {
+				prev = screenBrowser
 			}
-			if m.screen == 0 {
-				m.screen = 8
-			} else {
-				m.screen = (m.screen - 1) % 9
+			if prev == 0 {
+				return m, m.gotoScreen(8)
 			}
-			return m, m.refreshCurrentScreen()
+			return m, m.gotoScreen((prev - 1) % 9)
+		case "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
+			// Scroll the content viewport on long pages, unless a modal/editor owns
+			// these keys.
+			if m.usesViewport() && m.vpReady && !m.inModalSubmode() {
+				var vcmd tea.Cmd
+				m.contentVP, vcmd = m.contentVP.Update(msg)
+				return m, vcmd
+			}
 		case "esc":
 			if m.screen == screenViewer {
-				m.screen = screenBrowser
-				return m, m.refreshCurrentScreen()
+				return m, m.gotoScreen(screenBrowser)
 			}
 		}
 
@@ -223,6 +227,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ssh, _ = m.ssh.Update(msg)
 		m.skills, _ = m.skills.Update(msg)
 		m.viewer, _ = m.viewer.Update(msg)
+		m.syncViewport()
 
 	case tea.MouseMsg:
 		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
@@ -233,12 +238,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for idx, name := range screenNames {
 					tabWidth := 4 + len(name) + 2
 					if msg.X >= startX && msg.X < startX+tabWidth {
-						m.screen = screen(idx)
-						return m, m.refreshCurrentScreen()
+						return m, m.gotoScreen(screen(idx))
 					}
 					startX += tabWidth
 				}
 			}
+		}
+		// Mouse wheel scrolls the content viewport on long pages.
+		if m.usesViewport() && m.vpReady &&
+			(msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown) {
+			var vcmd tea.Cmd
+			m.contentVP, vcmd = m.contentVP.Update(msg)
+			return m, vcmd
 		}
 	}
 
@@ -267,45 +278,174 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewer, cmd = m.viewer.Update(msg)
 	}
 
+	// Keep the content viewport sized and filled for the active screen after the
+	// sub-model updated (selection moved, data refreshed). Re-sizing here (not just
+	// SetContent) keeps the viewport height consistent with a footer that may have
+	// gained/lost the scroll-hint line. Scroll offset is preserved.
+	if m.usesViewport() && m.vpReady {
+		m.syncViewport()
+	}
+
 	return m, cmd
 }
 
-func (m model) View() string {
-	// Banner
-	banner := renderBanner(m.width)
+// usesViewport reports whether the active screen scrolls its content inside the
+// shared viewport. The dashboard fits itself (fixed overview) and the file viewer
+// scrolls its own content, so they render directly.
+func (m model) usesViewport() bool {
+	switch m.screen {
+	case screenDashboard, screenViewer:
+		return false
+	}
+	return true
+}
 
-	// Tab bar
-	tabs := m.renderTabs()
+// inModalSubmode reports whether the active screen has a focused modal/editor that
+// owns its own keys (so the parent must not steal scroll keys for the viewport).
+func (m model) inModalSubmode() bool {
+	switch m.screen {
+	case screenSettings:
+		return m.settings.configuringCustom || m.settings.showingDiff || m.settings.confirmingRun
+	case screenSSH:
+		return m.ssh.editingHost
+	case screenActivity:
+		return m.activity.viewingDetail
+	case screenAuditTrail:
+		return m.auditTrail.viewingDetail
+	}
+	return false
+}
 
-	// Content
-	var content string
+// screenContent renders only the active screen's body (no banner/tabs/footer).
+func (m model) screenContent() string {
 	switch m.screen {
 	case screenDashboard:
-		content = m.dashboard.View()
+		return m.dashboard.View()
 	case screenActivity:
-		content = m.activity.View()
+		return m.activity.View()
 	case screenBrowser:
-		content = m.browser.View()
+		return m.browser.View()
 	case screenDiff:
-		content = m.diff.View()
+		return m.diff.View()
 	case screenAnalytics:
-		content = m.analytics.View(m.width)
+		return m.analytics.View(m.width)
 	case screenSettings:
-		content = m.settings.View()
+		return m.settings.View()
 	case screenSSH:
-		content = m.ssh.View()
+		return m.ssh.View()
 	case screenSkills:
-		content = m.skills.View(m.width, m.height)
+		return m.skills.View(m.width, m.height)
 	case screenAuditTrail:
-		content = m.auditTrail.View()
+		return m.auditTrail.View()
 	case screenViewer:
-		content = m.viewer.View()
+		return m.viewer.View()
 	}
+	return ""
+}
 
-	// Footer
+// chromeHeight is the number of rows consumed by the fixed header (full logo +
+// tabs), the two blank separators, and the footer — i.e. everything that is NOT
+// the scrollable content region.
+func (m model) chromeHeight() int {
+	return lipgloss.Height(renderBanner(m.width)) +
+		lipgloss.Height(m.renderTabs()) +
+		lipgloss.Height(m.renderFooter()) + 2 // two blank separator rows
+}
+
+// syncViewport (re)sizes the content viewport to the rows left under the fixed
+// chrome and refreshes its content for the active screen. Scroll offset is
+// preserved across data ticks; callers reset it on a screen switch.
+func (m *model) syncViewport() {
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+	h := m.height - m.chromeHeight()
+	if h < 1 {
+		h = 1
+	}
+	if !m.vpReady {
+		m.contentVP = viewport.New(m.width, h)
+		m.vpReady = true
+	} else {
+		m.contentVP.Width = m.width
+		m.contentVP.Height = h
+	}
+	if m.usesViewport() {
+		m.contentVP.SetContent(m.screenContent())
+	}
+}
+
+// gotoScreen switches the active tab, resets the content scroll to the top, and
+// refreshes the new screen's data.
+func (m *model) gotoScreen(s screen) tea.Cmd {
+	m.screen = s
+	if m.vpReady {
+		m.contentVP.GotoTop()
+	}
+	cmd := m.refreshCurrentScreen()
+	m.syncViewport()
+	return cmd
+}
+
+func (m model) View() string {
+	banner := renderBanner(m.width)
+	tabs := m.renderTabs()
 	footer := m.renderFooter()
 
-	return fmt.Sprintf("%s\n%s\n\n%s\n\n%s", banner, tabs, content, footer)
+	var out string
+	if m.usesViewport() && m.vpReady {
+		// Content pages: fixed header + scrolling viewport + fixed footer. The
+		// viewport makes the body exactly its height, so the chrome can never be
+		// pushed off the top, and content scrolls instead of being truncated.
+		out = fmt.Sprintf("%s\n%s\n\n%s\n\n%s", banner, tabs, m.contentVP.View(), footer)
+	} else {
+		// Dashboard / viewer manage their own height. The dashboard tightens its body
+		// to fit (full logo always); the clamp keeps the chrome on screen if a pane is
+		// too short for even the compact body.
+		content := m.screenContent()
+		tight := m.screen == screenDashboard && m.dashboard.bodyCompact()
+		blank := 2
+		if tight {
+			blank = 0
+		}
+		if m.height > 0 {
+			used := lipgloss.Height(banner) + lipgloss.Height(tabs) + lipgloss.Height(footer) + blank
+			content = clampContentHeight(content, m.height-used)
+		}
+		if tight {
+			out = fmt.Sprintf("%s\n%s\n%s\n%s", banner, tabs, content, footer)
+		} else {
+			out = fmt.Sprintf("%s\n%s\n\n%s\n\n%s", banner, tabs, content, footer)
+		}
+	}
+
+	// Final safety net: never emit more rows than the terminal has, so the fixed
+	// header (logo + tab menu) can never scroll off the top in alt-screen mode —
+	// even if a footer-height change races a content update by a frame.
+	if m.height > 0 && lipgloss.Height(out) > m.height {
+		lines := strings.Split(out, "\n")
+		out = strings.Join(lines[:m.height], "\n")
+	}
+	return out
+}
+
+// clampContentHeight bounds the dashboard/viewer body so the fixed chrome is never
+// scrolled off the top of an alt-screen terminal. Content pages use the viewport
+// instead and never reach this. When the body is taller it keeps the top rows and
+// notes how many are hidden (only the dashboard on a genuinely tiny pane).
+func clampContentHeight(content string, maxLines int) string {
+	if maxLines < 1 {
+		maxLines = 1
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) <= maxLines {
+		return content
+	}
+	hidden := len(lines) - (maxLines - 1)
+	kept := append([]string{}, lines[:maxLines-1]...)
+	note := "\x1b[0m" + StyleFooter.Render(
+		fmt.Sprintf("  ▾ %d more — enlarge window", hidden))
+	return strings.Join(append(kept, note), "\n")
 }
 
 func (m model) renderTabs() string {
@@ -387,7 +527,20 @@ func (m model) renderFooter() string {
 		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	}
 
-	return StyleFooter.Render(footerText)
+	footer := StyleFooter.Render(footerText)
+
+	// On a content page whose body overflows, surface a scroll affordance so the
+	// extra rows are discoverable (progressive disclosure) rather than silently
+	// off-screen. Kept on its own line so it never widens the footer past the term.
+	if m.usesViewport() && m.vpReady && !m.inModalSubmode() &&
+		m.contentVP.TotalLineCount() > m.contentVP.Height {
+		pct := int(m.contentVP.ScrollPercent() * 100)
+		hint := lipgloss.NewStyle().Foreground(ColorPrimary).
+			Render(fmt.Sprintf("  ⇕ %d%% · PgUp/PgDn or wheel to scroll", pct))
+		footer = lipgloss.JoinVertical(lipgloss.Left, hint, footer)
+	}
+
+	return footer
 }
 
 func (m *model) refreshCurrentScreen() tea.Cmd {
