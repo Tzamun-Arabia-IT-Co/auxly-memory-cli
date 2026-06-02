@@ -1000,10 +1000,17 @@ func (m settingsModel) View() string {
 
 	uniqueAgents := m.getUniqueAgents()
 
+	// compact: on shorter terminals, tighten the General view so it FITS without
+	// scrolling — drop box padding, blank separators, and verbose help, and lay the
+	// agent overrides in two columns. The richer spacing returns on tall terminals.
+	compact := m.height > 0 && m.height < 48
+
 	// 1. LEFT PANEL: Trust & Access Controls
 	var leftLines []string
 	leftLines = append(leftLines, bold.Render("Trust & Access Controls"))
-	leftLines = append(leftLines, dim.Render("Manage active security levels"))
+	if !compact {
+		leftLines = append(leftLines, dim.Render("Manage active security levels"))
+	}
 	leftLines = append(leftLines, "")
 
 	// Default Trust row
@@ -1030,16 +1037,31 @@ func (m settingsModel) View() string {
 		)
 	}
 	leftLines = append(leftLines, defaultTrustRow)
-	leftLines = append(leftLines, "")
+	if !compact {
+		leftLines = append(leftLines, "")
+	}
 	leftLines = append(leftLines, purple.Render("   Agent Security Overrides"))
-	leftLines = append(leftLines, "")
+	if !compact {
+		leftLines = append(leftLines, "")
+	}
 
-	for i, a := range uniqueAgents {
-		cursorAgent := "  "
-		if m.cursor == i+1 {
-			cursorAgent = cyan.Render("▸ ")
+	// agentCell renders one override row: cursor marker + (possibly truncated) name
+	// + trust badge. Two-column mode uses a narrower name field.
+	twoCol := compact && !stacked && len(uniqueAgents) > 6
+	if twoCol {
+		// The left box widens to hold two columns, so shrink the right box to keep
+		// the side-by-side pair within the terminal width (with a small margin).
+		rightInnerWidth = w - 70
+		if rightInnerWidth < 28 {
+			rightInnerWidth = 28
 		}
-
+	}
+	agentCell := func(i int) string {
+		a := uniqueAgents[i]
+		cur := "  "
+		if m.cursor == i+1 {
+			cur = cyan.Render("▸ ")
+		}
 		trust := ""
 		if p, ok := m.trust.Providers[a.Provider]; ok {
 			trust = p["trust_level"]
@@ -1047,20 +1069,45 @@ func (m settingsModel) View() string {
 		if trust == "" {
 			trust = defaultTrust
 		}
+		nameW := 18
+		if twoCol {
+			nameW = 13
+		}
+		name := a.Name
+		if len(name) > nameW {
+			name = name[:nameW-1] + "…"
+		}
+		if twoCol {
+			return fmt.Sprintf("%s%-*s %s", cur, nameW, name, m.renderTrustShort(trust, green, yellow, red))
+		}
+		return fmt.Sprintf("%s%-*s %s", cur, nameW, name, m.renderTrust(trust, green, yellow, red))
+	}
 
-		agentText := fmt.Sprintf("%s%-18s %s",
-			cursorAgent,
-			a.Name,
-			m.renderTrust(trust, green, yellow, red),
-		)
-		leftLines = append(leftLines, agentText)
+	if twoCol {
+		// Column-major so ↑/↓ walks down column one, then column two. The flat cursor
+		// index still highlights the right agent wherever it lands.
+		rows := (len(uniqueAgents) + 1) / 2
+		const colW = 27
+		for r := 0; r < rows; r++ {
+			line := padLine(agentCell(r), colW)
+			if r+rows < len(uniqueAgents) {
+				line += agentCell(r + rows)
+			}
+			leftLines = append(leftLines, line)
+		}
+	} else {
+		for i := range uniqueAgents {
+			leftLines = append(leftLines, agentCell(i))
+		}
 	}
 
 	// Live Usage toggle (opt-in network panel). Cursor sits last.
 	leftLines = append(leftLines, "")
 	leftLines = append(leftLines, purple.Render("   Live Usage"))
-	leftLines = append(leftLines, dim.Render("   Calls each agent's provider with its stored"))
-	leftLines = append(leftLines, dim.Render("   login — off keeps Auxly fully local."))
+	if !compact {
+		leftLines = append(leftLines, dim.Render("   Calls each agent's provider with its stored"))
+		leftLines = append(leftLines, dim.Render("   login — off keeps Auxly fully local."))
+	}
 	cursorLive := "  "
 	if m.cursor == len(uniqueAgents)+1 {
 		cursorLive = cyan.Render("▸ ")
@@ -1135,11 +1182,13 @@ func (m settingsModel) View() string {
 		rightLines = append(rightLines, "")
 	}
 
-	rightLines = append(rightLines, dim.Render("How it works:"))
-	rightLines = append(rightLines, dim.Render("Combines chronological facts, resolves duplicates, and refines"))
-	rightLines = append(rightLines, dim.Render("sections into clean, structured summaries using a local LLM."))
-	rightLines = append(rightLines, dim.Render("Does NOT overwrite your core identity, projects, or active scopes."))
-	rightLines = append(rightLines, "")
+	if !compact {
+		rightLines = append(rightLines, dim.Render("How it works:"))
+		rightLines = append(rightLines, dim.Render("Combines chronological facts, resolves duplicates, and refines"))
+		rightLines = append(rightLines, dim.Render("sections into clean, structured summaries using a local LLM."))
+		rightLines = append(rightLines, dim.Render("Does NOT overwrite your core identity, projects, or active scopes."))
+		rightLines = append(rightLines, "")
+	}
 
 	estTokens := m.store.GetEstimatedTokens()
 	if m.lastRun != "" {
@@ -1186,6 +1235,8 @@ func (m settingsModel) View() string {
 		if leftPadW < 40 {
 			leftPadW = 40
 		}
+	} else if twoCol {
+		leftPadW = 54 // wider box to hold two agent columns (we have the width)
 	} else {
 		leftPadW = 40
 	}
@@ -1200,17 +1251,22 @@ func (m settingsModel) View() string {
 		paddedRightLines = append(paddedRightLines, padLine(line, rightInnerWidth))
 	}
 
+	// Drop the boxes' vertical padding when compact to reclaim two rows.
+	vPad := 1
+	if compact {
+		vPad = 0
+	}
 	leftColStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
-		Padding(1, 2)
+		Padding(vPad, 2)
 
 	leftPanel := leftColStyle.Render(strings.Join(paddedLeftLines, "\n"))
 
 	rightColStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorDim).
-		Padding(1, 2)
+		Padding(vPad, 2)
 
 	rightPanel := rightColStyle.Render(strings.Join(paddedRightLines, "\n"))
 
@@ -1221,11 +1277,16 @@ func (m settingsModel) View() string {
 		content = lipgloss.JoinVertical(lipgloss.Left, leftPanel, "", rightPanel)
 	}
 
+	// The section title + sub-tab bar use tighter spacing when compact.
+	titleSep := "\n\n"
+	if compact {
+		titleSep = "\n"
+	}
 	var sb strings.Builder
 	sb.WriteString(StyleTitle.Render("Settings & Access Configuration"))
-	sb.WriteString("\n\n")
+	sb.WriteString(titleSep)
 	sb.WriteString(m.renderSubTabBar())
-	sb.WriteString("\n\n")
+	sb.WriteString(titleSep)
 	sb.WriteString(content)
 
 	fullView := sb.String()
@@ -1412,6 +1473,21 @@ func (m settingsModel) renderTrust(trust string, green, yellow, red lipgloss.Sty
 		return yellow.Render("[require_approval]")
 	case "read_only":
 		return red.Render("[read_only]")
+	default:
+		return trust
+	}
+}
+
+// renderTrustShort is the compact badge used in the two-column override layout,
+// where the full "[require_approval]" label is too wide.
+func (m settingsModel) renderTrustShort(trust string, green, yellow, red lipgloss.Style) string {
+	switch trust {
+	case "auto":
+		return green.Render("[auto]")
+	case "require_approval":
+		return yellow.Render("[approve]")
+	case "read_only":
+		return red.Render("[read-only]")
 	default:
 		return trust
 	}

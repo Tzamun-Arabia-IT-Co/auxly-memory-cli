@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -142,6 +143,36 @@ func TestChromeNeverClippedOnTallPages(t *testing.T) {
 			// The tab menu must be present in the output regardless.
 			if !strings.Contains(stripANSI(out), "Analytics") {
 				t.Errorf("%s at %dx%d: tab menu missing from view", screenNames[sc], sz.w, sz.h)
+			}
+		}
+	}
+}
+
+// TestSettingsFitsWithoutScroll locks the good→perfect win: with a full agent
+// roster, the Settings page fits the user's real terminals WITHOUT scrolling — the
+// compact two-column override layout keeps it within both width and height.
+func TestSettingsFitsWithoutScroll(t *testing.T) {
+	roster := []detect.Agent{}
+	for _, p := range []string{"claude", "claude-code", "antigravity", "cursor", "codex", "gemini", "copilot", "perplexity", "warp", "void", "android-studio"} {
+		roster = append(roster, detect.Agent{Name: p, Provider: p, Command: "x"})
+	}
+	for _, sz := range []struct{ w, h int }{{175, 38}, {140, 32}} {
+		m := *NewApp(t.TempDir())
+		m.settings.agents = roster
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
+		m = updated.(model)
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'6'}})
+		m = updated.(model)
+		m.settings.agents = roster
+		m.syncViewport()
+		if over := m.contentVP.TotalLineCount() - m.contentVP.Height; over > 0 {
+			t.Errorf("%dx%d: Settings overflows by %d rows — should fit without scroll", sz.w, sz.h, over)
+		}
+		// Width must not exceed the terminal (two columns must not push past the edge).
+		for _, ln := range strings.Split(m.settings.View(), "\n") {
+			if w := lipgloss.Width(ln); w > sz.w {
+				t.Errorf("%dx%d: a Settings line is %d wide — exceeds terminal", sz.w, sz.h, w)
+				break
 			}
 		}
 	}
