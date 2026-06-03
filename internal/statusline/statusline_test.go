@@ -83,7 +83,7 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 
 	claudeDir := filepath.Join(home, ".claude")
 	os.MkdirAll(claudeDir, 0o755)
-	orig := `bash /Users/lab/.claude/statusline.sh`
+	orig := `bash ~/.claude/statusline.sh`
 	seed := map[string]any{
 		"statusLine": map[string]any{"type": "command", "command": orig},
 		"model":      "opusplan",

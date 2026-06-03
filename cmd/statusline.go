@@ -12,9 +12,10 @@ import (
 )
 
 var (
-	statuslineSegment     bool
-	statuslineWrap        bool // `statusline --wrap` render mode
-	statuslineInstallWrap bool // `statusline install --wrap` mode (distinct flag owner)
+	statuslineSegment      bool
+	statuslineWrap         bool // `statusline --wrap` render mode
+	statuslineInstallWrap  bool // `statusline install --wrap` mode (distinct flag owner)
+	statuslineRefreshUsage bool // hidden: refresh the usage cache, then exit (no render)
 )
 
 var statuslineCmd = &cobra.Command{
@@ -66,6 +67,11 @@ var statuslineUninstallCmd = &cobra.Command{
 func init() {
 	statuslineCmd.Flags().BoolVar(&statuslineSegment, "segment", false, "print only the Auxly memory + usage lines")
 	statuslineCmd.Flags().BoolVar(&statuslineWrap, "wrap", false, "run the backed-up original statusline, then append the Auxly segment")
+	// --refresh-usage is the detached child the render spawns to keep the usage cache
+	// live; it does the networked refresh and exits, printing nothing. Hidden because
+	// it's an internal mechanism, not a user-facing mode.
+	statuslineCmd.Flags().BoolVar(&statuslineRefreshUsage, "refresh-usage", false, "")
+	_ = statuslineCmd.Flags().MarkHidden("refresh-usage")
 	statuslineInstallCmd.Flags().BoolVar(&statuslineInstallWrap, "wrap", false, "append Auxly to the user's existing statusline instead of replacing it")
 	statuslineCmd.AddCommand(statuslineInstallCmd)
 	statuslineCmd.AddCommand(statuslineUninstallCmd)
@@ -73,6 +79,13 @@ func init() {
 }
 
 func runStatusline(cmd *cobra.Command, args []string) error {
+	// Detached child: refresh the usage cache out-of-band, print nothing, exit. This
+	// is the only path that touches the network; the render paths below never do.
+	if statuslineRefreshUsage {
+		statusline.RefreshUsageCache()
+		return nil
+	}
+
 	raw, _ := io.ReadAll(os.Stdin)
 	in := statusline.ReadInput(raw)
 
@@ -97,10 +110,12 @@ func runStatusline(cmd *cobra.Command, args []string) error {
 			}
 		}
 		fmt.Print(statusline.Render(in, false))
+		statusline.MaybeRefreshUsage()
 		return nil
 	}
 
 	fmt.Print(statusline.Render(in, !statuslineSegment))
+	statusline.MaybeRefreshUsage()
 	return nil
 }
 
