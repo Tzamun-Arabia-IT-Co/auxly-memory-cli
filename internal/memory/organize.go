@@ -2,6 +2,7 @@ package memory
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,9 +10,133 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// safeOrganizeProviders is the allowlist of agent CLIs PROVEN (via the temp-vault
+// E2E: zero-loss + zero-contamination) to run the consolidation in a fully isolated,
+// tool-less mode. It is EMPTY: agentic CLIs default-wander — even with tools off,
+// MCP off, a scrubbed env, an empty cwd, AND settings/hooks disabled, the temp-vault
+// E2E still caught real-vault content leaking into a foreign vault and facts being
+// dropped. Reliable isolation needs more than flags (OS sandbox / a non-agentic API
+// call) and is tracked as a follow-up. Until a provider's E2E passes, Organize routes
+// only through the tool-less Direct LLM / Custom endpoints. The per-agent isolation
+// scaffolding below (providerKey, buildAgentArgs, scrubbedOrganizeEnv) and the E2E
+// gate are kept as the qualification harness for that work.
+var safeOrganizeProviders = map[string]bool{}
+
+// providerKey canonicalizes a display agent name ("Claude Code / CLI", "Codex IDE
+// Desktop", "Antigravity CLI", …) to a stable provider key used for both the safety
+// allowlist and the per-agent invocation. Returns "" for unrecognized agents.
+func providerKey(agentName string) string {
+	switch p := strings.ToLower(agentName); {
+	case strings.Contains(p, "claude"):
+		return "claude"
+	case strings.Contains(p, "codex"):
+		return "codex"
+	case strings.Contains(p, "antigravity") || strings.Contains(p, "agy"):
+		return "antigravity"
+	case strings.Contains(p, "gemini"):
+		return "gemini"
+	case strings.Contains(p, "cursor"):
+		return "cursor"
+	default:
+		return ""
+	}
+}
+
+// organizeAgentSafe reports whether the agentic-CLI consolidation path is permitted
+// for this agent (i.e. its isolation has been E2E-verified).
+func organizeAgentSafe(agentName string) bool {
+	return safeOrganizeProviders[providerKey(agentName)]
+}
+
+// scrubbedOrganizeEnv returns the process env with every AUXLY_* var removed (so a
+// spawned agent can't locate the real vault) plus a non-interactive, no-color shell.
+func scrubbedOrganizeEnv() []string {
+	src := os.Environ()
+	out := make([]string, 0, len(src)+3)
+	for _, kv := range src {
+		if strings.HasPrefix(kv, "AUXLY_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "CI=1", "NO_COLOR=1", "TERM=dumb")
+}
+
+// defaultOrganizeTimeout bounds a single CLI-agent consolidation run. A full-vault
+// re-file is a large prompt, so this is generous; override with the env var
+// AUXLY_ORGANIZE_TIMEOUT (whole seconds) for slow models or big vaults.
+const defaultOrganizeTimeout = 600 * time.Second
+
+// organizeTimeout returns the CLI-agent execution timeout, honoring
+// AUXLY_ORGANIZE_TIMEOUT (seconds) when set to a positive integer.
+func organizeTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("AUXLY_ORGANIZE_TIMEOUT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return defaultOrganizeTimeout
+}
+
+// buildAgentArgs returns the argv (after the binary path) to run a ONE-SHOT,
+// NON-INTERACTIVE consolidation on the selected agent CLI, with the prompt as the
+// final argument. Before this, only Claude got a real headless flag (`-p`); every
+// other agent received the bare prompt and either errored (Codex: needs the `exec`
+// subcommand) or opened interactive mode and hung to the timeout (Antigravity,
+// Gemini, Cursor). Flags are verified against each CLI's --help.
+//
+// SECURITY: this is a pure text→JSON transform that needs NO tools, and the prompt
+// embeds user-vault content (a prompt-injection vector). So we deliberately do NOT
+// pass any permission-bypass flag (Claude's --dangerously-skip-permissions, agy's
+// equivalent, Gemini's -y/--yolo, Cursor's --trust). In headless mode each CLI then
+// auto-denies tool calls (no TTY to approve), and Codex runs under a read-only
+// sandbox — so an injected "run this command" instruction cannot touch the host.
+// Claude is additionally MCP-isolated (loads zero MCP servers, so it can't recurse
+// into Auxly's own MCP server — the multi-minute startup that blew the old 300s cap)
+// and pinned to a fast model. Note: Claude's --mcp-config is variadic, so --model
+// must follow it to terminate the list before the positional prompt.
+func buildAgentArgs(agentName, prompt string) []string {
+	switch p := strings.ToLower(agentName); {
+	case strings.Contains(p, "claude"):
+		// Full isolation so the child only sees THIS prompt (verified clean E2E):
+		//   --tools ""           → disable ALL built-in tools (no Read/Bash/etc.)
+		//   --strict-mcp-config  → load zero MCP servers (no recursion into Auxly's)
+		//   --setting-sources "" → load NO user/project settings, so SessionStart
+		//                          hooks / CLAUDE.md can't inject the real vault into
+		//                          context (this was the contamination source)
+		// Each variadic flag (--mcp-config, --tools, --setting-sources) is followed by
+		// another flag so it can't swallow the positional prompt.
+		return []string{
+			"-p",
+			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
+			"--tools", "",
+			"--setting-sources", "",
+			"--model", "haiku",
+			prompt,
+		}
+	case strings.Contains(p, "codex"):
+		// Codex automation mode is the `exec` subcommand; read-only sandbox blocks
+		// any model-generated shell command from writing or escaping.
+		return []string{"exec", "--sandbox", "read-only", prompt}
+	case strings.Contains(p, "antigravity") || strings.Contains(p, "agy"):
+		// `agy --print` runs a single prompt non-interactively (verified it exits on
+		// EOF stdin); a bare prompt opens interactive mode and hangs.
+		return []string{"--print", prompt}
+	case strings.Contains(p, "gemini"):
+		return []string{"-p", prompt}
+	case strings.Contains(p, "cursor"):
+		return []string{"-p", "--output-format", "text", prompt}
+	default:
+		// Safe fallback: most agent CLIs treat `-p`/`--print` as headless mode; a
+		// bare prompt opens interactive mode and hangs, so prefer `-p`.
+		return []string{"-p", prompt}
+	}
+}
 
 // OrganizeResult represents the outcome of the vault reorganization.
 type OrganizeResult struct {
@@ -19,6 +144,85 @@ type OrganizeResult struct {
 	Message    string
 	Diff       string
 	TokensUsed int
+}
+
+// ProposedChange is one file's pending edit from an organize run — computed but
+// NOT yet written. The review UI shows each before/after, lets the user
+// approve/reject/edit, and only the approved set is written via ApplyOrganizeChanges.
+type ProposedChange struct {
+	Name       string // file name (e.g. "projects.md")
+	OldContent string // current on-disk content ("" if new)
+	NewContent string // proposed content (may be edited by the user before apply)
+	Scope      string // "global" or "workspace"
+	IsNew      bool   // file did not exist before
+}
+
+// Changed reports whether the proposed content actually differs from disk.
+func (c ProposedChange) Changed() bool { return c.NewContent != c.OldContent }
+
+// OrganizeProposal is the full set of pending changes from one organize run,
+// computed WITHOUT writing anything to disk.
+type OrganizeProposal struct {
+	Changes    []ProposedChange
+	ModelUsed  string
+	TokensUsed int
+}
+
+// buildProposalFromJSON parses an organize model's JSON output into a set of
+// proposed per-file changes WITHOUT writing anything. Path-unsafe names (absolute
+// or parent-escaping) are dropped. On parse failure it returns a failed result.
+func (s *Store) buildProposalFromJSON(jsonContent, modelUsed string, tokensUsed int) (OrganizeProposal, OrganizeResult) {
+	type responseFile struct {
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	}
+	type responseObj struct {
+		Files []responseFile `json:"files"`
+	}
+	var parsed responseObj
+	if err := json.Unmarshal([]byte(jsonContent), &parsed); err != nil {
+		return OrganizeProposal{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to parse JSON vault payload: %v\nOutput content was: %s", err, jsonContent)}
+	}
+	prop := OrganizeProposal{ModelUsed: modelUsed, TokensUsed: tokensUsed}
+	for _, rf := range parsed.Files {
+		cleanedName := filepath.Clean(rf.Name)
+		if strings.HasPrefix(cleanedName, "..") || filepath.IsAbs(cleanedName) {
+			continue
+		}
+		scope := "global"
+		if s.WorkspaceRoot != "" {
+			localFile := filepath.Join(s.WorkspaceRoot, cleanedName)
+			if _, err := os.Stat(localFile); err == nil {
+				scope = "workspace"
+			}
+		}
+		oldContent, viewErr := s.View(rf.Name)
+		prop.Changes = append(prop.Changes, ProposedChange{
+			Name:       cleanedName,
+			OldContent: oldContent,
+			NewContent: rf.Content,
+			Scope:      scope,
+			IsNew:      viewErr != nil,
+		})
+	}
+	return prop, OrganizeResult{Success: true}
+}
+
+// ApplyOrganizeChanges writes the given (approved, possibly user-edited) changes to
+// disk and returns a combined diff. This is the ONLY place an organize run writes —
+// callers gather explicit approval first. Files whose content is unchanged are skipped.
+func (s *Store) ApplyOrganizeChanges(changes []ProposedChange) string {
+	var diffBuilder strings.Builder
+	for _, c := range changes {
+		if !c.Changed() {
+			continue
+		}
+		_ = s.WriteScoped(c.Name, c.NewContent, c.Scope)
+		if d := generateDiff(c.Name, c.OldContent, c.NewContent); d != "" {
+			diffBuilder.WriteString(d + "\n")
+		}
+	}
+	return diffBuilder.String()
 }
 
 // organizeSystemPrompt builds the canonical organize/re-classification system
@@ -42,10 +246,10 @@ amount, and detail present in the INPUT must still be present in your OUTPUT.
   least as much information as the input. Losing one fact = task failed.
 
 WORKED EXAMPLE (do exactly this):
-  INPUT projects.md contains: "Civil Dispute No. 4772176104 … 618,000 SAR …
-  ruling in Wael's favor" (a personal legal matter sitting in the wrong file).
+  INPUT projects.md contains: "Personal loan of 5,000 from a relative, repaid
+  monthly" (a personal financial matter sitting in the wrong file).
   CORRECT: remove it from projects.md AND write it verbatim into personal.md
-  under a "## Legal" heading. WRONG: delete it because it isn't a software
+  under a "## Finances" heading. WRONG: delete it because it isn't a software
   project. Deleting it is a critical failure.
 
 Other principles (all subordinate to RULE 0):
@@ -145,6 +349,17 @@ func (s *Store) OrganizeVaultWithAgent(agentName string, agentPath string) Organ
 
 	// 2. Route Execution based on agentPath presence
 	if agentPath != "" {
+		// SAFETY GATE: only agents whose isolation is E2E-verified (no tools, scrubbed
+		// env, empty cwd → zero-loss + zero-contamination) may use the agentic path.
+		// Unverified agents read the real vault and drop facts, so route them to the
+		// tool-less Direct LLM / Custom endpoints instead.
+		if !organizeAgentSafe(agentName) {
+			return OrganizeResult{
+				Success: false,
+				Message: fmt.Sprintf("On-Demand Organization via %q isn't available yet: agent CLIs run with file tools and can read outside the vault and drop facts. Use the \"Direct LLM\" option or a Custom endpoint — these transform only the vault text, with no file access.", agentName),
+			}
+		}
+
 		// Guard: only fork/exec an actual executable file. A config directory
 		// (e.g. ~/.gemini/antigravity-cli) would fail with a cryptic
 		// "permission denied"; fail clearly instead.
@@ -154,39 +369,35 @@ func (s *Store) OrganizeVaultWithAgent(agentName string, agentPath string) Organ
 			return OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s path is a directory, not an executable: %s", agentName, agentPath)}
 		}
 
-		// Run via CLI command (Claude Code, Gemini CLI, etc.)
-		var cmd *exec.Cmd
-		provider := strings.ToLower(agentName)
-		if strings.Contains(provider, "claude") {
-			// Claude Code: claude -p "prompt"
-			cmd = exec.Command(agentPath, "-p", fullPrompt)
-		} else {
-			// Generic command-line fallback: execute the binary passing the prompt as an argument
-			cmd = exec.Command(agentPath, fullPrompt)
-		}
+		// Run via CLI command with the verified per-agent headless invocation.
+		timeout := organizeTimeout()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
 
-		// Prevent hanging/waiting on TTY stdin by sending EOF immediately
+		cmd := exec.CommandContext(ctx, agentPath, buildAgentArgs(agentName, fullPrompt)...)
+
+		// ISOLATION: empty stdin (no TTY hang), a scrubbed env with no AUXLY_* (so the
+		// agent can't locate the real vault), and an empty working directory (so any
+		// relative file read finds nothing). Combined with the per-agent no-tools flags
+		// this keeps the child to a pure text→JSON transform.
 		cmd.Stdin = strings.NewReader("")
+		cmd.Env = scrubbedOrganizeEnv()
+		if workDir, err := os.MkdirTemp("", "auxly-organize-"); err == nil {
+			defer os.RemoveAll(workDir)
+			cmd.Dir = workDir
+		}
+		// Give a killed process a moment to flush before its pipes are closed.
+		cmd.WaitDelay = 5 * time.Second
 
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
 
-		// Set execution timeout (300 seconds) to prevent hanging
-		done := make(chan error, 1)
-		go func() {
-			done <- cmd.Run()
-		}()
+		execErr := cmd.Run()
 
-		var execErr error
-		select {
-		case <-time.After(300 * time.Second):
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			return OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s execution timed out after 300s. Stderr: %s", agentName, stderr.String())}
-		case err := <-done:
-			execErr = err
+		// Distinguish a timeout (context deadline) from a genuine execution failure.
+		if ctx.Err() == context.DeadlineExceeded {
+			return OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s execution timed out after %s. Stderr: %s", agentName, timeout, strings.TrimSpace(stderr.String()))}
 		}
 
 		if execErr != nil {
@@ -331,44 +542,15 @@ func (s *Store) OrganizeVaultWithAgent(agentName string, agentPath string) Organ
 		}
 	}
 
-	// 3. Decode Response
-	type responseFile struct {
-		Name    string `json:"name"`
-		Content string `json:"content"`
+	// 3. Decode into a proposal, then apply (this entry point preserves the
+	// original compute-and-write behavior; the TUI uses PlanOrganize* + the review
+	// flow + ApplyOrganizeChanges to write only what the user approves).
+	prop, errRes := s.buildProposalFromJSON(jsonContent, modelUsed, tokensUsed)
+	if !errRes.Success {
+		return errRes
 	}
-	type responseObj struct {
-		Files []responseFile `json:"files"`
-	}
-
-	var parsed responseObj
-	if err := json.Unmarshal([]byte(jsonContent), &parsed); err != nil {
-		return OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to parse JSON vault payload: %v\nOutput content was: %s", err, jsonContent)}
-	}
-
-	// 4. Safely overwrite refined files back to disk
-	var diffBuilder strings.Builder
-	for _, rf := range parsed.Files {
-		cleanedName := filepath.Clean(rf.Name)
-		if strings.HasPrefix(cleanedName, "..") || filepath.IsAbs(cleanedName) {
-			continue
-		}
-		scope := "global"
-		if s.WorkspaceRoot != "" {
-			localFile := filepath.Join(s.WorkspaceRoot, cleanedName)
-			if _, err := os.Stat(localFile); err == nil {
-				scope = "workspace"
-			}
-		}
-		oldContent, _ := s.View(rf.Name)
-		_ = s.WriteScoped(cleanedName, rf.Content, scope)
-
-		fileDiff := generateDiff(cleanedName, oldContent, rf.Content)
-		if fileDiff != "" {
-			diffBuilder.WriteString(fileDiff + "\n")
-		}
-	}
-
-	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using %s!", modelUsed), Diff: diffBuilder.String(), TokensUsed: tokensUsed}
+	diff := s.ApplyOrganizeChanges(prop.Changes)
+	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using %s!", modelUsed), Diff: diff, TokensUsed: tokensUsed}
 }
 
 // extractJSON isolates valid JSON brackets from any markdown code blocks or surrounding filler text.
@@ -504,42 +686,12 @@ func (s *Store) OrganizeVaultWithCustom(endpoint string, model string) OrganizeR
 		tokensUsed = (len(fullPrompt) + len(jsonContent)) / 4
 	}
 
-	type responseFile struct {
-		Name    string `json:"name"`
-		Content string `json:"content"`
+	prop, errRes := s.buildProposalFromJSON(jsonContent, model, tokensUsed)
+	if !errRes.Success {
+		return errRes
 	}
-	type responseObj struct {
-		Files []responseFile `json:"files"`
-	}
-
-	var parsed responseObj
-	if err := json.Unmarshal([]byte(jsonContent), &parsed); err != nil {
-		return OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to parse JSON vault payload: %v\nOutput content was: %s", err, jsonContent)}
-	}
-
-	var diffBuilder strings.Builder
-	for _, rf := range parsed.Files {
-		cleanedName := filepath.Clean(rf.Name)
-		if strings.HasPrefix(cleanedName, "..") || filepath.IsAbs(cleanedName) {
-			continue
-		}
-		scope := "global"
-		if s.WorkspaceRoot != "" {
-			localFile := filepath.Join(s.WorkspaceRoot, cleanedName)
-			if _, err := os.Stat(localFile); err == nil {
-				scope = "workspace"
-			}
-		}
-		oldContent, _ := s.View(rf.Name)
-		_ = s.WriteScoped(cleanedName, rf.Content, scope)
-
-		fileDiff := generateDiff(cleanedName, oldContent, rf.Content)
-		if fileDiff != "" {
-			diffBuilder.WriteString(fileDiff + "\n")
-		}
-	}
-
-	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using custom model %s!", model), Diff: diffBuilder.String(), TokensUsed: tokensUsed}
+	diff := s.ApplyOrganizeChanges(prop.Changes)
+	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using custom model %s!", model), Diff: diff, TokensUsed: tokensUsed}
 }
 
 // generateDiff creates a clean line-by-line de-duplication diff showing exactly which lines were removed (-) and added (+).

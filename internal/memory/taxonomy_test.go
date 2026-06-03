@@ -11,12 +11,12 @@ func TestRouteCategory(t *testing.T) {
 		content string
 		want    string
 	}{
-		{"family routes to personal", "my wife Hanan is pregnant", "personal"},
+		{"family routes to personal", "my wife is pregnant", "personal"},
 		{"son routes to personal", "my son started school", "personal"},
 		{"server routes to infra", "the server at 192.168.1.1 runs docker", "infra"},
 		{"repo routes to projects", "pushed to the git repo", "projects"},
-		{"founder routes to identity", "Wael is the founder and CEO", "identity"},
-		{"product routes to products", "the Raqeb platform shipped", "products"},
+		{"founder routes to identity", "The user is the founder and CEO", "identity"},
+		{"product routes to products", "the new platform shipped", "products"},
 		{"journal routes to daily", "today I accomplished the migration", "daily"},
 		{"unmatched falls back to preferences", "I like clean abstractions", "preferences"},
 	}

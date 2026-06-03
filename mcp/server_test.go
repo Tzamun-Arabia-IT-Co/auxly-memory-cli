@@ -76,7 +76,7 @@ func TestToolSkillBootstrap_Block(t *testing.T) {
 // session sees everything. Proves the enforcement gate, not just the pure ACL.
 func TestRemoteSession_DeniesPersonal(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "personal.md"), []byte("- wife Hanan"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "personal.md"), []byte("- private note"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "infra.md"), []byte("- server 1.2.3.4"), 0o644); err != nil {
@@ -115,7 +115,7 @@ func TestRemoteSession_DeniesPersonal(t *testing.T) {
 func TestToolSkillSync_RoutesPersonal(t *testing.T) {
 	s := newTestServer(t)
 	// empty category → auto-route; family content must land in personal.md
-	s.toolSkillSync("my wife Hanan is expecting our child", "", "global")
+	s.toolSkillSync("my wife is expecting our child", "", "global")
 	// the write may go through trust/pending; assert routing decision via the
 	// file the store touched, tolerating either an applied write or a pending one.
 	dir := s.memoryPath
@@ -126,7 +126,7 @@ func TestToolSkillSync_RoutesPersonal(t *testing.T) {
 		t.Skip("write was not applied directly (trust/pending path); routing covered by taxonomy tests")
 	}
 	data, _ := os.ReadFile(personal)
-	if !strings.Contains(strings.ToLower(string(data)), "hanan") {
+	if !strings.Contains(strings.ToLower(string(data)), "expecting") {
 		t.Errorf("personal.md should contain the routed family fact, got: %q", string(data))
 	}
 }

@@ -40,14 +40,14 @@ var Taxonomy = []Category{
 		File:        "identity.md",
 		Tier:        TierShared,
 		Description: "who the user is — name, role, professional bio, persona",
-		Keywords:    []string{"ceo", "founder", "chairman", "wael", "samoum", "jeddah", "saudi", "gcc", "fundraising", "raising", "leanteam"},
+		Keywords:    []string{"ceo", "founder", "chairman", "fundraising", "raising"},
 	},
 	{
 		Slug:        "personal",
 		File:        "personal.md",
 		Tier:        TierPersonal,
 		Description: "PRIVATE life — the USER'S OWN family, relationships, health, and their PERSONAL legal/financial matters (their own lawsuit, court case, divorce, custody, personal loan, salary, bank). NOT a company/business legal or financial matter — judge by context, not the topic word: if it is about the user as an individual or their family it is PERSONAL; if it is about the company/a client/the business it is NOT.",
-		Keywords:    []string{"wife", "husband", "son", "daughter", "child", "children", "kids", "family", "pregnan", "baby", "newborn", "marriage", "married", "divorce", "custody", "alimony", "spouse", "fiance", "girlfriend", "boyfriend", "mother", "father", "sibling", "health", "medical", "hanan"},
+		Keywords:    []string{"wife", "husband", "son", "daughter", "child", "children", "kids", "family", "pregnan", "baby", "newborn", "marriage", "married", "divorce", "custody", "alimony", "spouse", "fiance", "girlfriend", "boyfriend", "mother", "father", "sibling", "health", "medical"},
 	},
 	{
 		Slug:        "preferences",
@@ -68,7 +68,7 @@ var Taxonomy = []Category{
 		File:        "products.md",
 		Tier:        TierShared,
 		Description: "the user's products / portfolio",
-		Keywords:    []string{"platform", "product", "portfolio", "etabeb", "raqeb", "tzamunerp", "pathconnect", "radioconnect", "tchub", "tzamunai", "motormind", "auxly", "voicehub", "app"},
+		Keywords:    []string{"platform", "product", "portfolio", "app"},
 	},
 	{
 		Slug:        "projects",

@@ -244,14 +244,14 @@ func TestAgentCardNeverWrapsToThreeLines(t *testing.T) {
 func TestConnectionsSummaryDedupsSameServer(t *testing.T) {
 	m := *NewApp(t.TempDir())
 	m.dashboard.sessions = []agentSession{
-		{Provider: "claude-code", Remote: true, Host: "motormind.autos", IP: "192.168.1.166", OS: "linux", PID: 1},
-		{Provider: "claude-code", Remote: true, Host: "motormind.autos", IP: "192.168.1.166", OS: "linux", PID: 2},
-		{Provider: "claude-code", Remote: true, Host: "motormind.autos", IP: "192.168.1.166", OS: "linux", PID: 3},
+		{Provider: "claude-code", Remote: true, Host: "testhost.local", IP: "192.168.1.166", OS: "linux", PID: 1},
+		{Provider: "claude-code", Remote: true, Host: "testhost.local", IP: "192.168.1.166", OS: "linux", PID: 2},
+		{Provider: "claude-code", Remote: true, Host: "testhost.local", IP: "192.168.1.166", OS: "linux", PID: 3},
 		{Provider: "claude-code", Remote: true, Host: "erp.tzamun.ai", IP: "192.168.1.168", OS: "linux", PID: 4},
 	}
 	out := stripANSI(m.dashboard.renderConnectionsSummary(false))
-	if c := strings.Count(out, "motormind.autos"); c != 1 {
-		t.Errorf("motormind.autos should appear once (deduped), got %d:\n%s", c, out)
+	if c := strings.Count(out, "testhost.local"); c != 1 {
+		t.Errorf("testhost.local should appear once (deduped), got %d:\n%s", c, out)
 	}
 	if c := strings.Count(out, "erp.tzamun.ai"); c != 1 {
 		t.Errorf("erp.tzamun.ai should appear once, got %d:\n%s", c, out)
