@@ -5,7 +5,7 @@ All notable changes to Auxly Memory CLI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.6]
+## [1.0.7]
 
 ### Added — Memory Organization tab
 
@@ -98,7 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ApplyOrganizeChanges` is the only writer, and it runs only after explicit
   per-file approval.
 
-### Foundation (earlier in the 1.0.6 line)
+### Foundation (earlier in this line)
 
 - Added the plan/apply split for memory organization (preview proposal vs.
   apply), the organize safety gate, and `IsOrganizableFile` scoping.
@@ -117,7 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - TUI: repaint the content viewport in sub-mode key handlers.
 
-[1.0.6]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.6
+[1.0.7]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.7
 [1.0.5]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.5
 [1.0.4]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.4
 [1.0.3]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.3
