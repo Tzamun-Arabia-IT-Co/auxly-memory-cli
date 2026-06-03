@@ -81,18 +81,26 @@ Auxly is a single static Go binary that plays three roles at once:
 
 ```mermaid
 flowchart LR
-    agents["Claude &middot; Codex &middot; Gemini<br/>Copilot &middot; Cursor &middot; any CLI agent"]
-    mcp["MCP server<br/>stdio: read &middot; write &middot; search &middot; sync"]
-    gate{"Trust gate<br/>auto &middot; approve &middot; read-only"}
-    vault[("~/.auxly/memory/*.md")]
-    audit["Audit log<br/>JSONL + SQLite index"]
-    git["git push (optional)"]
+    agents["Claude &middot; Codex &middot; Gemini<br/>Copilot &middot; Cursor &middot; any CLI agent"]:::agents
+    mcp["MCP server<br/>stdio: read &middot; write &middot; search &middot; sync"]:::core
+    gate{"Trust gate<br/>auto &middot; approve &middot; read-only"}:::gate
+    vault[("~/.auxly/memory/*.md")]:::store
+    audit["Audit log<br/>JSONL + SQLite index"]:::audit
+    git["git push (optional)"]:::ghost
 
     agents -->|MCP over stdio| mcp
     mcp --> gate
     gate -->|accepted write| vault
     vault --> audit
     vault -.-> git
+
+    classDef agents fill:#917FD1,stroke:#B7A8F0,color:#ffffff,stroke-width:1px;
+    classDef core fill:#73CBAD,stroke:#A7E6D2,color:#08231B,stroke-width:1px;
+    classDef gate fill:#D97757,stroke:#F0A988,color:#ffffff,stroke-width:1px;
+    classDef store fill:#84DCFB,stroke:#BDEEFD,color:#08231B,stroke-width:1px;
+    classDef audit fill:#775099,stroke:#A88FCB,color:#ffffff,stroke-width:1px;
+    classDef ghost fill:#2A2540,stroke:#917FD1,color:#D7D0F2,stroke-width:1px,stroke-dasharray:4 3;
+    linkStyle default stroke:#8E7BD0,stroke-width:1.5px;
 ```
 
 1. **MCP server** — `auxly mcp-server` exposes tools (read, write, search, sync, …) to any MCP-capable agent over stdio. Agents call them like any other tool.
@@ -370,13 +378,18 @@ The agent on the remote machine spawns that over SSH and speaks MCP over stdio; 
 ```mermaid
 flowchart LR
     subgraph consumer["CONSUMER box"]
-        c["your agent runs here<br/>auxly connect &hellip;"]
+        c["your agent runs here<br/>auxly connect &hellip;"]:::node
     end
     subgraph host["MEMORY HOST"]
-        h["memory lives here<br/>audits every access"]
+        h["memory lives here<br/>audits every access"]:::node
     end
     c -->|"ssh host auxly mcp-server"| h
     h -.->|"memory over stdio"| c
+
+    classDef node fill:#73CBAD,stroke:#A7E6D2,color:#08231B,stroke-width:1px;
+    style consumer fill:#241F38,stroke:#917FD1,color:#D7D0F2,stroke-width:1px;
+    style host fill:#241F38,stroke:#84DCFB,color:#BFE9FB,stroke-width:1px;
+    linkStyle default stroke:#8E7BD0,stroke-width:1.5px;
 ```
 
 | Role | What it does | Command |
