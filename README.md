@@ -17,9 +17,9 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 <br />
 
-<img src="screenshots/audit-trail.png" alt="Auxly dashboard — full, queryable audit trail of every agent's memory access" width="820" />
+<img src="screenshots/Dashboard-new.png" alt="The Auxly dashboard — connected agents, memory stats, live activity, and remote connections in one terminal view" width="860" />
 
-<sub>Every agent's reads and writes — local and SSH-remote — in one queryable audit trail.</sub>
+<sub>One local dashboard for every agent you use — connected brands, memory by category, recent writes, and live remote connections.</sub>
 
 </div>
 
@@ -77,20 +77,20 @@ Auxly gives all of your agents **one** memory — a folder of Markdown files on 
 
 Auxly is a single static Go binary that plays three roles at once:
 
-```
-                ┌─────────────────────────────────────────────┐
-   Claude  ─┐   │                  auxly                       │
-   Codex   ─┤   │   ┌──────────────┐      ┌────────────────┐   │
-   Gemini  ─┼──▶│   │  MCP server  │─────▶│  Trust gate    │   │
-   Copilot ─┤   │   │ (stdio JSON- │      │ auto / approve │   │
-   Cursor  ─┤   │   │   RPC tools) │      │  / read-only   │   │
-   …any CLI─┘   │   └──────────────┘      └───────┬────────┘   │
-                │                                  ▼            │
-                │   ┌──────────────┐      ┌────────────────┐   │
-                │   │  Audit log   │◀─────│  ~/.auxly/      │   │
-                │   │JSONL + SQLite│      │  memory/*.md    │──┼──▶ git push
-                │   └──────────────┘      └────────────────┘   │   (optional)
-                └─────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    agents["Claude &middot; Codex &middot; Gemini<br/>Copilot &middot; Cursor &middot; any CLI agent"]
+    mcp["MCP server<br/>stdio: read &middot; write &middot; search &middot; sync"]
+    gate{"Trust gate<br/>auto &middot; approve &middot; read-only"}
+    vault[("~/.auxly/memory/*.md")]
+    audit["Audit log<br/>JSONL + SQLite index"]
+    git["git push (optional)"]
+
+    agents -->|MCP over stdio| mcp
+    mcp --> gate
+    gate -->|accepted write| vault
+    vault --> audit
+    vault -.-> git
 ```
 
 1. **MCP server** — `auxly mcp-server` exposes tools (read, write, search, sync, …) to any MCP-capable agent over stdio. Agents call them like any other tool.
@@ -352,6 +352,14 @@ The agent grid is **dynamic** — it shows only the agents detected or active on
 
 Keyboard-driven throughout: `1–9`/`0` jump tabs, `↑/↓` or `j/k` navigate, `Tab`/`[`/`]` cycle, `q` quits. Press `[u]` anywhere for the live usage popup.
 
+<div align="center">
+
+<img src="screenshots/audit-trail.png" alt="The Audit Trail tab — full, queryable history of every memory access" width="820" />
+
+<sub>The <strong>Audit Trail</strong> tab (<code>0</code>): every read and write — local and SSH-remote — with a <code>Type</code> filter.</sub>
+
+</div>
+
 ### Memory Organization
 
 The **Memory Org** tab (`5`) runs an AI pass that consolidates and re-files your memory vault — deduplicating facts, moving misplaced lines to the right category, and tidying each file — **without writing anything until you approve it**.
@@ -377,12 +385,16 @@ The agent on the remote machine spawns that over SSH and speaks MCP over stdio; 
 
 ### Two roles
 
-```
-   ┌────────────────────┐         plain SSH          ┌────────────────────┐
-   │   CONSUMER box      │  ───────────────────────▶  │   MEMORY HOST       │
-   │  (agent runs here)  │   ssh host auxly mcp-server │ (memory lives here, │
-   │  auxly connect …    │  ◀───────────────────────  │  audits every write)│
-   └────────────────────┘     memory over stdio        └────────────────────┘
+```mermaid
+flowchart LR
+    subgraph consumer["CONSUMER box"]
+        c["your agent runs here<br/>auxly connect &hellip;"]
+    end
+    subgraph host["MEMORY HOST"]
+        h["memory lives here<br/>audits every access"]
+    end
+    c -->|"ssh host auxly mcp-server"| h
+    h -.->|"memory over stdio"| c
 ```
 
 | Role | What it does | Command |
@@ -527,11 +539,24 @@ branch: main
 
 ## Configuration
 
+Auxly is config-light: it works with zero setup, and everything it *does* persist lives under `~/.auxly/` as plain text you can read, edit, and version.
+
+### Config files
+
+All optional — Auxly creates and manages these for you; edit them by hand any time.
+
+| File | What it controls |
+|------|------------------|
+| `~/.auxly/memory/trust.yaml` | Per-provider trust levels (`auto` / `require_approval` / `read_only`) — or use `auxly trust set …` |
+| `~/.auxly/memory/git.yaml` | Git sync remote and behavior (see [Git sync](#git-sync)) |
+| `~/.auxly/settings.json` | Dashboard preferences: `liveUsage` opt-in (off by default) and `hiddenAgents` — toggled in **Settings** |
+| `~/.claude/settings.json` | Claude Code statusline wiring — managed by `auxly statusline install/uninstall` |
+
 ### Environment variables
 
 | Variable | Purpose |
 |----------|---------|
-| `AUXLY_MEMORY_PATH` | Override the memory folder location |
+| `AUXLY_MEMORY_PATH` | Override the memory folder location (default `~/.auxly/memory`) |
 | `AUXLY_INSTALL_BASE` | Override the download/update base (default `https://auxly.io`) |
 | `AUXLY_PROVIDER` | Override the provider id for a write |
 | `AUXLY_LLM_BASE` | Override the LLM endpoint used by smart sync |
