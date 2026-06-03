@@ -70,6 +70,7 @@ Auxly gives all of your agents **one** memory — a folder of Markdown files on 
 | 🛂 **You stay in control** | Per-agent trust levels decide whether a write lands instantly, queues for your approval, or is denied. |
 | 🧾 **Fully auditable** | Every read and write is logged append-only with who, what, when, and why — surfaced in a live dashboard. |
 | 🌐 **Works across machines** | Share one memory host with NAT'd servers and laptops over plain SSH — no daemon, no open port, no token. |
+| 🖱️ **TUI + CLI, same power** | An interactive dashboard you drive with **mouse or keyboard**, plus a fully scriptable **CLI** — every action works both ways. |
 | 🆓 **Free & open** | MIT-licensed Go binary. Single static file, zero runtime dependencies. |
 
 ---
@@ -312,7 +313,9 @@ The export folder is version-stamped (`…-v<version>/`), so when a release upda
 
 ## The dashboard
 
-`auxly` opens a full-screen terminal dashboard:
+`auxly` opens a **fully interactive terminal UI**. Drive it with the **mouse** — click tabs, agent cards, files, and buttons, and scroll lists — *or* the keyboard, whichever you prefer. And everything Auxly does is available **two ways**: as a scriptable **CLI command** (great for automation and muscle memory) *and* as a point-and-click action in the TUI. Same capabilities, your choice of interface.
+
+The TUI has ten tabs:
 
 | # | Tab | What you see |
 |---|-----|--------------|
@@ -329,7 +332,7 @@ The export folder is version-stamped (`…-v<version>/`), so when a release upda
 
 The agent grid is **dynamic** — it shows only the agents detected or active on this machine, so it stays readable whether you run two agents or twenty. Any agent that connects and writes appears automatically (even one wired by hand); hide the ones you don't want to see under **Settings → Agents**.
 
-Keyboard-driven throughout: `1–9`/`0` jump tabs, `↑/↓` or `j/k` navigate, `Tab`/`[`/`]` cycle, `q` quits. Press `[u]` anywhere for the live usage popup.
+**Mouse or keyboard — your call.** The TUI is fully mouse-aware: click a tab, an agent card, a file, or a button, and scroll through lists. Prefer keys? `1–9`/`0` jump tabs, `↑/↓` or `j/k` navigate, `Tab`/`[`/`]` cycle, `Enter` opens or confirms, `q` quits — and `[u]` pops the live usage panel from anywhere. Anything you can do here you can also do from the [command line](#command-reference), and vice-versa.
 
 <div align="center">
 
