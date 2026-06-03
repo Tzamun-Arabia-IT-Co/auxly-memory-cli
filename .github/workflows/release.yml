@@ -1,0 +1,42 @@
+name: release
+
+# Fires when you push a version tag, e.g. `git tag v1.0.0 && git push origin v1.0.0`.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub Release + upload assets
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the changelog is complete
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          # Default token: creates the Release + uploads assets in THIS repo.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT (repo scope): lets goreleaser push the formula to the tap repo.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # Gemini/Antigravity Live Usage OAuth clients — injected into release
+          # binaries via ldflags (see .goreleaser.yaml). Absent → empty → those two
+          # usage meters report "unavailable"; everything else still builds.
+          GEMINI_CLIENT_ID: ${{ secrets.GEMINI_CLIENT_ID }}
+          GEMINI_CLIENT_SECRET: ${{ secrets.GEMINI_CLIENT_SECRET }}
+          ANTIGRAVITY_CLIENT_ID: ${{ secrets.ANTIGRAVITY_CLIENT_ID }}
+          ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.ANTIGRAVITY_CLIENT_SECRET }}

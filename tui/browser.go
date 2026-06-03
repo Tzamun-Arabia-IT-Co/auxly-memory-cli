@@ -1,0 +1,130 @@
+package tui
+
+import (
+	"fmt"
+	"sort"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+type browserModel struct {
+	store  *memory.Store
+	files  []memory.FileInfo
+	cursor int
+}
+
+type browserRefreshMsg struct {
+	files []memory.FileInfo
+}
+
+func newBrowserModel(store *memory.Store) browserModel {
+	return browserModel{store: store}
+}
+
+func (m browserModel) Refresh() tea.Cmd {
+	return func() tea.Msg {
+		files, _ := m.store.List()
+		return browserRefreshMsg{files: orderBrowserFiles(files)}
+	}
+}
+
+// orderBrowserFiles produces a STABLE, human-sensible order: editable memory
+// files first, in canonical taxonomy order (identity, personal, preferences, …),
+// then every read-only file (provider/rules docs, the aggregate) alphabetically.
+// store.List() is already name-sorted, so SliceStable keeps a deterministic tie
+// order — the list no longer reshuffles between renders.
+func orderBrowserFiles(files []memory.FileInfo) []memory.FileInfo {
+	rank := map[string]int{}
+	for i, name := range memory.OrderedFiles() {
+		rank[name] = i
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		ri, oki := rank[files[i].Name]
+		rj, okj := rank[files[j].Name]
+		if oki && okj {
+			return ri < rj
+		}
+		if oki != okj {
+			return oki // editable taxonomy files come first
+		}
+		return files[i].Name < files[j].Name
+	})
+	return files
+}
+
+type OpenFileMsg struct {
+	Filename string
+	Content  string
+	Editable bool
+}
+
+func (m browserModel) Update(msg tea.Msg) (browserModel, tea.Cmd) {
+	switch msg := msg.(type) {
+	case browserRefreshMsg:
+		m.files = msg.files
+		if m.cursor >= len(m.files) {
+			m.cursor = 0
+		}
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "j", "down":
+			if m.cursor < len(m.files)-1 {
+				m.cursor++
+			}
+		case "k", "up":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "enter":
+			if m.cursor < len(m.files) {
+				f := m.files[m.cursor]
+				return m, func() tea.Msg {
+					content, _ := m.store.View(f.Name)
+					return OpenFileMsg{
+						Filename: f.Name,
+						Content:  content,
+						Editable: memory.IsEditableFile(f.Name),
+					}
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m browserModel) View() string {
+	title := StyleTitle.Render("📁 File Browser")
+
+	if len(m.files) == 0 {
+		return title + "\n\nNo memory files found. Run 'auxly init' first."
+	}
+
+	header := fmt.Sprintf("  %-24s %8s %19s   %s", "FILE", "SIZE", "MODIFIED", "ACCESS")
+	sep := lipgloss.NewStyle().Foreground(ColorDim).Render("  ──────────────────────────────────────────────────────────────────")
+
+	editTag := lipgloss.NewStyle().Foreground(ColorSuccess).Render("✎ editable")
+	roTag := lipgloss.NewStyle().Foreground(ColorDim).Render("🔒 read-only")
+
+	var content string
+	for i, f := range m.files {
+		cursor := "  "
+		if i == m.cursor {
+			cursor = lipgloss.NewStyle().Foreground(ColorPrimary).Render("▸ ")
+		}
+
+		access := roTag
+		if memory.IsEditableFile(f.Name) {
+			access = editTag
+		}
+
+		line := fmt.Sprintf("%s%-24s %6d B %19s   %s", cursor, f.Name, f.Size, f.ModTime.Format("02/01/2006 15:04:05"), access)
+		if i == m.cursor {
+			line = StyleSelectedRow.Render(line)
+		}
+		content += line + "\n"
+	}
+
+	return fmt.Sprintf("%s\n\n%s\n%s\n%s", title, header, sep, content)
+}
