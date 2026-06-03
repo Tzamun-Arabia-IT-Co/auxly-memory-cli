@@ -15,6 +15,12 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8.svg)](go.mod)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
+<br />
+
+<img src="screenshots/Dashboard-new.png" alt="The Auxly dashboard — connected agents, memory stats, live activity, and remote connections in one terminal view" width="860" />
+
+<sub>One local dashboard for every agent you use — connected brands, memory by category, recent writes, and live remote connections.</sub>
+
 </div>
 
 ---
@@ -33,7 +39,9 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 - [The dashboard](#the-dashboard)
 - [Remote memory over SSH](#remote-memory-over-ssh)
 - [Live Usage](#live-usage)
+- [Claude Code statusline](#claude-code-statusline)
 - [Git sync](#git-sync)
+- [Connect any MCP agent](#connect-any-mcp-capable-agent-manual-setup)
 - [Command reference](#command-reference)
 - [Configuration](#configuration)
 - [Security & privacy](#security--privacy)
@@ -62,6 +70,7 @@ Auxly gives all of your agents **one** memory — a folder of Markdown files on 
 | 🛂 **You stay in control** | Per-agent trust levels decide whether a write lands instantly, queues for your approval, or is denied. |
 | 🧾 **Fully auditable** | Every read and write is logged append-only with who, what, when, and why — surfaced in a live dashboard. |
 | 🌐 **Works across machines** | Share one memory host with NAT'd servers and laptops over plain SSH — no daemon, no open port, no token. |
+| 🖱️ **TUI + CLI, same power** | An interactive dashboard you drive with **mouse or keyboard**, plus a fully scriptable **CLI** — every action works both ways. |
 | 🆓 **Free & open** | MIT-licensed Go binary. Single static file, zero runtime dependencies. |
 
 ---
@@ -70,20 +79,28 @@ Auxly gives all of your agents **one** memory — a folder of Markdown files on 
 
 Auxly is a single static Go binary that plays three roles at once:
 
-```
-                ┌─────────────────────────────────────────────┐
-   Claude  ─┐   │                  auxly                       │
-   Codex   ─┤   │   ┌──────────────┐      ┌────────────────┐   │
-   Gemini  ─┼──▶│   │  MCP server  │─────▶│  Trust gate    │   │
-   Copilot ─┤   │   │ (stdio JSON- │      │ auto / approve │   │
-   Cursor  ─┤   │   │   RPC tools) │      │  / read-only   │   │
-   …any CLI─┘   │   └──────────────┘      └───────┬────────┘   │
-                │                                  ▼            │
-                │   ┌──────────────┐      ┌────────────────┐   │
-                │   │  Audit log   │◀─────│  ~/.auxly/      │   │
-                │   │JSONL + SQLite│      │  memory/*.md    │──┼──▶ git push
-                │   └──────────────┘      └────────────────┘   │   (optional)
-                └─────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    agents["Claude &middot; Codex &middot; Gemini<br/>Copilot &middot; Cursor &middot; any CLI agent"]:::agents
+    mcp["MCP server<br/>stdio: read &middot; write &middot; search &middot; sync"]:::core
+    gate{"Trust gate<br/>auto &middot; approve &middot; read-only"}:::gate
+    vault[("~/.auxly/memory/*.md")]:::store
+    audit["Audit log<br/>JSONL + SQLite index"]:::audit
+    git["git push (optional)"]:::ghost
+
+    agents -->|MCP over stdio| mcp
+    mcp --> gate
+    gate -->|accepted write| vault
+    vault --> audit
+    vault -.-> git
+
+    classDef agents fill:#917FD1,stroke:#B7A8F0,color:#ffffff,stroke-width:1px;
+    classDef core fill:#73CBAD,stroke:#A7E6D2,color:#08231B,stroke-width:1px;
+    classDef gate fill:#D97757,stroke:#F0A988,color:#ffffff,stroke-width:1px;
+    classDef store fill:#84DCFB,stroke:#BDEEFD,color:#08231B,stroke-width:1px;
+    classDef audit fill:#775099,stroke:#A88FCB,color:#ffffff,stroke-width:1px;
+    classDef ghost fill:#2A2540,stroke:#917FD1,color:#D7D0F2,stroke-width:1px,stroke-dasharray:4 3;
+    linkStyle default stroke:#8E7BD0,stroke-width:1.5px;
 ```
 
 1. **MCP server** — `auxly mcp-server` exposes tools (read, write, search, sync, …) to any MCP-capable agent over stdio. Agents call them like any other tool.
@@ -283,50 +300,30 @@ This detects every supported agent on your machine, writes each one's MCP config
 
 …or just open the dashboard (`auxly`): every connected agent appears on the grid, and its reads/writes show live in the **Activity** tab.
 
-### Claude Desktop skills
+### Claude Desktop skills (one manual step)
 
-Claude Desktop doesn't load skills from disk automatically — only the MCP connection is wired for you. `auxly setup` exports the slash commands to `~/Downloads/auxly-skills-v<version>/` as ready-to-import `.zip` files; add each one in Claude Desktop once (**Settings → Skills**). The export folder carries the version number, so when a release updates the skills you'll know to re-import. (Every other agent picks up skills automatically — this step is Claude-Desktop-only.)
+Claude Desktop is the **only** agent that needs a manual touch. `auxly setup` wires its **MCP connection** automatically, but Claude Desktop doesn't load skills from disk — so the `/auxly-*` slash commands have to be **imported once**:
 
-### Connect any MCP-capable agent (manual setup)
+1. **Run `auxly setup`.** It exports the skills to `~/Downloads/auxly-skills-v<version>/` as ready-to-import `.zip` files — one per skill.
+2. Open **Claude Desktop → Settings → Capabilities → Skills** (older builds: **Settings → Skills**).
+3. **Add each `.zip`** from that folder (use *Upload skill* / drag-and-drop). You only do this once.
+4. **Restart Claude Desktop** if the new skills don't show up right away.
 
-Auxly auto-wires the agents listed above, but **any** tool that speaks MCP can share the same memory — Android Studio, Perplexity, a homegrown client, anything. Some agents simply store their MCP config somewhere Auxly can't write to (Android Studio's Gemini settings sync to your Google account, for instance), or aren't auto-detected yet. Connecting one by hand is the same three pieces everywhere, because Auxly is a standard **stdio** MCP server.
+The export folder is version-stamped (`…-v<version>/`), so when a release updates the skills you'll know to re-import the new set. *(Every other agent — Claude Code, Codex, Gemini, Cursor, … — picks up skills automatically; this import step is Claude-Desktop-only.)*
 
-**1. Add the server entry** wherever your agent keeps MCP servers — a config file, or its "Add MCP server" dialog:
+### Connect any other MCP agent
 
-```json
-{
-  "mcpServers": {
-    "auxly-memory": {
-      "command": "/absolute/path/to/auxly",
-      "args": ["--path", "/Users/you/.auxly/memory", "mcp-server"],
-      "env": {
-        "AUXLY_MEMORY_PATH": "/Users/you/.auxly/memory",
-        "AUXLY_PROVIDER": "perplexity"
-      }
-    }
-  }
-}
-```
+`auxly setup` covers the agents listed above. **Any** other tool that speaks MCP — Android Studio, Perplexity, a homegrown client — can share the exact same memory with a one-time copy-paste config. The full walkthrough with the ready-to-paste JSON is at the end of this README:
 
-**2. Fill in the three values:**
-
-- **`command`** — your binary path, from `which auxly` (e.g. `/usr/local/bin/auxly`).
-- **`--path` / `AUXLY_MEMORY_PATH`** — your vault folder; default `~/.auxly/memory`.
-- **`AUXLY_PROVIDER`** — a short id naming *this* agent (`perplexity`, `android-studio`, …). This is what the audit trail and dashboard attribute its writes by, so give every tool its own id — never reuse another agent's, or its writes get mislabeled.
-
-**3. Reload the agent.** Some clients pick the server up instantly; others need a restart or a one-time "approve" before the tools go live.
-
-That's it — the moment the agent connects and writes, it appears on the dashboard grid, is labeled correctly in the **Audit Trail**, and can be hidden or re-shown under **Settings → Agents**.
-
-> **Schema note:** most clients use the `{ "mcpServers": { … } }` wrapper above (Claude Desktop, Warp, Void, Cursor, JetBrains AI Assistant, …). A few accept only the inner `{ "auxly-memory": { … } }` object — if the wrapped form is rejected, paste just the inner block.
->
-> **App-specific entry points:** Android Studio → the Gemini **"Configure MCP servers"** dialog, or **JetBrains AI Assistant → Settings → MCP** (which can also *Import from Claude* once you've run `auxly setup`). Perplexity and most desktop clients → their **Settings → Connectors / MCP** panel.
+➜ **[Connect any MCP-capable agent (manual setup)](#connect-any-mcp-capable-agent-manual-setup)**
 
 ---
 
 ## The dashboard
 
-`auxly` opens a full-screen terminal dashboard:
+`auxly` opens a **fully interactive terminal UI**. Drive it with the **mouse** — click tabs, agent cards, files, and buttons, and scroll lists — *or* the keyboard, whichever you prefer. And everything Auxly does is available **two ways**: as a scriptable **CLI command** (great for automation and muscle memory) *and* as a point-and-click action in the TUI. Same capabilities, your choice of interface.
+
+The TUI has ten tabs:
 
 | # | Tab | What you see |
 |---|-----|--------------|
@@ -343,7 +340,15 @@ That's it — the moment the agent connects and writes, it appears on the dashbo
 
 The agent grid is **dynamic** — it shows only the agents detected or active on this machine, so it stays readable whether you run two agents or twenty. Any agent that connects and writes appears automatically (even one wired by hand); hide the ones you don't want to see under **Settings → Agents**.
 
-Keyboard-driven throughout: `1–9`/`0` jump tabs, `↑/↓` or `j/k` navigate, `Tab`/`[`/`]` cycle, `q` quits. Press `[u]` anywhere for the live usage popup.
+**Mouse or keyboard — your call.** The TUI is fully mouse-aware: click a tab, an agent card, a file, or a button, and scroll through lists. Prefer keys? `1–9`/`0` jump tabs, `↑/↓` or `j/k` navigate, `Tab`/`[`/`]` cycle, `Enter` opens or confirms, `q` quits — and `[u]` pops the live usage panel from anywhere. Anything you can do here you can also do from the [command line](#command-reference), and vice-versa.
+
+<div align="center">
+
+<img src="screenshots/audit-trail.png" alt="The Audit Trail tab — full, queryable history of every memory access" width="820" />
+
+<sub>The <strong>Audit Trail</strong> tab (<code>0</code>): every read and write — local and SSH-remote — with a <code>Type</code> filter.</sub>
+
+</div>
 
 ### Memory Organization
 
@@ -370,12 +375,21 @@ The agent on the remote machine spawns that over SSH and speaks MCP over stdio; 
 
 ### Two roles
 
-```
-   ┌────────────────────┐         plain SSH          ┌────────────────────┐
-   │   CONSUMER box      │  ───────────────────────▶  │   MEMORY HOST       │
-   │  (agent runs here)  │   ssh host auxly mcp-server │ (memory lives here, │
-   │  auxly connect …    │  ◀───────────────────────  │  audits every write)│
-   └────────────────────┘     memory over stdio        └────────────────────┘
+```mermaid
+flowchart LR
+    subgraph consumer["CONSUMER box"]
+        c["your agent runs here<br/>auxly connect &hellip;"]:::node
+    end
+    subgraph host["MEMORY HOST"]
+        h["memory lives here<br/>audits every access"]:::node
+    end
+    c -->|"ssh host auxly mcp-server"| h
+    h -.->|"memory over stdio"| c
+
+    classDef node fill:#73CBAD,stroke:#A7E6D2,color:#08231B,stroke-width:1px;
+    style consumer fill:#241F38,stroke:#917FD1,color:#D7D0F2,stroke-width:1px;
+    style host fill:#241F38,stroke:#84DCFB,color:#BFE9FB,stroke-width:1px;
+    linkStyle default stroke:#8E7BD0,stroke-width:1.5px;
 ```
 
 | Role | What it does | Command |
@@ -443,6 +457,40 @@ auxly usage show              # print quota for every agent
 auxly usage auth antigravity  # one-time browser consent for Antigravity
 ```
 
+<div align="center">
+
+<img src="screenshots/agent-usage.png" alt="Live Usage — session and weekly quota for Claude, Codex, Gemini, Antigravity, and Cursor side by side" width="820" />
+
+<sub>Session and weekly quota for every connected agent, reusing each one's own login — no API key.</sub>
+
+</div>
+
+---
+
+## Claude Code statusline
+
+Auxly ships a productized statusline for **Claude Code** — a rich, multi-line status bar that surfaces your working context, your memory link, and your live plan usage without leaving the editor. Wire it in (additive and fully reversible — your existing statusline is backed up and restored on uninstall):
+
+```bash
+auxly statusline install          # replace your statusline with Auxly's full 4-line view
+auxly statusline install --wrap   # keep your own statusline and append the Auxly segment
+auxly statusline uninstall        # restore your backed-up original
+```
+
+It renders four lines: **where** (folder · branch · model · version), **session** (thinking · effort · tokens · context bar), **Auxly memory** (link · role · last op · pending), and **live Claude plan usage** (5h + weekly bars with reset countdowns).
+
+The render path **never makes a network call** — it reads only the last-good usage snapshot on disk, so it's safe to run on every prompt. When Live Usage is enabled, the usage line stays **live** during an active session: after printing instantly it triggers a guarded, detached background refresh that updates the snapshot for the next render (debounced, and rate-limited by the same circuit breaker as the dashboard). You can also manage it in the dashboard under **Settings → Customizations**, with a live preview before you apply.
+
+> Statusline support is Claude Code–specific (other CLIs don't expose a scriptable statusline yet) — your memory still works everywhere.
+
+<div align="center">
+
+<img src="screenshots/statusline.png" alt="Settings → Customizations — Claude Code statusline picker with a live preview" width="820" />
+
+<sub>Settings → Customizations: pick your statusline mode with a live preview before applying.</sub>
+
+</div>
+
 ---
 
 ## Git sync
@@ -460,6 +508,45 @@ auto_push: false
 commit_message_prefix: "auxly:"
 branch: main
 ```
+
+---
+
+## Connect any MCP-capable agent (manual setup)
+
+Auxly is a standard **stdio MCP server**, so *any* MCP-capable tool can share the same memory — even ones Auxly doesn't auto-detect, or whose config lives somewhere `auxly setup` can't write (Android Studio's Gemini settings sync to your Google account, for example). It's the same three pieces everywhere.
+
+**1. Add the server entry** wherever your agent keeps MCP servers — its config file, or an "Add MCP server" dialog:
+
+```json
+{
+  "mcpServers": {
+    "auxly-memory": {
+      "command": "/absolute/path/to/auxly",
+      "args": ["--path", "/Users/you/.auxly/memory", "mcp-server"],
+      "env": {
+        "AUXLY_MEMORY_PATH": "/Users/you/.auxly/memory",
+        "AUXLY_PROVIDER": "your-agent-id"
+      }
+    }
+  }
+}
+```
+
+**2. Fill in the three values:**
+
+| Field | What to put | How to find it |
+|-------|-------------|----------------|
+| `command` | Absolute path to the `auxly` binary | `which auxly` → e.g. `/usr/local/bin/auxly` |
+| `--path` / `AUXLY_MEMORY_PATH` | Your vault folder | Default `~/.auxly/memory` (use the full absolute path) |
+| `AUXLY_PROVIDER` | A short, unique id for *this* agent | e.g. `perplexity`, `android-studio` — this is how the audit trail and dashboard label its writes, so **never reuse another agent's id** or its writes get mislabeled |
+
+**3. Reload the agent.** Some clients pick the server up instantly; others need a restart or a one-time "approve this server" before the tools go live.
+
+**4. Verify.** From the agent's chat run `/auxly-status` (if it has skills), or just open `auxly` — the moment the agent connects and writes, it appears on the dashboard grid, is labeled by its `AUXLY_PROVIDER` id in the **Audit Trail**, and can be hidden or re-shown under **Settings → Agents**.
+
+> **Schema variations:** most clients use the `{ "mcpServers": { … } }` wrapper above (Claude Desktop, Warp, Void, Cursor, JetBrains AI Assistant, …). A few accept only the inner `{ "auxly-memory": { … } }` object — if the wrapped form is rejected, paste just the inner block. On Windows, use a full path with escaped backslashes (`"C:\\Users\\you\\auxly.exe"`) or a forward-slash path.
+>
+> **App-specific entry points:** Android Studio → the Gemini **"Configure MCP servers"** dialog, or **JetBrains AI Assistant → Settings → MCP** (which can also *Import from Claude* once you've run `auxly setup`). Perplexity and most desktop clients → their **Settings → Connectors / MCP** panel.
 
 ---
 
@@ -486,11 +573,24 @@ branch: main
 
 ## Configuration
 
+Auxly is config-light: it works with zero setup, and everything it *does* persist lives under `~/.auxly/` as plain text you can read, edit, and version.
+
+### Config files
+
+All optional — Auxly creates and manages these for you; edit them by hand any time.
+
+| File | What it controls |
+|------|------------------|
+| `~/.auxly/memory/trust.yaml` | Per-provider trust levels (`auto` / `require_approval` / `read_only`) — or use `auxly trust set …` |
+| `~/.auxly/memory/git.yaml` | Git sync remote and behavior (see [Git sync](#git-sync)) |
+| `~/.auxly/settings.json` | Dashboard preferences: `liveUsage` opt-in (off by default) and `hiddenAgents` — toggled in **Settings** |
+| `~/.claude/settings.json` | Claude Code statusline wiring — managed by `auxly statusline install/uninstall` |
+
 ### Environment variables
 
 | Variable | Purpose |
 |----------|---------|
-| `AUXLY_MEMORY_PATH` | Override the memory folder location |
+| `AUXLY_MEMORY_PATH` | Override the memory folder location (default `~/.auxly/memory`) |
 | `AUXLY_INSTALL_BASE` | Override the download/update base (default `https://auxly.io`) |
 | `AUXLY_PROVIDER` | Override the provider id for a write |
 | `AUXLY_LLM_BASE` | Override the LLM endpoint used by smart sync |
