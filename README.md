@@ -41,6 +41,7 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 - [Live Usage](#live-usage)
 - [Claude Code statusline](#claude-code-statusline)
 - [Git sync](#git-sync)
+- [Connect any MCP agent](#connect-any-mcp-capable-agent-manual-setup)
 - [Command reference](#command-reference)
 - [Configuration](#configuration)
 - [Security & privacy](#security--privacy)
@@ -290,44 +291,22 @@ This detects every supported agent on your machine, writes each one's MCP config
 
 …or just open the dashboard (`auxly`): every connected agent appears on the grid, and its reads/writes show live in the **Activity** tab.
 
-### Claude Desktop skills
+### Claude Desktop skills (one manual step)
 
-Claude Desktop doesn't load skills from disk automatically — only the MCP connection is wired for you. `auxly setup` exports the slash commands to `~/Downloads/auxly-skills-v<version>/` as ready-to-import `.zip` files; add each one in Claude Desktop once (**Settings → Skills**). The export folder carries the version number, so when a release updates the skills you'll know to re-import. (Every other agent picks up skills automatically — this step is Claude-Desktop-only.)
+Claude Desktop is the **only** agent that needs a manual touch. `auxly setup` wires its **MCP connection** automatically, but Claude Desktop doesn't load skills from disk — so the `/auxly-*` slash commands have to be **imported once**:
 
-### Connect any MCP-capable agent (manual setup)
+1. **Run `auxly setup`.** It exports the skills to `~/Downloads/auxly-skills-v<version>/` as ready-to-import `.zip` files — one per skill.
+2. Open **Claude Desktop → Settings → Capabilities → Skills** (older builds: **Settings → Skills**).
+3. **Add each `.zip`** from that folder (use *Upload skill* / drag-and-drop). You only do this once.
+4. **Restart Claude Desktop** if the new skills don't show up right away.
 
-Auxly auto-wires the agents listed above, but **any** tool that speaks MCP can share the same memory — Android Studio, Perplexity, a homegrown client, anything. Some agents simply store their MCP config somewhere Auxly can't write to (Android Studio's Gemini settings sync to your Google account, for instance), or aren't auto-detected yet. Connecting one by hand is the same three pieces everywhere, because Auxly is a standard **stdio** MCP server.
+The export folder is version-stamped (`…-v<version>/`), so when a release updates the skills you'll know to re-import the new set. *(Every other agent — Claude Code, Codex, Gemini, Cursor, … — picks up skills automatically; this import step is Claude-Desktop-only.)*
 
-**1. Add the server entry** wherever your agent keeps MCP servers — a config file, or its "Add MCP server" dialog:
+### Connect any other MCP agent
 
-```json
-{
-  "mcpServers": {
-    "auxly-memory": {
-      "command": "/absolute/path/to/auxly",
-      "args": ["--path", "/Users/you/.auxly/memory", "mcp-server"],
-      "env": {
-        "AUXLY_MEMORY_PATH": "/Users/you/.auxly/memory",
-        "AUXLY_PROVIDER": "perplexity"
-      }
-    }
-  }
-}
-```
+`auxly setup` covers the agents listed above. **Any** other tool that speaks MCP — Android Studio, Perplexity, a homegrown client — can share the exact same memory with a one-time copy-paste config. The full walkthrough with the ready-to-paste JSON is at the end of this README:
 
-**2. Fill in the three values:**
-
-- **`command`** — your binary path, from `which auxly` (e.g. `/usr/local/bin/auxly`).
-- **`--path` / `AUXLY_MEMORY_PATH`** — your vault folder; default `~/.auxly/memory`.
-- **`AUXLY_PROVIDER`** — a short id naming *this* agent (`perplexity`, `android-studio`, …). This is what the audit trail and dashboard attribute its writes by, so give every tool its own id — never reuse another agent's, or its writes get mislabeled.
-
-**3. Reload the agent.** Some clients pick the server up instantly; others need a restart or a one-time "approve" before the tools go live.
-
-That's it — the moment the agent connects and writes, it appears on the dashboard grid, is labeled correctly in the **Audit Trail**, and can be hidden or re-shown under **Settings → Agents**.
-
-> **Schema note:** most clients use the `{ "mcpServers": { … } }` wrapper above (Claude Desktop, Warp, Void, Cursor, JetBrains AI Assistant, …). A few accept only the inner `{ "auxly-memory": { … } }` object — if the wrapped form is rejected, paste just the inner block.
->
-> **App-specific entry points:** Android Studio → the Gemini **"Configure MCP servers"** dialog, or **JetBrains AI Assistant → Settings → MCP** (which can also *Import from Claude* once you've run `auxly setup`). Perplexity and most desktop clients → their **Settings → Connectors / MCP** panel.
+➜ **[Connect any MCP-capable agent (manual setup)](#connect-any-mcp-capable-agent-manual-setup)**
 
 ---
 
@@ -513,6 +492,45 @@ auto_push: false
 commit_message_prefix: "auxly:"
 branch: main
 ```
+
+---
+
+## Connect any MCP-capable agent (manual setup)
+
+Auxly is a standard **stdio MCP server**, so *any* MCP-capable tool can share the same memory — even ones Auxly doesn't auto-detect, or whose config lives somewhere `auxly setup` can't write (Android Studio's Gemini settings sync to your Google account, for example). It's the same three pieces everywhere.
+
+**1. Add the server entry** wherever your agent keeps MCP servers — its config file, or an "Add MCP server" dialog:
+
+```json
+{
+  "mcpServers": {
+    "auxly-memory": {
+      "command": "/absolute/path/to/auxly",
+      "args": ["--path", "/Users/you/.auxly/memory", "mcp-server"],
+      "env": {
+        "AUXLY_MEMORY_PATH": "/Users/you/.auxly/memory",
+        "AUXLY_PROVIDER": "your-agent-id"
+      }
+    }
+  }
+}
+```
+
+**2. Fill in the three values:**
+
+| Field | What to put | How to find it |
+|-------|-------------|----------------|
+| `command` | Absolute path to the `auxly` binary | `which auxly` → e.g. `/usr/local/bin/auxly` |
+| `--path` / `AUXLY_MEMORY_PATH` | Your vault folder | Default `~/.auxly/memory` (use the full absolute path) |
+| `AUXLY_PROVIDER` | A short, unique id for *this* agent | e.g. `perplexity`, `android-studio` — this is how the audit trail and dashboard label its writes, so **never reuse another agent's id** or its writes get mislabeled |
+
+**3. Reload the agent.** Some clients pick the server up instantly; others need a restart or a one-time "approve this server" before the tools go live.
+
+**4. Verify.** From the agent's chat run `/auxly-status` (if it has skills), or just open `auxly` — the moment the agent connects and writes, it appears on the dashboard grid, is labeled by its `AUXLY_PROVIDER` id in the **Audit Trail**, and can be hidden or re-shown under **Settings → Agents**.
+
+> **Schema variations:** most clients use the `{ "mcpServers": { … } }` wrapper above (Claude Desktop, Warp, Void, Cursor, JetBrains AI Assistant, …). A few accept only the inner `{ "auxly-memory": { … } }` object — if the wrapped form is rejected, paste just the inner block. On Windows, use a full path with escaped backslashes (`"C:\\Users\\you\\auxly.exe"`) or a forward-slash path.
+>
+> **App-specific entry points:** Android Studio → the Gemini **"Configure MCP servers"** dialog, or **JetBrains AI Assistant → Settings → MCP** (which can also *Import from Claude* once you've run `auxly setup`). Perplexity and most desktop clients → their **Settings → Connectors / MCP** panel.
 
 ---
 
