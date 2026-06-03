@@ -1,0 +1,117 @@
+version: 2
+
+project_name: auxly-cli
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  # Single CGO-free build for every target. Auxly uses pure-Go SQLite
+  # (modernc.org/sqlite), so CGO_ENABLED=0 cross-compiles to all OS/arch from a
+  # plain runner — no C toolchain, no llvm-mingw.
+  - id: auxly
+    main: .
+    binary: auxly
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update.Current={{ .Version }}
+      # Gemini/Antigravity Live Usage OAuth clients — injected from CI secrets so
+      # the public source carries none. Empty (envOrDefault) on local/source builds.
+      - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage.geminiClientID={{ envOrDefault "GEMINI_CLIENT_ID" "" }}
+      - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage.geminiClientSecret={{ envOrDefault "GEMINI_CLIENT_SECRET" "" }}
+      - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage.antigravityClientID={{ envOrDefault "ANTIGRAVITY_CLIENT_ID" "" }}
+      - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage.antigravityClientSecret={{ envOrDefault "ANTIGRAVITY_CLIENT_SECRET" "" }}
+
+archives:
+  # 1) tar.gz / zip archives — consumed by Homebrew, the deb/rpm packages, and
+  #    humans downloading from the Releases page.
+  - id: archive
+    ids:
+      - auxly
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - wrappers/*
+
+  # 2) raw per-target binaries — exactly what scripts/install.sh, install.ps1,
+  #    and `auxly update` (self-update) fetch from /dl/auxly-<os>-<arch>[.exe].
+  #    goreleaser appends .exe automatically on Windows.
+  - id: rawbin
+    ids:
+      - auxly
+    formats: [binary]
+    name_template: "auxly-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+# Homebrew cask — auto-pushed to the tap repo on every release. Users then run
+# `brew install Tzamun-Arabia-IT-Co/homebrew-tap/auxly`. (GoReleaser v2 deprecated
+# `brews` formulae in favor of casks for pre-built binaries.)
+homebrew_casks:
+  # Cask name "auxly" so the command is
+  # `brew install Tzamun-Arabia-IT-Co/homebrew-tap/auxly`.
+  - name: auxly
+    repository:
+      owner: Tzamun-Arabia-IT-Co
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    ids:
+      - archive
+    homepage: "https://auxly.io"
+    description: "Local-first unified memory system for AI agents"
+    commit_author:
+      name: auxly-release-bot
+      email: hi@auxly.io
+    # Strip the Gatekeeper quarantine flag on install so an unsigned binary runs
+    # without a "developer cannot be verified" prompt on macOS.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr",
+              args: ["-dr", "com.apple.quarantine", "#{staged_path}/auxly"]
+          end
+
+# Linux packages attached to each GitHub Release.
+nfpms:
+  - package_name: auxly-cli
+    ids:
+      - auxly
+    homepage: "https://auxly.io"
+    description: "Local-first unified memory system for AI agents"
+    maintainer: "Tzamun Arabia IT Co. <hi@auxly.io>"
+    license: MIT
+    formats:
+      - deb
+      - rpm
+
+# Let goreleaser create the Release in whatever repo it runs in (the public
+# auxly-cli repo), so nothing is hardcoded.
+release:
+  draft: false
+  prerelease: auto
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"

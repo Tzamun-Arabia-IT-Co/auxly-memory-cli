@@ -1,0 +1,83 @@
+name: metrics
+
+# Snapshots release downloads + repo traffic (clones/views) once a day and stores
+# the running history as CSVs on a dedicated `metrics` branch. The `metrics` branch
+# keeps `main` clean and sidesteps the branch-protection ruleset (no bot pushes to
+# main). GitHub's traffic API only keeps 14 days, so a daily run builds real history.
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily at 06:17 UTC
+  workflow_dispatch: {} # also runnable on demand from the Actions tab
+
+# `contents: write` both lets the job push the CSVs and satisfies the traffic
+# API's "push access" requirement for the default GITHUB_TOKEN.
+permissions:
+  contents: write
+
+concurrency:
+  group: metrics
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    env:
+      # Traffic endpoints (clones/views) are NOT accessible to the default
+      # GITHUB_TOKEN ("Resource not accessible by integration"). Add a PAT with
+      # repo/admin-read as secret METRICS_PAT to capture them; without it the run
+      # still records downloads + stars and simply skips traffic.
+      GH_TOKEN: ${{ secrets.METRICS_PAT || secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout main (the merge script lives here)
+        uses: actions/checkout@v4
+
+      - name: Fetch raw metrics from the GitHub API
+        run: |
+          set -euo pipefail
+          mkdir -p .metrics-raw
+          # Always-available with any token:
+          gh api "repos/$REPO/releases" > .metrics-raw/releases.json
+          gh api "repos/$REPO"          > .metrics-raw/repo.json
+          # Traffic needs a PAT (METRICS_PAT). Degrade gracefully to empty data
+          # so the run still succeeds and records downloads/stars without it.
+          if gh api "repos/$REPO/traffic/clones" > .metrics-raw/clones.json 2>/dev/null; then
+            echo "traffic: clones captured"
+          else
+            echo '{"clones":[]}' > .metrics-raw/clones.json
+            echo "::notice::traffic clones skipped — set a METRICS_PAT secret (repo/admin-read) to capture clones/views"
+          fi
+          if gh api "repos/$REPO/traffic/views" > .metrics-raw/views.json 2>/dev/null; then
+            echo "traffic: views captured"
+          else
+            echo '{"views":[]}' > .metrics-raw/views.json
+          fi
+
+      - name: Merge into CSV history on the metrics branch
+        run: |
+          set -euo pipefail
+          url="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          tmp="$(mktemp -d)"
+
+          if git ls-remote --exit-code --heads origin metrics >/dev/null 2>&1; then
+            git clone --depth 1 --branch metrics --single-branch "$url" "$tmp"
+          else
+            # First run: start the branch fresh with no history from main.
+            git clone --depth 1 "$url" "$tmp"
+            git -C "$tmp" checkout --orphan metrics
+            git -C "$tmp" rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          RAW_DIR="$PWD/.metrics-raw" METRICS_DIR="$tmp/metrics" \
+            python3 .github/scripts/merge_metrics.py
+
+          git -C "$tmp" config user.name  "auxly-metrics-bot"
+          git -C "$tmp" config user.email "metrics@auxly.io"
+          git -C "$tmp" add metrics
+          if git -C "$tmp" diff --cached --quiet; then
+            echo "No metric changes today."
+            exit 0
+          fi
+          git -C "$tmp" commit -m "chore(metrics): snapshot $(date -u +%F)"
+          git -C "$tmp" push origin metrics
