@@ -1444,7 +1444,7 @@ func (m sshModel) View() string {
 				}
 			}
 			// Live SSH-remote sessions whose self-reported hostname doesn't match a
-			// configured box name (e.g. box "OC" connecting as "open.claw").
+			// configured box name (e.g. box "BOX1" connecting as "node-a").
 			for _, lr := range lives {
 				if boxKeys[strings.ToLower(lr.host)] {
 					continue

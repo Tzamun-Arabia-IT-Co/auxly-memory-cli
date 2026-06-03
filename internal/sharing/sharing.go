@@ -110,8 +110,8 @@ type clientEntry struct {
 	Name   string `yaml:"name"`
 	Target string `yaml:"target"`
 	// Hostname is the box's self-reported hostname, captured at provision time. A
-	// box keyed by IP in Target (e.g. root@192.168.1.24) reports a DIFFERENT string
-	// as its session RemoteHost (e.g. "auxly.tzamun.dev"), because the SSH launcher
+	// box keyed by IP in Target (e.g. root@10.0.0.5) reports a DIFFERENT string
+	// as its session RemoteHost (e.g. "memory.example.dev"), because the SSH launcher
 	// passes `--remote-host localHostname()`. Matching must consider this field, not
 	// just Target — otherwise the ACL never loads and write grants are dropped.
 	Hostname    string   `yaml:"hostname,omitempty"`

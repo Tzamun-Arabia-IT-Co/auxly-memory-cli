@@ -107,9 +107,9 @@ func TestLoadForRemoteHost_MatchesByHostnameNotJustTargetIP(t *testing.T) {
 	dir := t.TempDir()
 	clientsYAML := `clients:
     - name: auxly-server
-      target: root@192.168.1.24
+      target: root@10.0.0.24
       method: relay
-      hostname: auxly.tzamun.dev
+      hostname: memory.example.dev
       shared_files:
         - identity.md
         - infra.md
@@ -124,7 +124,7 @@ func TestLoadForRemoteHost_MatchesByHostnameNotJustTargetIP(t *testing.T) {
 	memoryPath := filepath.Join(dir, "memory") // clients.yaml sits in its parent dir
 
 	// The box connects reporting its hostname (NOT the target IP) as RemoteHost.
-	share := LoadForRemoteHost(memoryPath, "auxly.tzamun.dev")
+	share := LoadForRemoteHost(memoryPath, "memory.example.dev")
 	if share == nil {
 		t.Fatal("ACL must load when the box reports its hostname (clients.yaml `hostname`) — got nil → read-only")
 	}
@@ -133,7 +133,7 @@ func TestLoadForRemoteHost_MatchesByHostnameNotJustTargetIP(t *testing.T) {
 	}
 
 	// Back-compat: matching by the target IP must still work.
-	if LoadForRemoteHost(memoryPath, "192.168.1.24") == nil {
+	if LoadForRemoteHost(memoryPath, "10.0.0.24") == nil {
 		t.Error("ACL must also load when RemoteHost is the target IP (back-compat)")
 	}
 	// And by the friendly name (clientIsLive matches it too).
@@ -141,7 +141,7 @@ func TestLoadForRemoteHost_MatchesByHostnameNotJustTargetIP(t *testing.T) {
 		t.Error("ACL should load when RemoteHost matches the client name")
 	}
 	// Case-insensitive: os.Hostname() casing varies across boxes.
-	if LoadForRemoteHost(memoryPath, "Auxly.Tzamun.Dev") == nil {
+	if LoadForRemoteHost(memoryPath, "Memory.Example.Dev") == nil {
 		t.Error("hostname match must be case-insensitive")
 	}
 }
@@ -151,12 +151,12 @@ func TestHostMatches(t *testing.T) {
 		target, remote string
 		want           bool
 	}{
-		{"root@192.168.1.5:22", "192.168.1.5", true},
-		{"root@192.168.1.5", "192.168.1.5", true},
-		{"192.168.1.5:2222", "192.168.1.5", true},
+		{"root@10.0.0.5:22", "10.0.0.5", true},
+		{"root@10.0.0.5", "10.0.0.5", true},
+		{"10.0.0.5:2222", "10.0.0.5", true},
 		{"user@boxA", "boxA", true},
-		{"root@192.168.1.5:22", "192.168.1.9", false},
-		{"", "192.168.1.5", false},
+		{"root@10.0.0.5:22", "10.0.0.9", false},
+		{"", "10.0.0.5", false},
 	}
 	for _, c := range cases {
 		if got := hostMatches(c.target, c.remote); got != c.want {

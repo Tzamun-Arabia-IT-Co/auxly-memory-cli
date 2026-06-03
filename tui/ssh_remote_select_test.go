@@ -20,11 +20,11 @@ func dualRoleModel() sshModel {
 	return sshModel{
 		hostOK: true,
 		clients: []clientRow{
-			{Name: "AiOPSSRV", Target: "root@192.168.1.39", Method: "relay"},
-			{Name: "OC147", Target: "root@192.168.1.147", Method: "relay", Hostname: "open.claw"},
+			{Name: "SRV-A", Target: "root@10.0.0.39", Method: "relay"},
+			{Name: "BOX1", Target: "root@10.0.0.147", Method: "relay", Hostname: "node-a"},
 		},
 		remotes: []remoteEntry{
-			{Name: "192.168.1.147", Method: "lan", User: "root", Host: "192.168.1.147"},
+			{Name: "10.0.0.147", Method: "lan", User: "root", Host: "10.0.0.147"},
 		},
 		width: 100,
 	}
@@ -45,9 +45,9 @@ func TestCursorTargetMapping(t *testing.T) {
 		wantClient string // "" if the cursor should be on a remote
 		wantRemote string // "" if the cursor should be on a client
 	}{
-		{0, "AiOPSSRV", ""},
-		{1, "OC147", ""},
-		{2, "", "192.168.1.147"},
+		{0, "SRV-A", ""},
+		{1, "BOX1", ""},
+		{2, "", "10.0.0.147"},
 	}
 	for _, tc := range cases {
 		m.cursor = tc.cursor
@@ -91,7 +91,7 @@ func TestKeyboardReachesStrandedRemote(t *testing.T) {
 		t.Fatalf("after two ↓ the cursor = %d, want 2 (on the remote)", m.cursor)
 	}
 	r, ok := m.cursorOnRemote()
-	if !ok || r.Name != "192.168.1.147" {
+	if !ok || r.Name != "10.0.0.147" {
 		t.Fatalf("cursor not on the consumer remote after navigation: (%q,%v)", r.Name, ok)
 	}
 
@@ -116,8 +116,8 @@ func TestRemoveTargetsRemoteNotBox(t *testing.T) {
 		t.Fatal("confirm target wrongly resolved to a connected box")
 	}
 	r, ok := m.cursorOnRemote()
-	if !ok || r.Name != "192.168.1.147" {
-		t.Fatalf("confirm target = (%q,%v), want the remote 192.168.1.147", r.Name, ok)
+	if !ok || r.Name != "10.0.0.147" {
+		t.Fatalf("confirm target = (%q,%v), want the remote 10.0.0.147", r.Name, ok)
 	}
 }
 
@@ -132,8 +132,8 @@ func TestRemoveTargetsBoxWhenOnBox(t *testing.T) {
 		t.Fatalf("[x] on a box should open the confirm prompt, mode = %q", m.mode)
 	}
 	c, ok := m.cursorOnClient()
-	if !ok || c.Name != "AiOPSSRV" {
-		t.Fatalf("confirm target = (%q,%v), want the box AiOPSSRV", c.Name, ok)
+	if !ok || c.Name != "SRV-A" {
+		t.Fatalf("confirm target = (%q,%v), want the box SRV-A", c.Name, ok)
 	}
 	if _, ok := m.cursorOnRemote(); ok {
 		t.Fatal("confirm target wrongly resolved to a remote")
@@ -189,7 +189,7 @@ func TestHostWithZeroBoxes(t *testing.T) {
 	m := sshModel{
 		hostOK:  true,
 		clients: nil,
-		remotes: []remoteEntry{{Name: "192.168.1.147", Method: "lan", Host: "192.168.1.147"}},
+		remotes: []remoteEntry{{Name: "10.0.0.147", Method: "lan", Host: "10.0.0.147"}},
 		width:   100,
 	}
 	if got := m.listLen(); got != 1 {
@@ -199,7 +199,7 @@ func TestHostWithZeroBoxes(t *testing.T) {
 		t.Fatalf("clientCount() = %d, want 0 (no boxes)", got)
 	}
 	m.cursor = 0
-	if r, ok := m.cursorOnRemote(); !ok || r.Name != "192.168.1.147" {
+	if r, ok := m.cursorOnRemote(); !ok || r.Name != "10.0.0.147" {
 		t.Fatalf("cursorOnRemote at 0 = (%q,%v), want the remote", r.Name, ok)
 	}
 

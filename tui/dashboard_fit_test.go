@@ -23,9 +23,9 @@ func populatedDashboard(t *testing.T) model {
 	}
 	m.dashboard.stats = &audit.Stats{WritesToday: 2, TotalEntries: 143}
 	m.dashboard.sessions = []agentSession{
-		{Provider: "claude-code", Remote: true, Host: "open.claw", IP: "192.168.1.147", OS: "linux"},
-		{Provider: "claude-code", Remote: true, Host: "tzamun.ai", IP: "192.168.1.141", OS: "linux"},
-		{Provider: "claude-code", Remote: true, Host: "erp.tzamun.ai", IP: "192.168.1.168", OS: "linux"},
+		{Provider: "claude-code", Remote: true, Host: "node-a", IP: "10.0.0.147", OS: "linux"},
+		{Provider: "claude-code", Remote: true, Host: "host.example.net", IP: "10.0.0.141", OS: "linux"},
+		{Provider: "claude-code", Remote: true, Host: "erp.host.example.net", IP: "10.0.0.8", OS: "linux"},
 		{Provider: "claude", Remote: false, PID: 1},
 		{Provider: "warp", Remote: false, PID: 2},
 	}
@@ -244,17 +244,17 @@ func TestAgentCardNeverWrapsToThreeLines(t *testing.T) {
 func TestConnectionsSummaryDedupsSameServer(t *testing.T) {
 	m := *NewApp(t.TempDir())
 	m.dashboard.sessions = []agentSession{
-		{Provider: "claude-code", Remote: true, Host: "testhost.local", IP: "192.168.1.166", OS: "linux", PID: 1},
-		{Provider: "claude-code", Remote: true, Host: "testhost.local", IP: "192.168.1.166", OS: "linux", PID: 2},
-		{Provider: "claude-code", Remote: true, Host: "testhost.local", IP: "192.168.1.166", OS: "linux", PID: 3},
-		{Provider: "claude-code", Remote: true, Host: "erp.tzamun.ai", IP: "192.168.1.168", OS: "linux", PID: 4},
+		{Provider: "claude-code", Remote: true, Host: "testhost.local", IP: "10.0.0.6", OS: "linux", PID: 1},
+		{Provider: "claude-code", Remote: true, Host: "testhost.local", IP: "10.0.0.6", OS: "linux", PID: 2},
+		{Provider: "claude-code", Remote: true, Host: "testhost.local", IP: "10.0.0.6", OS: "linux", PID: 3},
+		{Provider: "claude-code", Remote: true, Host: "erp.host.example.net", IP: "10.0.0.8", OS: "linux", PID: 4},
 	}
 	out := stripANSI(m.dashboard.renderConnectionsSummary(false))
 	if c := strings.Count(out, "testhost.local"); c != 1 {
 		t.Errorf("testhost.local should appear once (deduped), got %d:\n%s", c, out)
 	}
-	if c := strings.Count(out, "erp.tzamun.ai"); c != 1 {
-		t.Errorf("erp.tzamun.ai should appear once, got %d:\n%s", c, out)
+	if c := strings.Count(out, "erp.host.example.net"); c != 1 {
+		t.Errorf("erp.host.example.net should appear once, got %d:\n%s", c, out)
 	}
 	if !strings.Contains(out, "×3") {
 		t.Errorf("the tripled host must show a ×3 count:\n%s", out)

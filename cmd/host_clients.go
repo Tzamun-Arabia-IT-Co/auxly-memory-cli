@@ -21,8 +21,8 @@ type clientEntry struct {
 	Target string `yaml:"target"`           // [user@]host[:port] of the box
 	Method string `yaml:"method,omitempty"` // relay
 	// Hostname is the box's own self-reported hostname, captured at provision
-	// time. A box wired by IP/target (e.g. "OC147" → root@192.168.1.147) reports
-	// a different string as its session RemoteHost (e.g. "open.claw"); storing it
+	// time. A box wired by IP/target (e.g. "BOX1" → root@10.0.0.7) reports
+	// a different string as its session RemoteHost (e.g. "node-a"); storing it
 	// here lets the live-status match the box to its session instead of surfacing
 	// a phantom duplicate row.
 	Hostname string `yaml:"hostname,omitempty"`

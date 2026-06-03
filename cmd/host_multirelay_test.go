@@ -25,10 +25,10 @@ func relay(rendezvous string) hostConfig {
 func TestUpsertAppendsNotOverwrites(t *testing.T) {
 	isolateHome(t)
 
-	if err := upsertHostConfig(relay("root@192.168.1.168")); err != nil {
+	if err := upsertHostConfig(relay("root@10.0.0.168")); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
-	if err := upsertHostConfig(relay("root@192.168.1.141")); err != nil {
+	if err := upsertHostConfig(relay("root@10.0.0.141")); err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
 
@@ -43,16 +43,16 @@ func TestUpsertAppendsNotOverwrites(t *testing.T) {
 	for _, r := range relays {
 		got[r.Rendezvous] = true
 	}
-	if !got["root@192.168.1.168"] || !got["root@192.168.1.141"] {
+	if !got["root@10.0.0.168"] || !got["root@10.0.0.141"] {
 		t.Errorf("both relays should survive, got %v", got)
 	}
 }
 
 func TestUpsertReplacesSameRendezvous(t *testing.T) {
 	isolateHome(t)
-	_ = upsertHostConfig(relay("root@192.168.1.168"))
+	_ = upsertHostConfig(relay("root@10.0.0.168"))
 
-	dup := relay("root@192.168.1.168")
+	dup := relay("root@10.0.0.168")
 	dup.HostUser = "changed"
 	if err := upsertHostConfig(dup); err != nil {
 		t.Fatalf("upsert dup: %v", err)
@@ -69,10 +69,10 @@ func TestUpsertReplacesSameRendezvous(t *testing.T) {
 
 func TestRemoveHostConfig(t *testing.T) {
 	isolateHome(t)
-	_ = upsertHostConfig(relay("root@192.168.1.168"))
-	_ = upsertHostConfig(relay("root@192.168.1.141"))
+	_ = upsertHostConfig(relay("root@10.0.0.168"))
+	_ = upsertHostConfig(relay("root@10.0.0.141"))
 
-	remaining, err := removeHostConfig("root@192.168.1.168")
+	remaining, err := removeHostConfig("root@10.0.0.168")
 	if err != nil {
 		t.Fatalf("removeHostConfig: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestRemoveHostConfig(t *testing.T) {
 		t.Fatalf("remaining = %d, want 1", remaining)
 	}
 	relays, _, _ := loadHostConfigs()
-	if len(relays) != 1 || relays[0].Rendezvous != "root@192.168.1.141" {
+	if len(relays) != 1 || relays[0].Rendezvous != "root@10.0.0.141" {
 		t.Errorf("after remove, relays = %+v, want just .141", relays)
 	}
 }
@@ -93,7 +93,7 @@ func TestLegacySingleRelayMigrates(t *testing.T) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	legacy := "rendezvous: root@192.168.1.168\nreverse_port: 2222\nlocal_ssh_port: 22\nhost_user: lab\n"
+	legacy := "rendezvous: root@10.0.0.168\nreverse_port: 2222\nlocal_ssh_port: 22\nhost_user: lab\n"
 	if err := os.WriteFile(filepath.Join(dir, "host.yaml"), []byte(legacy), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -102,12 +102,12 @@ func TestLegacySingleRelayMigrates(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("loadHostConfigs on legacy: ok=%v err=%v", ok, err)
 	}
-	if len(relays) != 1 || relays[0].Rendezvous != "root@192.168.1.168" {
+	if len(relays) != 1 || relays[0].Rendezvous != "root@10.0.0.168" {
 		t.Fatalf("legacy parse = %+v, want one relay .168", relays)
 	}
 
 	// Adding a second box migrates the file to the list form.
-	if err := upsertHostConfig(relay("root@192.168.1.141")); err != nil {
+	if err := upsertHostConfig(relay("root@10.0.0.141")); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(filepath.Join(dir, "host.yaml"))
@@ -122,15 +122,15 @@ func TestLegacySingleRelayMigrates(t *testing.T) {
 
 func TestLoadHostConfigReturnsFirst(t *testing.T) {
 	isolateHome(t)
-	_ = upsertHostConfig(relay("root@192.168.1.168"))
-	_ = upsertHostConfig(relay("root@192.168.1.141"))
+	_ = upsertHostConfig(relay("root@10.0.0.168"))
+	_ = upsertHostConfig(relay("root@10.0.0.141"))
 
 	hc, ok, err := loadHostConfig()
 	if err != nil || !ok {
 		t.Fatalf("loadHostConfig: ok=%v err=%v", ok, err)
 	}
-	if hc.Rendezvous != "root@192.168.1.168" {
-		t.Errorf("first relay = %q, want root@192.168.1.168", hc.Rendezvous)
+	if hc.Rendezvous != "root@10.0.0.168" {
+		t.Errorf("first relay = %q, want root@10.0.0.168", hc.Rendezvous)
 	}
 }
 
@@ -144,7 +144,7 @@ func TestNoConfigIsNotServing(t *testing.T) {
 // TestTunnelArgsPerRelay verifies each relay builds its own independent reverse
 // forward — distinct target hosts, same loopback reverse port.
 func TestTunnelArgsPerRelay(t *testing.T) {
-	for _, host := range []string{"root@192.168.1.39", "root@192.168.1.141"} {
+	for _, host := range []string{"root@10.0.0.39", "root@10.0.0.141"} {
 		args := tunnelArgs(relay(host))
 		joined := strings.Join(args, " ")
 		if !strings.Contains(joined, "-R 2222:localhost:22") {

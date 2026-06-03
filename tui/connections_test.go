@@ -11,11 +11,11 @@ func TestSessionFromRecordRemote(t *testing.T) {
 		PID:        46288,
 		Provider:   "claude-code",
 		Source:     "ssh-remote",
-		RemoteHost: "AiOPSSRV",
+		RemoteHost: "SRV-A",
 		RemoteOS:   "linux",
 		RemoteIP:   "::1",
 	}
-	clients := []clientRow{{Name: "AiOPSSRV", Target: "root@192.168.1.39", Method: "relay"}}
+	clients := []clientRow{{Name: "SRV-A", Target: "root@10.0.0.39", Method: "relay"}}
 
 	s := sessionFromRecord(r, clients)
 
@@ -25,15 +25,15 @@ func TestSessionFromRecordRemote(t *testing.T) {
 	if s.Provider != "claude-code" {
 		t.Errorf("provider = %q, want claude-code", s.Provider)
 	}
-	if s.Host != "AiOPSSRV" {
-		t.Errorf("host = %q, want AiOPSSRV", s.Host)
+	if s.Host != "SRV-A" {
+		t.Errorf("host = %q, want SRV-A", s.Host)
 	}
 	if s.OS != "linux" {
 		t.Errorf("os = %q, want linux", s.OS)
 	}
 	// clients.yaml lookup must win over the useless tunnel IP (::1).
-	if s.IP != "192.168.1.39" {
-		t.Errorf("ip = %q, want 192.168.1.39 (resolved from clients.yaml)", s.IP)
+	if s.IP != "10.0.0.39" {
+		t.Errorf("ip = %q, want 10.0.0.39 (resolved from clients.yaml)", s.IP)
 	}
 }
 

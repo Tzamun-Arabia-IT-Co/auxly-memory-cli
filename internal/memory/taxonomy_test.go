@@ -13,7 +13,7 @@ func TestRouteCategory(t *testing.T) {
 	}{
 		{"family routes to personal", "my wife is pregnant", "personal"},
 		{"son routes to personal", "my son started school", "personal"},
-		{"server routes to infra", "the server at 192.168.1.1 runs docker", "infra"},
+		{"server routes to infra", "the server at 10.0.0.1 runs docker", "infra"},
 		{"repo routes to projects", "pushed to the git repo", "projects"},
 		{"founder routes to identity", "The user is the founder and CEO", "identity"},
 		{"product routes to products", "the new platform shipped", "products"},
