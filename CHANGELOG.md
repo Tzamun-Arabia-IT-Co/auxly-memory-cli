@@ -5,6 +5,35 @@ All notable changes to Auxly Memory CLI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] - 2026-06-04
+
+### Changed — Statusline plan-usage is now live, not a frozen snapshot
+
+- The Claude Code statusline's plan-usage line (`🔋 Claude · …`) now stays
+  **live during a normal coding session**, instead of showing `⧗ as of HH:MM`
+  whenever the dashboard wasn't open to feed the cache. Previously nothing
+  refreshed `~/.auxly/usage-cache.json` outside the TUI, so the line was a
+  frozen snapshot.
+- The render path **still never makes a network call** (unchanged hard rule).
+  Instead, after printing the cached snapshot, the statusline **triggers a
+  detached, out-of-band refresh** (`statusline --refresh-usage`, hidden) that
+  updates the cache for the next render — the Stream-Deck pattern: show
+  last-good instantly, refresh behind the scenes.
+- The trigger is **gated on the Live Usage opt-in**, only fires when the
+  snapshot is going stale (≥ the usage TTL), and is **debounced by a short
+  lockfile** so rapid prompts never fork a pile of refreshers. The usage
+  Manager's existing TTL + post-429 cooldown remain the network rate limiters,
+  so this adds no provider hammering.
+
+### Documentation
+
+- Reworked the README: a real dashboard hero plus dashboard / audit-trail /
+  live-usage / statusline screenshots, the two flow diagrams redrawn as
+  brand-colored Mermaid, an explicit "interactive TUI (mouse + keyboard) with
+  full CLI parity" message, a step-by-step Claude Desktop skills import, a
+  dedicated "Connect any MCP-capable agent" section with copy-paste JSON, and a
+  config-files reference.
+
 ## [1.0.7]
 
 ### Added — Memory Organization tab
@@ -117,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - TUI: repaint the content viewport in sub-mode key handlers.
 
+[1.0.8]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.8
 [1.0.7]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.7
 [1.0.5]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.5
 [1.0.4]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.4
