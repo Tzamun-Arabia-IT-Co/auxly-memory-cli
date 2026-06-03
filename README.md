@@ -15,6 +15,12 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8.svg)](go.mod)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
+<br />
+
+<img src="screenshots/audit-trail.png" alt="Auxly dashboard — full, queryable audit trail of every agent's memory access" width="820" />
+
+<sub>Every agent's reads and writes — local and SSH-remote — in one queryable audit trail.</sub>
+
 </div>
 
 ---
@@ -33,6 +39,7 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 - [The dashboard](#the-dashboard)
 - [Remote memory over SSH](#remote-memory-over-ssh)
 - [Live Usage](#live-usage)
+- [Claude Code statusline](#claude-code-statusline)
 - [Git sync](#git-sync)
 - [Command reference](#command-reference)
 - [Configuration](#configuration)
@@ -442,6 +449,40 @@ This is the **only** feature that makes outbound network calls, it is **off by d
 auxly usage show              # print quota for every agent
 auxly usage auth antigravity  # one-time browser consent for Antigravity
 ```
+
+<div align="center">
+
+<img src="screenshots/agent-usage.png" alt="Live Usage — session and weekly quota for Claude, Codex, Gemini, Antigravity, and Cursor side by side" width="820" />
+
+<sub>Session and weekly quota for every connected agent, reusing each one's own login — no API key.</sub>
+
+</div>
+
+---
+
+## Claude Code statusline
+
+Auxly ships a productized statusline for **Claude Code** — a rich, multi-line status bar that surfaces your working context, your memory link, and your live plan usage without leaving the editor. Wire it in (additive and fully reversible — your existing statusline is backed up and restored on uninstall):
+
+```bash
+auxly statusline install          # replace your statusline with Auxly's full 4-line view
+auxly statusline install --wrap   # keep your own statusline and append the Auxly segment
+auxly statusline uninstall        # restore your backed-up original
+```
+
+It renders four lines: **where** (folder · branch · model · version), **session** (thinking · effort · tokens · context bar), **Auxly memory** (link · role · last op · pending), and **live Claude plan usage** (5h + weekly bars with reset countdowns).
+
+The render path **never makes a network call** — it reads only the last-good usage snapshot on disk, so it's safe to run on every prompt. When Live Usage is enabled, the usage line stays **live** during an active session: after printing instantly it triggers a guarded, detached background refresh that updates the snapshot for the next render (debounced, and rate-limited by the same circuit breaker as the dashboard). You can also manage it in the dashboard under **Settings → Customizations**, with a live preview before you apply.
+
+> Statusline support is Claude Code–specific (other CLIs don't expose a scriptable statusline yet) — your memory still works everywhere.
+
+<div align="center">
+
+<img src="screenshots/statusline.png" alt="Settings → Customizations — Claude Code statusline picker with a live preview" width="820" />
+
+<sub>Settings → Customizations: pick your statusline mode with a live preview before applying.</sub>
+
+</div>
 
 ---
 
