@@ -334,15 +334,27 @@ That's it — the moment the agent connects and writes, it appears on the dashbo
 | 2 | **Activity** | Live audit feed, color-coded by provider, local vs. SSH-remote |
 | 3 | **Files** | Browse, view, edit, and download your memory files |
 | 4 | **Approvals** | Review pending diffs — approve or reject |
-| 5 | **Analytics** | Writes per agent + (opt-in) live usage meters |
-| 6 | **Settings** | Trust levels, on-demand memory organization, and Live Usage — plus an **Agents** sub-tab to show/hide which agents appear on the dashboard |
-| 7 | **Remote** | Manage memory hosts and connected boxes over SSH |
-| 8 | **Skills** | The installed slash commands at a glance |
-| 9 | **Audit Trail** | Full, queryable history |
+| 5 | **Memory Org** | On-demand memory organization with a preview-and-confirm review (see below) |
+| 6 | **Analytics** | Writes per agent + (opt-in) live usage meters |
+| 7 | **Settings** | Trust levels and Live Usage — plus an **Agents** sub-tab to show/hide which agents appear on the dashboard |
+| 8 | **Remote** | Manage memory hosts and connected boxes over SSH |
+| 9 | **Skills** | The installed slash commands at a glance |
+| 0 | **Audit Trail** | Full, queryable history with a **Type** column and `f` to filter (Memory Org / Writes / Sessions / Approvals) |
 
 The agent grid is **dynamic** — it shows only the agents detected or active on this machine, so it stays readable whether you run two agents or twenty. Any agent that connects and writes appears automatically (even one wired by hand); hide the ones you don't want to see under **Settings → Agents**.
 
-Keyboard-driven throughout: `1–9` jump tabs, `↑/↓` or `j/k` navigate, `Tab`/`[`/`]` cycle, `q` quits. Press `[u]` anywhere for the live usage popup.
+Keyboard-driven throughout: `1–9`/`0` jump tabs, `↑/↓` or `j/k` navigate, `Tab`/`[`/`]` cycle, `q` quits. Press `[u]` anywhere for the live usage popup.
+
+### Memory Organization
+
+The **Memory Org** tab (`5`) runs an AI pass that consolidates and re-files your memory vault — deduplicating facts, moving misplaced lines to the right category, and tidying each file — **without writing anything until you approve it**.
+
+1. **Pick a provider + model.** Any installed CLI agent (Claude, Codex, Gemini, Cursor, Antigravity) runs headless on your existing subscription — no API key. Or choose a local/API endpoint (Ollama, OpenAI, Gemini, or any OpenAI-compatible Custom URL, with models auto-fetched). The idle screen shows roughly how many tokens and files will be sent before you launch.
+2. **Run.** The model reorganizes a copy of your vault in an isolated, read-only sandbox. Press `esc` any time to cancel the run.
+3. **Review every change.** A two-pane before/after diff per file, color-coded by added/removed lines. Approve (`a`), reject (`r`), or edit (`e`) each file; `A` approves all. Approving auto-advances to the next file.
+4. **Submit.** Only the files you approved are written. A confirmation screen lists exactly what changed, and every write is recorded in the **Audit Trail** (tagged **Memory Org**) so you have durable history.
+
+**Scope & safety:** organize only ever touches your *user-memory* files. Agent setup/instruction files (`agents.md`, `CLAUDE.md`, `AGENTS.md`, `providers.md`, …) are never read or rewritten. Nothing is saved until you approve, and the agent runs with no tools, an empty working directory, and a scrubbed environment so it can never reach your real vault on its own.
 
 ---
 

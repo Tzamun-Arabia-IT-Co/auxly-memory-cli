@@ -260,6 +260,9 @@ func (m activityModel) renderDetailPopup(e audit.Entry) string {
 		lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Source:"), dim.Render("Local")))
 	}
 
+	typeLabel, typeColor := activityType(e)
+	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Type:"), lipgloss.NewStyle().Bold(true).Foreground(typeColor).Render(typeLabel)))
+
 	cleanReasonLines := wrapText(e.Reason, 50)
 	for i, rl := range cleanReasonLines {
 		label := ""
@@ -316,14 +319,83 @@ func (m activityModel) renderDetailPopup(e audit.Entry) string {
 // 2. Audit Trail Model (Renamed old Activity)
 // ==========================================
 
+type auditFilter int
+
+const (
+	filterAll auditFilter = iota
+	filterMemoryOrg
+	filterWrites
+	filterSessions
+	filterApprovals
+	auditFilterCount // sentinel: number of filters, keeps the cycle modulus correct
+)
+
+func (f auditFilter) label() string {
+	switch f {
+	case filterMemoryOrg:
+		return "Memory Org"
+	case filterWrites:
+		return "Writes"
+	case filterSessions:
+		return "Sessions"
+	case filterApprovals:
+		return "Approvals"
+	default:
+		return "All"
+	}
+}
+
+// matches reports whether an entry passes the filter, keyed off the same Type
+// classification shown in the table's Type column.
+func (f auditFilter) matches(e audit.Entry) bool {
+	if f == filterAll {
+		return true
+	}
+	label, _ := activityType(e)
+	switch f {
+	case filterMemoryOrg:
+		return label == "Memory Org"
+	case filterWrites:
+		return label == "Write"
+	case filterSessions:
+		return label == "Session"
+	case filterApprovals:
+		return label == "Approval"
+	}
+	return true
+}
+
 type auditTrailModel struct {
 	logger        *audit.Logger
-	entries       []audit.Entry
+	allEntries    []audit.Entry // full tail from the log
+	entries       []audit.Entry // filtered view everything below indexes into
+	filter        auditFilter
 	cursor        int
 	viewingDetail bool
 	detailScrollY int
 	width         int
 	height        int
+}
+
+// applyFilter recomputes the visible entries from allEntries and clamps the cursor.
+func (m *auditTrailModel) applyFilter() {
+	if m.filter == filterAll {
+		m.entries = m.allEntries
+	} else {
+		filtered := make([]audit.Entry, 0, len(m.allEntries))
+		for _, e := range m.allEntries {
+			if m.filter.matches(e) {
+				filtered = append(filtered, e)
+			}
+		}
+		m.entries = filtered
+	}
+	if m.cursor >= len(m.entries) {
+		m.cursor = len(m.entries) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
 }
 
 type auditTrailRefreshMsg struct {
@@ -359,7 +431,8 @@ func (m auditTrailModel) Update(msg tea.Msg) (auditTrailModel, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 	case auditTrailRefreshMsg:
-		m.entries = msg.entries
+		m.allEntries = msg.entries
+		m.applyFilter()
 		return m, auditTrailTickCmd()
 	case auditTrailTickMsg:
 		return m, m.Refresh()
@@ -468,6 +541,11 @@ func (m auditTrailModel) Update(msg tea.Msg) (auditTrailModel, tea.Cmd) {
 			if m.cursor > 0 {
 				m.cursor--
 			}
+		case "f":
+			// Cycle the Type filter: All → Memory Org → Writes → Sessions → Approvals.
+			m.filter = (m.filter + 1) % auditFilterCount
+			m.cursor = 0
+			m.applyFilter()
 		case "enter":
 			if len(m.entries) > 0 && m.cursor < len(m.entries) {
 				m.viewingDetail = true
@@ -480,10 +558,19 @@ func (m auditTrailModel) Update(msg tea.Msg) (auditTrailModel, tea.Cmd) {
 
 func (m auditTrailModel) View() string {
 	title := StyleTitle.Render("📋 System Audit Trail & Logs")
+	filterTag := ""
+	if m.filter != filterAll {
+		filterTag = "   " + lipgloss.NewStyle().Foreground(ColorSecondary).Render("▼ "+m.filter.label())
+	}
+	title += filterTag
 
 	var listContent string
 	if len(m.entries) == 0 {
-		listContent = "\n\nNo logs recorded yet."
+		if m.filter != filterAll {
+			listContent = "\n\nNo " + m.filter.label() + " entries.  " + StyleFooter.Render("press f to change filter")
+		} else {
+			listContent = "\n\nNo logs recorded yet."
+		}
 	} else {
 		visibleCount := 10
 		start := m.cursor - visibleCount/2
@@ -508,7 +595,8 @@ func (m auditTrailModel) View() string {
 		listContent = renderTable(m.entries, m.cursor, start, end, w)
 	}
 
-	fullView := title + "\n\n" + listContent
+	help := StyleFooter.Render(fmt.Sprintf("↑↓ move · enter details · f filter (%s) · 1-9/0 tabs", m.filter.label()))
+	fullView := title + "\n\n" + listContent + "\n\n" + help
 
 	// Centered Overlay Popup for Details!
 	if m.viewingDetail && m.cursor < len(m.entries) {
@@ -547,6 +635,9 @@ func (m auditTrailModel) renderDetailPopup(e audit.Entry) string {
 	} else {
 		lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Source:"), dim.Render("Local")))
 	}
+
+	typeLabel, typeColor := activityType(e)
+	lines = append(lines, fmt.Sprintf("  %-12s %s", dim.Render("Type:"), lipgloss.NewStyle().Bold(true).Foreground(typeColor).Render(typeLabel)))
 
 	cleanReasonLines := wrapText(e.Reason, 50)
 	for i, rl := range cleanReasonLines {
@@ -675,6 +766,29 @@ func repeatChar(char string, count int) string {
 	return strings.Repeat(char, count)
 }
 
+// activityType classifies an audit entry into a short, human-facing operation type
+// and a color, so the Audit Trail can show at a glance whether a row is an on-demand
+// Memory Org pass, a normal agent write, an approval decision, or a session event.
+// Memory Org writes are tagged by their AgentID marker ("auxly-organize").
+func activityType(e audit.Entry) (string, lipgloss.TerminalColor) {
+	switch {
+	case e.AgentID == "auxly-organize":
+		return "Memory Org", ColorSecondary
+	case e.Action == "write":
+		return "Write", ColorSuccess
+	case e.Action == "approve", e.Action == "reject":
+		return "Approval", ColorWarning
+	case e.Action == "connect", e.Action == "disconnect", e.Action == "initialize":
+		return "Session", ColorDim
+	default:
+		a := e.Action
+		if a == "" {
+			return "Event", ColorDim
+		}
+		return strings.ToUpper(a[:1]) + a[1:], ColorPrimary
+	}
+}
+
 func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) string {
 	border := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	bold := lipgloss.NewStyle().Bold(true)
@@ -687,10 +801,11 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 
 	colTimeW := 21
 	colAgentW := 16
+	colTypeW := 12
 	colSourceW := 13
 	colActivityW := 30
 
-	totalFixed := colTimeW + colAgentW + colSourceW + 5 // 55
+	totalFixed := colTimeW + colAgentW + colTypeW + colSourceW + 6 // 4 cols + the 6 vertical bars
 	if mWidth > totalFixed {
 		colActivityW = mWidth - totalFixed
 		if colActivityW < 20 {
@@ -703,7 +818,7 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 
 	var sb strings.Builder
 
-	sb.WriteString(border.Render("┌"+repeatChar("─", colTimeW)+"┬"+repeatChar("─", colAgentW)+"┬"+repeatChar("─", colActivityW)+"┬"+repeatChar("─", colSourceW)+"┐") + "\n")
+	sb.WriteString(border.Render("┌"+repeatChar("─", colTimeW)+"┬"+repeatChar("─", colAgentW)+"┬"+repeatChar("─", colTypeW)+"┬"+repeatChar("─", colActivityW)+"┬"+repeatChar("─", colSourceW)+"┐") + "\n")
 
 	// Pad header strings manually to ensure mathematically perfect widths that connect seamlessly with the borders
 	timeH := fmt.Sprintf(" %-*s", colTimeW-1, "Timestamp")
@@ -715,6 +830,8 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 		agentH = fmt.Sprintf(" %-*s", colAgentW-1, "Agent")
 	}
 
+	typeH := fmt.Sprintf(" %-*s", colTypeW-1, "Type")
+
 	var actH string
 	if colActivityW >= 18 {
 		actH = fmt.Sprintf(" %-*s", colActivityW-1, "Activity Details")
@@ -724,9 +841,9 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 
 	srcH := fmt.Sprintf(" %-*s", colSourceW-1, "Source")
 
-	sb.WriteString(border.Render("│") + bold.Render(timeH) + border.Render("│") + bold.Render(agentH) + border.Render("│") + bold.Render(actH) + border.Render("│") + bold.Render(srcH) + border.Render("│") + "\n")
+	sb.WriteString(border.Render("│") + bold.Render(timeH) + border.Render("│") + bold.Render(agentH) + border.Render("│") + bold.Render(typeH) + border.Render("│") + bold.Render(actH) + border.Render("│") + bold.Render(srcH) + border.Render("│") + "\n")
 
-	sb.WriteString(border.Render("├"+repeatChar("─", colTimeW)+"┼"+repeatChar("─", colAgentW)+"┼"+repeatChar("─", colActivityW)+"┼"+repeatChar("─", colSourceW)+"┤") + "\n")
+	sb.WriteString(border.Render("├"+repeatChar("─", colTimeW)+"┼"+repeatChar("─", colAgentW)+"┼"+repeatChar("─", colTypeW)+"┼"+repeatChar("─", colActivityW)+"┼"+repeatChar("─", colSourceW)+"┤") + "\n")
 
 	for i := start; i < end; i++ {
 		e := entries[i]
@@ -792,6 +909,12 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 			actCleanWidth = visibleWidth(stripANSI(summary))
 		}
 
+		// Operation type tag (Memory Org / Write / Approval / Session / …) so each row
+		// is identifiable at a glance without opening the detail popup.
+		typeLabel, typeColor := activityType(e)
+		typeLabel = safeTruncate(stripEmojis(typeLabel), colTypeW-2)
+		typeStr := lipgloss.NewStyle().Foreground(typeColor).Render(typeLabel)
+
 		// Compact column (13 wide): "Local" or "Remote". The detail popup shows the
 		// full remote attribution (friendly name · host · IP · OS).
 		sourceVal := "Local"
@@ -802,8 +925,10 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 		var rowLine string
 		if i == cursor {
 			cleanAgent := stripANSI(agentStr)
+			cleanType := stripANSI(typeStr)
 			tCell := " " + timeStr + " "
 			agCell := " " + cleanAgent + padSpace(colAgentW-2-visibleWidth(stripANSI(cleanAgent))) + " "
+			tyCell := " " + cleanType + padSpace(colTypeW-2-visibleWidth(cleanType)) + " "
 			aCell := " " + summary + padSpace(colActivityW-2-visibleWidth(stripANSI(summary))) + " "
 			sCell := fmt.Sprintf(" %-*s ", colSourceW-2, sourceVal)
 
@@ -812,19 +937,20 @@ func renderTable(entries []audit.Entry, cursor int, start, end int, mWidth int) 
 				Foreground(lipgloss.Color("250"))
 			innerSep := styleSelectedSep.Render("│")
 
-			rowLine = border.Render("│") + StyleSelectedRow.Render(tCell) + innerSep + StyleSelectedRow.Render(agCell) + innerSep + StyleSelectedRow.Render(aCell) + innerSep + StyleSelectedRow.Render(sCell) + border.Render("│")
+			rowLine = border.Render("│") + StyleSelectedRow.Render(tCell) + innerSep + StyleSelectedRow.Render(agCell) + innerSep + StyleSelectedRow.Render(tyCell) + innerSep + StyleSelectedRow.Render(aCell) + innerSep + StyleSelectedRow.Render(sCell) + border.Render("│")
 		} else {
 			tCell := " " + timeStr + " "
 			agCell := " " + agentStr + padSpace(colAgentW-2-visibleWidth(stripANSI(agentStr))) + " "
+			tyCell := " " + typeStr + padSpace(colTypeW-2-visibleWidth(stripANSI(typeStr))) + " "
 			aCell := " " + summary + padSpace(colActivityW-2-visibleWidth(stripANSI(summary))) + " "
 			sCell := fmt.Sprintf(" %-*s ", colSourceW-2, sourceVal)
 
-			rowLine = border.Render("│") + tCell + border.Render("│") + agCell + border.Render("│") + aCell + border.Render("│") + sCell + border.Render("│")
+			rowLine = border.Render("│") + tCell + border.Render("│") + agCell + border.Render("│") + tyCell + border.Render("│") + aCell + border.Render("│") + sCell + border.Render("│")
 		}
 		sb.WriteString(rowLine + "\n")
 	}
 
-	sb.WriteString(border.Render("└"+repeatChar("─", colTimeW)+"┴"+repeatChar("─", colAgentW)+"┴"+repeatChar("─", colActivityW)+"┴"+repeatChar("─", colSourceW)+"┘") + "\n")
+	sb.WriteString(border.Render("└"+repeatChar("─", colTimeW)+"┴"+repeatChar("─", colAgentW)+"┴"+repeatChar("─", colTypeW)+"┴"+repeatChar("─", colActivityW)+"┴"+repeatChar("─", colSourceW)+"┘") + "\n")
 
 	return sb.String()
 }

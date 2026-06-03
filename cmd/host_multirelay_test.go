@@ -93,7 +93,7 @@ func TestLegacySingleRelayMigrates(t *testing.T) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	legacy := "rendezvous: root@10.0.0.168\nreverse_port: 2222\nlocal_ssh_port: 22\nhost_user: lab\n"
+	legacy := "rendezvous: root@10.0.0.168\nreverse_port: 2222\nlocal_ssh_port: 22\nhost_user: admin\n"
 	if err := os.WriteFile(filepath.Join(dir, "host.yaml"), []byte(legacy), 0644); err != nil {
 		t.Fatal(err)
 	}

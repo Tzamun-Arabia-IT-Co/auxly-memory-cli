@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -103,7 +105,7 @@ func TestContentPagesScrollWhenTall(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
 	m = updated.(model)
 	// Switch to Settings (a tall form) via the real key path so the viewport syncs.
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'6'}})
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'7'}})
 	m = updated.(model)
 	if !m.usesViewport() || !m.vpReady {
 		t.Fatal("Settings must render through the content viewport")
@@ -162,7 +164,7 @@ func TestSettingsFitsWithoutScroll(t *testing.T) {
 		m.settings.agents = roster
 		updated, _ := m.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
 		m = updated.(model)
-		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'6'}})
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'7'}})
 		m = updated.(model)
 		m.settings.agents = roster
 		m.syncViewport()
@@ -273,7 +275,7 @@ func TestSSHWizardRepaintsInViewport(t *testing.T) {
 	m := *NewApp(t.TempDir())
 	u, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = u.(model)
-	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'7'}}) // Remote tab
+	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'8'}}) // Remote tab
 	m = u.(model)
 	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}}) // connect wizard
 	m = u.(model)
@@ -289,5 +291,154 @@ func TestSSHWizardRepaintsInViewport(t *testing.T) {
 	after := stripANSI(m.contentVP.View())
 	if after == before {
 		t.Error("viewport did NOT repaint after a wizard keypress — stale frame (the reported bug)")
+	}
+}
+
+// TestDashboardRichSectionsFullMode verifies the new informative sections (memory
+// composition, recent-changes feed, last-write freshness) render on a tall terminal
+// and that the whole thing still fits.
+func TestDashboardRichSectionsFullMode(t *testing.T) {
+	m := populatedDashboard(t)
+	m.dashboard.stats.LastWriteTime = time.Now().Add(-4 * time.Minute).UTC().Format(time.RFC3339)
+	m.dashboard.composition = []categoryStat{
+		{label: "identity", items: 3, size: 200},
+		{label: "infra", items: 12, size: 900},
+		{label: "projects", items: 8, size: 600},
+	}
+	m.dashboard.recentWrites = []audit.Entry{
+		{Timestamp: m.dashboard.stats.LastWriteTime, Provider: "codex", AgentID: "auxly-organize", Action: "write", File: "business.md", Diff: "+ a\n+ b\n- c\n"},
+		{Timestamp: m.dashboard.stats.LastWriteTime, Provider: "claude", Action: "write", File: "infra.md", Diff: "+ x\n"},
+	}
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 170, Height: 60})
+	m = updated.(model)
+	m.screen = screenDashboard
+	out := m.View()
+
+	for _, w := range []string{"Memory by category", "infra", "Recent Memory Changes", "business.md", "Last write:"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("full-mode dashboard missing %q", w)
+		}
+	}
+	if h := lipgloss.Height(out); h > 60 {
+		t.Errorf("rich dashboard height %d exceeds terminal 60", h)
+	}
+}
+
+// TestDashboardRichSectionsSuppressedWhenCompact locks the responsive contract: on a
+// short terminal the rich sections are dropped so the dashboard still fits.
+func TestDashboardRichSectionsSuppressedWhenCompact(t *testing.T) {
+	m := populatedDashboard(t)
+	m.dashboard.stats.LastWriteTime = time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	m.dashboard.composition = []categoryStat{{label: "infra", items: 12, size: 900}}
+	m.dashboard.recentWrites = []audit.Entry{
+		{Timestamp: m.dashboard.stats.LastWriteTime, Provider: "claude", Action: "write", File: "infra.md", Diff: "+ x\n"},
+	}
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 30})
+	m = updated.(model)
+	m.screen = screenDashboard
+	out := m.View()
+
+	if lipgloss.Height(out) > 30 {
+		t.Errorf("compact dashboard height %d exceeds terminal 30", lipgloss.Height(out))
+	}
+	if strings.Contains(out, "Recent Memory Changes") || strings.Contains(out, "Memory by category") {
+		t.Error("rich sections must be suppressed in compact mode to preserve the fit")
+	}
+}
+
+// TestDashboardPendingInline verifies queued approvals surface on the dashboard in
+// full mode and are suppressed (with the rest) on a short terminal.
+func TestDashboardPendingInline(t *testing.T) {
+	m := populatedDashboard(t)
+	m.dashboard.pendingFiles = []pending.PendingFile{
+		{Name: "identity-20260603.md", ModTime: time.Now().Add(-3 * time.Minute)},
+		{Name: "infra-20260603.md", ModTime: time.Now().Add(-9 * time.Minute)},
+	}
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 170, Height: 60})
+	m = updated.(model)
+	m.screen = screenDashboard
+	out := m.View()
+	for _, w := range []string{"Pending Approval", "identity-20260603", "review in Approvals"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("full-mode dashboard missing pending item %q", w)
+		}
+	}
+
+	short, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 30})
+	m = short.(model)
+	if strings.Contains(m.View(), "Pending Approval") {
+		t.Error("pending block must be suppressed in compact mode")
+	}
+}
+
+// TestDashboardFeedShowsWhoAndComposition checks the recent feed shows the writing
+// agent and that a personal-tier category is flagged private.
+func TestDashboardFeedShowsWhoAndComposition(t *testing.T) {
+	m := populatedDashboard(t)
+	m.dashboard.stats.LastWriteTime = time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339)
+	m.dashboard.composition = []categoryStat{
+		{label: "infra", items: 9, size: 700},
+		{label: "personal", items: 4, size: 300, private: true},
+	}
+	m.dashboard.recentWrites = []audit.Entry{
+		{Timestamp: m.dashboard.stats.LastWriteTime, Provider: "codex", Action: "write", File: "infra.md", Diff: "+ a\n"},
+	}
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 170, Height: 60})
+	m = updated.(model)
+	m.screen = screenDashboard
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "codex") {
+		t.Error("recent feed should show the writing agent (who)")
+	}
+	if !strings.Contains(out, "🔒") {
+		t.Error("personal category should be flagged private with a lock")
+	}
+}
+
+// TestRemoteScopeShownInConnections verifies the access scope renders next to a
+// connected remote box in the connections summary.
+func TestRemoteScopeShownInConnections(t *testing.T) {
+	m := populatedDashboard(t)
+	m.dashboard.remoteScope = map[string]string{"node-a": "read · 6 file(s)"}
+	out := stripANSI(m.dashboard.renderConnectionsSummary(false))
+	if !strings.Contains(out, "read · 6 file(s)") {
+		t.Errorf("remote scope not shown in connections:\n%s", out)
+	}
+}
+
+// TestDashboardRichFitsTallWideTerminal reproduces the user's 198×53 terminal: with
+// the full set of enrichments the dashboard must stay in FULL mode (rich sections
+// visible), not fall back to compact. Guards against the enrichments inflating the
+// body past common terminal heights.
+func TestDashboardRichFitsTallWideTerminal(t *testing.T) {
+	m := populatedDashboard(t)
+	m.dashboard.stats.LastWriteTime = time.Now().Format(time.RFC3339)
+	m.dashboard.composition = []categoryStat{
+		{label: "projects", items: 60}, {label: "infra", items: 38}, {label: "daily", items: 33},
+		{label: "agents", items: 29}, {label: "preferences", items: 25}, {label: "personal", items: 17, private: true},
+		{label: "products", items: 9}, {label: "business", items: 9}, {label: "identity", items: 7},
+	}
+	m.dashboard.recentWrites = make([]audit.Entry, 8)
+	for i := range m.dashboard.recentWrites {
+		m.dashboard.recentWrites[i] = audit.Entry{Timestamp: m.dashboard.stats.LastWriteTime, Provider: "claude-code", Action: "write", File: "projects.md", Diff: "+a\n"}
+	}
+	m.dashboard.remoteScope = map[string]string{
+		"node-a": "read/write · 8 file(s)", "host.example.net": "read/write · 8 file(s)", "erp.host.example.net": "read/write · 8 file(s)",
+	}
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 198, Height: 53})
+	m = updated.(model)
+	m.screen = screenDashboard
+	if m.dashboard.bodyCompact() {
+		t.Fatalf("198x53 must render the FULL rich dashboard, not compact (full body height=%d)",
+			lipgloss.Height(m.dashboard.renderBody(false)))
+	}
+	out := m.View()
+	for _, w := range []string{"Memory by category", "Recent Memory Changes", "🔑"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("198x53 rich dashboard missing %q", w)
+		}
+	}
+	if h := lipgloss.Height(out); h > 53 {
+		t.Errorf("rich dashboard height %d exceeds terminal 53", h)
 	}
 }

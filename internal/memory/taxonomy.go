@@ -197,6 +197,35 @@ func IsEditableFile(file string) bool {
 	return ok
 }
 
+// IsOrganizableFile reports whether the on-demand organize/re-file pass may read
+// and rewrite a file. Only USER-MEMORY taxonomy files qualify. Excluded:
+//   - non-taxonomy setup/instruction files (CLAUDE.md, CODEX.md, GEMINI.md,
+//     AGENTS.md, providers.md) and the generated aggregate (unified_memory.md) —
+//     these are agent configuration/protocol, not the user's memory;
+//   - the `agents` category (agents.md) — agent activity/onboarding bookkeeping
+//     and provider setup, not user facts. Organize must never reshuffle it.
+//
+// This is the single gate used to filter BOTH the vault payload sent to the model
+// and the proposed changes applied back, so a setup file can never be rewritten.
+func IsOrganizableFile(file string) bool {
+	c, ok := CategoryForFile(file)
+	if !ok {
+		return false
+	}
+	return c.Slug != "agents"
+}
+
+// OrganizableFiles returns the taxonomy files the organize pass may touch.
+func OrganizableFiles() []string {
+	var out []string
+	for _, c := range Taxonomy {
+		if c.Slug != "agents" {
+			out = append(out, c.File)
+		}
+	}
+	return out
+}
+
 // RenderForPrompt produces the canonical taxonomy block injected into skill
 // prompts, the organize re-classification prompt, and the shared skill footer, so
 // every agent files facts in the right place the first time.

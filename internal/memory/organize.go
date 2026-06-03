@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,18 +15,6 @@ import (
 	"strings"
 	"time"
 )
-
-// safeOrganizeProviders is the allowlist of agent CLIs PROVEN (via the temp-vault
-// E2E: zero-loss + zero-contamination) to run the consolidation in a fully isolated,
-// tool-less mode. It is EMPTY: agentic CLIs default-wander — even with tools off,
-// MCP off, a scrubbed env, an empty cwd, AND settings/hooks disabled, the temp-vault
-// E2E still caught real-vault content leaking into a foreign vault and facts being
-// dropped. Reliable isolation needs more than flags (OS sandbox / a non-agentic API
-// call) and is tracked as a follow-up. Until a provider's E2E passes, Organize routes
-// only through the tool-less Direct LLM / Custom endpoints. The per-agent isolation
-// scaffolding below (providerKey, buildAgentArgs, scrubbedOrganizeEnv) and the E2E
-// gate are kept as the qualification harness for that work.
-var safeOrganizeProviders = map[string]bool{}
 
 // providerKey canonicalizes a display agent name ("Claude Code / CLI", "Codex IDE
 // Desktop", "Antigravity CLI", …) to a stable provider key used for both the safety
@@ -45,12 +34,6 @@ func providerKey(agentName string) string {
 	default:
 		return ""
 	}
-}
-
-// organizeAgentSafe reports whether the agentic-CLI consolidation path is permitted
-// for this agent (i.e. its isolation has been E2E-verified).
-func organizeAgentSafe(agentName string) bool {
-	return safeOrganizeProviders[providerKey(agentName)]
 }
 
 // scrubbedOrganizeEnv returns the process env with every AUXLY_* var removed (so a
@@ -100,9 +83,12 @@ func organizeTimeout() time.Duration {
 // into Auxly's own MCP server — the multi-minute startup that blew the old 300s cap)
 // and pinned to a fast model. Note: Claude's --mcp-config is variadic, so --model
 // must follow it to terminate the list before the positional prompt.
-func buildAgentArgs(agentName, prompt string) []string {
+func buildAgentArgs(agentName, model, prompt string) []string {
 	switch p := strings.ToLower(agentName); {
 	case strings.Contains(p, "claude"):
+		if model == "" {
+			model = "haiku"
+		}
 		// Full isolation so the child only sees THIS prompt (verified clean E2E):
 		//   --tools ""           → disable ALL built-in tools (no Read/Bash/etc.)
 		//   --strict-mcp-config  → load zero MCP servers (no recursion into Auxly's)
@@ -116,21 +102,36 @@ func buildAgentArgs(agentName, prompt string) []string {
 			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
 			"--tools", "",
 			"--setting-sources", "",
-			"--model", "haiku",
+			"--model", model,
 			prompt,
 		}
 	case strings.Contains(p, "codex"):
 		// Codex automation mode is the `exec` subcommand; read-only sandbox blocks
 		// any model-generated shell command from writing or escaping.
-		return []string{"exec", "--sandbox", "read-only", prompt}
+		// --skip-git-repo-check: the organize run executes in an isolated, non-git
+		// working dir, and Codex otherwise aborts with "Not inside a trusted
+		// directory and --skip-git-repo-check was not specified" (exit 1).
+		args := []string{"exec", "--sandbox", "read-only", "--skip-git-repo-check"}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		return append(args, prompt)
 	case strings.Contains(p, "antigravity") || strings.Contains(p, "agy"):
 		// `agy --print` runs a single prompt non-interactively (verified it exits on
 		// EOF stdin); a bare prompt opens interactive mode and hangs.
 		return []string{"--print", prompt}
 	case strings.Contains(p, "gemini"):
-		return []string{"-p", prompt}
+		args := []string{"-p"}
+		if model != "" {
+			args = append(args, "-m", model)
+		}
+		return append(args, prompt)
 	case strings.Contains(p, "cursor"):
-		return []string{"-p", "--output-format", "text", prompt}
+		args := []string{"-p", "--output-format", "text"}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		return append(args, prompt)
 	default:
 		// Safe fallback: most agent CLIs treat `-p`/`--print` as headless mode; a
 		// bare prompt opens interactive mode and hangs, so prefer `-p`.
@@ -181,12 +182,26 @@ func (s *Store) buildProposalFromJSON(jsonContent, modelUsed string, tokensUsed 
 	}
 	var parsed responseObj
 	if err := json.Unmarshal([]byte(jsonContent), &parsed); err != nil {
-		return OrganizeProposal{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to parse JSON vault payload: %v\nOutput content was: %s", err, jsonContent)}
+		// Weaker agent models often emit unescaped quotes/newlines inside content
+		// strings. Try a lenient repair before giving up; the user still reviews
+		// every change, so a salvaged-but-imperfect parse can't corrupt the vault.
+		repaired := repairAgentJSON(jsonContent)
+		if err2 := json.Unmarshal([]byte(repaired), &parsed); err2 != nil || len(parsed.Files) == 0 {
+			// Surface the original error rather than silently reporting "nothing to
+			// organize" — a zero-file salvage from a failed strict parse means the
+			// output was malformed or truncated, not that the vault was already tidy.
+			return OrganizeProposal{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to parse JSON vault payload: %v\nOutput content was: %s", err, jsonContent)}
+		}
 	}
 	prop := OrganizeProposal{ModelUsed: modelUsed, TokensUsed: tokensUsed}
 	for _, rf := range parsed.Files {
 		cleanedName := filepath.Clean(rf.Name)
 		if strings.HasPrefix(cleanedName, "..") || filepath.IsAbs(cleanedName) {
+			continue
+		}
+		// Defense in depth: never accept a write to a setup/instruction file or
+		// agents.md even if the model returns one — organize only touches user memory.
+		if !IsOrganizableFile(cleanedName) {
 			continue
 		}
 		scope := "global"
@@ -281,7 +296,13 @@ Other principles (all subordinate to RULE 0):
      personal.md ALWAYS wins.
 6. JSON OUTPUT FORMAT: Output ONLY a single valid JSON object matching the schema
    below — no prose, no markdown fences outside the JSON. Include EVERY file you
-   were given (plus personal.md if you moved personal facts into it):
+   were given (plus personal.md if you moved personal facts into it).
+   STRICT JSON ESCAPING (a single unescaped character breaks the whole result):
+   - Escape every double quote inside content as \" (e.g. He said \"hi\").
+   - Escape every newline inside content as \n and every tab as \t.
+   - Escape every backslash as \\.
+   - Do NOT use smart/curly quotes as JSON string delimiters; only straight ".
+   - Emit the object as compact JSON; never wrap it in markdown fences.
 {
   "files": [
     {
@@ -289,7 +310,7 @@ Other principles (all subordinate to RULE 0):
       "content": "Full clean, consolidated, readable content — with every input fact preserved"
     }
   ]
-}`, strings.TrimRight(RenderForPrompt(), "\n"))
+}`, strings.TrimRight(RenderForPromptScoped(IsOrganizableFile, nil), "\n"))
 }
 
 // GetEstimatedTokens estimates token count based on vault file sizes.
@@ -300,7 +321,7 @@ func (s *Store) GetEstimatedTokens() int {
 	}
 	var totalChars int64
 	for _, f := range files {
-		if f.Name == "unified_memory.md" || f.Name == ".audit.log" {
+		if !IsOrganizableFile(f.Name) {
 			continue
 		}
 		totalChars += f.Size
@@ -314,17 +335,33 @@ func (s *Store) OrganizeVault() OrganizeResult {
 	return s.OrganizeVaultWithAgent("Direct LLM", "")
 }
 
-// OrganizeVaultWithAgent runs consolidation using either a local/remote LLM API or an installed CLI agent command.
-func (s *Store) OrganizeVaultWithAgent(agentName string, agentPath string) OrganizeResult {
+// organizeRun is the raw model output of one consolidation run, before it is
+// parsed into a proposal. It carries no side effects.
+type organizeRun struct {
+	jsonContent string
+	modelUsed   string
+	tokensUsed  int
+}
+
+// runOrganizeModel gathers the vault, builds the prompt, and runs the chosen
+// model (CLI agent when agentPath != "", else a direct LLM API). It performs NO
+// disk writes. The returned bool `proceed` reports whether a model output is
+// ready to be parsed into a proposal: it is false both on error (res.Success
+// false) and on the benign empty-vault case (res.Success true with a message),
+// so callers can short-circuit on either without parsing.
+func (s *Store) runOrganizeModel(ctx context.Context, agentName string, agentPath string, model string) (organizeRun, OrganizeResult, bool) {
 	// 1. Gather all files and compile them into a unified payload
 	files, err := s.List()
 	if err != nil {
-		return OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to list files: %v", err)}
+		return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to list files: %v", err)}, false
 	}
 
 	var vaultPayload strings.Builder
 	for _, f := range files {
-		if f.Name == "unified_memory.md" || f.Name == ".audit.log" {
+		// Only send USER-MEMORY taxonomy files. Setup/instruction files
+		// (CLAUDE.md, AGENTS.md, providers.md, …), the generated aggregate, and the
+		// agent-activity log (agents.md) are never read or reorganized.
+		if !IsOrganizableFile(f.Name) {
 			continue
 		}
 		content, err := s.View(f.Name)
@@ -335,7 +372,7 @@ func (s *Store) OrganizeVaultWithAgent(agentName string, agentPath string) Organ
 	}
 
 	if vaultPayload.Len() == 0 {
-		return OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}
+		return organizeRun{}, OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}, false
 	}
 
 	systemPrompt := organizeSystemPrompt()
@@ -349,32 +386,23 @@ func (s *Store) OrganizeVaultWithAgent(agentName string, agentPath string) Organ
 
 	// 2. Route Execution based on agentPath presence
 	if agentPath != "" {
-		// SAFETY GATE: only agents whose isolation is E2E-verified (no tools, scrubbed
-		// env, empty cwd → zero-loss + zero-contamination) may use the agentic path.
-		// Unverified agents read the real vault and drop facts, so route them to the
-		// tool-less Direct LLM / Custom endpoints instead.
-		if !organizeAgentSafe(agentName) {
-			return OrganizeResult{
-				Success: false,
-				Message: fmt.Sprintf("On-Demand Organization via %q isn't available yet: agent CLIs run with file tools and can read outside the vault and drop facts. Use the \"Direct LLM\" option or a Custom endpoint — these transform only the vault text, with no file access.", agentName),
-			}
-		}
-
 		// Guard: only fork/exec an actual executable file. A config directory
 		// (e.g. ~/.gemini/antigravity-cli) would fail with a cryptic
 		// "permission denied"; fail clearly instead.
 		if fi, statErr := os.Stat(agentPath); statErr != nil {
-			return OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s is not runnable: %v", agentName, statErr)}
+			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s is not runnable: %v", agentName, statErr)}, false
 		} else if fi.IsDir() {
-			return OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s path is a directory, not an executable: %s", agentName, agentPath)}
+			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s path is a directory, not an executable: %s", agentName, agentPath)}, false
 		}
 
-		// Run via CLI command with the verified per-agent headless invocation.
+		// Run via CLI command with the verified per-agent headless invocation. The
+		// timeout is layered on the caller's context so either the deadline OR a user
+		// cancel (esc on the running screen) tears the subprocess down.
 		timeout := organizeTimeout()
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		runCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, agentPath, buildAgentArgs(agentName, fullPrompt)...)
+		cmd := exec.CommandContext(runCtx, agentPath, buildAgentArgs(agentName, model, fullPrompt)...)
 
 		// ISOLATION: empty stdin (no TTY hang), a scrubbed env with no AUXLY_* (so the
 		// agent can't locate the real vault), and an empty working directory (so any
@@ -395,18 +423,23 @@ func (s *Store) OrganizeVaultWithAgent(agentName string, agentPath string) Organ
 
 		execErr := cmd.Run()
 
-		// Distinguish a timeout (context deadline) from a genuine execution failure.
-		if ctx.Err() == context.DeadlineExceeded {
-			return OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s execution timed out after %s. Stderr: %s", agentName, timeout, strings.TrimSpace(stderr.String()))}
+		// Distinguish a timeout (deadline on runCtx) and a user cancel (parent ctx
+		// cancelled via esc) from a genuine execution failure. Check runCtx — the
+		// parent ctx is never DeadlineExceeded since the deadline lives on the child.
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s execution timed out after %s. Stderr: %s", agentName, timeout, strings.TrimSpace(stderr.String()))}, false
+		}
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return organizeRun{}, OrganizeResult{Success: false, Message: "Run cancelled."}, false
 		}
 
 		if execErr != nil {
-			return OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s execution failed: %v\nStderr: %s\nStdout: %s", agentName, execErr, stderr.String(), stdout.String())}
+			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s execution failed: %v\nStderr: %s\nStdout: %s", agentName, execErr, stderr.String(), stdout.String())}, false
 		}
 
 		output := stdout.String()
 		if strings.TrimSpace(output) == "" {
-			return OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s returned empty output.", agentName)}
+			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s returned empty output.", agentName)}, false
 		}
 
 		jsonContent = extractJSON(output)
@@ -486,28 +519,28 @@ func (s *Store) OrganizeVaultWithAgent(agentName string, agentPath string) Organ
 
 		jsonData, err := json.Marshal(payload)
 		if err != nil {
-			return OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to encode request payload: %v", err)}
+			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to encode request payload: %v", err)}, false
 		}
 
-		req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
+		req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(jsonData))
 		if err != nil {
-			return OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to create HTTP request: %v", err)}
+			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to create HTTP request: %v", err)}, false
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if apiKey != "" {
-			req.Header.Set("Authorization", "Authorization: Bearer "+apiKey)
+			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
 		httpClient := &http.Client{Timeout: 300 * time.Second}
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			return OrganizeResult{Success: false, Message: fmt.Sprintf("LLM service is unreachable at %s: %v", apiURL, err)}
+			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("LLM service is unreachable at %s: %v", apiURL, err)}, false
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			bodyBytes, _ := io.ReadAll(resp.Body)
-			return OrganizeResult{Success: false, Message: fmt.Sprintf("LLM request failed (Status %d): %s", resp.StatusCode, string(bodyBytes))}
+			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("LLM request failed (Status %d): %s", resp.StatusCode, string(bodyBytes))}, false
 		}
 
 		type chatChoice struct {
@@ -523,11 +556,11 @@ func (s *Store) OrganizeVaultWithAgent(agentName string, agentPath string) Organ
 
 		var chatResp chatResponse
 		if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-			return OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to parse chat response: %v", err)}
+			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to parse chat response: %v", err)}, false
 		}
 
 		if len(chatResp.Choices) == 0 {
-			return OrganizeResult{Success: false, Message: "LLM returned an empty response choices list."}
+			return organizeRun{}, OrganizeResult{Success: false, Message: "LLM returned an empty response choices list."}, false
 		}
 
 		llmJSONContent := chatResp.Choices[0].Message.Content
@@ -542,49 +575,217 @@ func (s *Store) OrganizeVaultWithAgent(agentName string, agentPath string) Organ
 		}
 	}
 
-	// 3. Decode into a proposal, then apply (this entry point preserves the
-	// original compute-and-write behavior; the TUI uses PlanOrganize* + the review
-	// flow + ApplyOrganizeChanges to write only what the user approves).
-	prop, errRes := s.buildProposalFromJSON(jsonContent, modelUsed, tokensUsed)
-	if !errRes.Success {
-		return errRes
-	}
-	diff := s.ApplyOrganizeChanges(prop.Changes)
-	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using %s!", modelUsed), Diff: diff, TokensUsed: tokensUsed}
+	return organizeRun{jsonContent: jsonContent, modelUsed: modelUsed, tokensUsed: tokensUsed}, OrganizeResult{}, true
 }
 
-// extractJSON isolates valid JSON brackets from any markdown code blocks or surrounding filler text.
+func (s *Store) PlanOrganizeWithAgent(ctx context.Context, agentName, agentPath, model string) (OrganizeProposal, OrganizeResult) {
+	run, res, proceed := s.runOrganizeModel(ctx, agentName, agentPath, model)
+	if !proceed {
+		return OrganizeProposal{}, res
+	}
+	return s.buildProposalFromJSON(run.jsonContent, run.modelUsed, run.tokensUsed)
+}
+
+func (s *Store) OrganizeVaultWithAgent(agentName, agentPath string) OrganizeResult {
+	prop, res := s.PlanOrganizeWithAgent(context.Background(), agentName, agentPath, "")
+	if !res.Success {
+		return res
+	}
+	if len(prop.Changes) == 0 {
+		return res
+	}
+	diff := s.ApplyOrganizeChanges(prop.Changes)
+	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using %s!", prop.ModelUsed), Diff: diff, TokensUsed: prop.TokensUsed}
+}
+
+// extractJSON isolates the JSON object from any markdown code fences or surrounding
+// prose/log noise an agent CLI may print. It first unwraps a ```json fence, then
+// returns the FIRST balanced top-level object via a string-aware brace scan, so
+// trailing prose — even prose that itself contains braces (e.g. "Let me know if
+// {…}") — is dropped instead of being concatenated onto the payload. Falls back to
+// the first/last brace span when no balanced object is found.
 func extractJSON(input string) string {
 	if startIdx := strings.Index(input, "```json"); startIdx != -1 {
 		rest := input[startIdx+7:]
 		if endIdx := strings.Index(rest, "```"); endIdx != -1 {
-			return strings.TrimSpace(rest[:endIdx])
+			input = rest[:endIdx]
 		}
-	}
-	if startIdx := strings.Index(input, "```"); startIdx != -1 {
+	} else if startIdx := strings.Index(input, "```"); startIdx != -1 {
 		rest := input[startIdx+3:]
 		if endIdx := strings.Index(rest, "```"); endIdx != -1 {
-			return strings.TrimSpace(rest[:endIdx])
+			input = rest[:endIdx]
 		}
+	}
+	if obj := firstBalancedObject(input); obj != "" {
+		return obj
 	}
 	firstBrace := strings.Index(input, "{")
 	lastBrace := strings.LastIndex(input, "}")
 	if firstBrace != -1 && lastBrace != -1 && lastBrace > firstBrace {
 		return input[firstBrace : lastBrace+1]
 	}
-	return input
+	return strings.TrimSpace(input)
 }
 
-// OrganizeVaultWithCustom performs memory vault consolidation against a custom HTTP LLM API (like local Ollama, LM Studio, etc.).
-func (s *Store) OrganizeVaultWithCustom(endpoint string, model string) OrganizeResult {
+// firstBalancedObject returns the first brace-balanced {...} span, honoring JSON
+// string literals and escapes so braces inside string values never skew the depth
+// count. Returns "" if no balanced object is present.
+func firstBalancedObject(input string) string {
+	start := strings.IndexByte(input, '{')
+	if start == -1 {
+		return ""
+	}
+	depth := 0
+	inStr := false
+	escaped := false
+	for i := start; i < len(input); i++ {
+		c := input[i]
+		if inStr {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return input[start : i+1]
+			}
+		}
+	}
+	return ""
+}
+
+// repairAgentJSON makes a best-effort repair of the two JSON faults weaker agent
+// models most often emit in their content strings: (1) raw control characters
+// (literal newline/tab/CR) that JSON forbids inside a string, and (2) unescaped
+// interior double quotes (e.g. a phrase the model wrote as "Loading" inside a
+// content value), which prematurely close the string and desync the parser.
+//
+// A quote is treated as a real string DELIMITER only when the next non-space
+// character is JSON-structural (, : } ]) or end-of-input; any other interior quote
+// is escaped. This is a heuristic, not a parser, so it can mis-handle content that
+// legitimately contains "...", patterns — but it only runs AFTER a strict parse has
+// already failed, and the user reviews every resulting change before anything is
+// written, so an imperfect salvage can never silently corrupt the vault.
+func repairAgentJSON(input string) string {
+	var b strings.Builder
+	b.Grow(len(input) + 16)
+	inStr := false
+	escaped := false
+	for i := 0; i < len(input); i++ {
+		c := input[i]
+		if !inStr {
+			b.WriteByte(c)
+			if c == '"' {
+				inStr = true
+			}
+			continue
+		}
+		if escaped {
+			b.WriteByte(c)
+			escaped = false
+			continue
+		}
+		switch c {
+		case '\\':
+			b.WriteByte(c)
+			escaped = true
+		case '"':
+			if isJSONStringCloser(input, i+1) {
+				b.WriteByte(c)
+				inStr = false
+			} else {
+				b.WriteString(`\"`)
+			}
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// isJSONStringCloser reports whether the quote preceding index j closes a string,
+// i.e. the next non-whitespace byte is a JSON structural token or end-of-input.
+func isJSONStringCloser(s string, j int) bool {
+	for j < len(s) {
+		switch s[j] {
+		case ' ', '\t', '\n', '\r':
+			j++
+		case ',', ':', '}', ']':
+			return true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeOrganizeChatURL(endpoint string) string {
+	apiURL := strings.TrimRight(endpoint, "/")
+	if !strings.HasSuffix(apiURL, "/v1/chat/completions") && !strings.HasSuffix(apiURL, "/chat/completions") {
+		apiURL = apiURL + "/v1/chat/completions"
+	}
+	return apiURL
+}
+
+// resolveOrganizeProvider maps a provider id (+ custom URL) to an OpenAI-compatible
+// base URL and API key. It never writes; failures are returned as OrganizeResult.
+func resolveOrganizeProvider(provider, customURL string) (baseURL, apiKey string, res OrganizeResult, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "ollama":
+		return "http://localhost:11434", "", OrganizeResult{}, true
+	case "openai":
+		key := os.Getenv("OPENAI_API_KEY")
+		if key == "" {
+			return "", "", OrganizeResult{Success: false, Message: "OPENAI_API_KEY not set"}, false
+		}
+		return "https://api.openai.com", key, OrganizeResult{}, true
+	case "gemini":
+		key := os.Getenv("GEMINI_API_KEY")
+		if key == "" {
+			return "", "", OrganizeResult{Success: false, Message: "GEMINI_API_KEY not set"}, false
+		}
+		return "https://generativelanguage.googleapis.com/v1beta/openai", key, OrganizeResult{}, true
+	case "custom":
+		base := strings.TrimRight(strings.TrimSpace(customURL), "/")
+		if base == "" {
+			return "", "", OrganizeResult{Success: false, Message: "Custom endpoint URL is empty"}, false
+		}
+		return base, os.Getenv("AUXLY_LLM_KEY"), OrganizeResult{}, true
+	default:
+		return "", "", OrganizeResult{Success: false, Message: fmt.Sprintf("Unknown organize provider %q", provider)}, false
+	}
+}
+
+func (s *Store) runOrganizeChat(ctx context.Context, apiURL, model, apiKey string) (organizeRun, OrganizeResult, bool) {
 	files, err := s.List()
 	if err != nil {
-		return OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to list files: %v", err)}
+		return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to list files: %v", err)}, false
 	}
 
 	var vaultPayload strings.Builder
 	for _, f := range files {
-		if f.Name == "unified_memory.md" || f.Name == ".audit.log" {
+		// Only send USER-MEMORY taxonomy files. Setup/instruction files
+		// (CLAUDE.md, AGENTS.md, providers.md, …), the generated aggregate, and the
+		// agent-activity log (agents.md) are never read or reorganized.
+		if !IsOrganizableFile(f.Name) {
 			continue
 		}
 		content, err := s.View(f.Name)
@@ -595,18 +796,13 @@ func (s *Store) OrganizeVaultWithCustom(endpoint string, model string) OrganizeR
 	}
 
 	if vaultPayload.Len() == 0 {
-		return OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}
+		return organizeRun{}, OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}, false
 	}
 
 	systemPrompt := organizeSystemPrompt()
 
 	userPrompt := fmt.Sprintf("Here is the current memory vault contents to organize:\n\n%s", vaultPayload.String())
 	fullPrompt := fmt.Sprintf("%s\n\n%s", systemPrompt, userPrompt)
-
-	apiURL := strings.TrimRight(endpoint, "/")
-	if !strings.HasSuffix(apiURL, "/v1/chat/completions") && !strings.HasSuffix(apiURL, "/chat/completions") {
-		apiURL = apiURL + "/v1/chat/completions"
-	}
 
 	type msg struct {
 		Role    string `json:"role"`
@@ -634,25 +830,28 @@ func (s *Store) OrganizeVaultWithCustom(endpoint string, model string) OrganizeR
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		return OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to encode request payload: %v", err)}
+		return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to encode request payload: %v", err)}, false
 	}
 
-	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to create HTTP request: %v", err)}
+		return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to create HTTP request: %v", err)}, false
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
 	httpClient := &http.Client{Timeout: 300 * time.Second}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return OrganizeResult{Success: false, Message: fmt.Sprintf("LLM service is unreachable at %s: %v", apiURL, err)}
+		return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("LLM service is unreachable at %s: %v", apiURL, err)}, false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return OrganizeResult{Success: false, Message: fmt.Sprintf("LLM request failed (Status %d): %s", resp.StatusCode, string(bodyBytes))}
+		return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("LLM request failed (Status %d): %s", resp.StatusCode, string(bodyBytes))}, false
 	}
 
 	type chatChoice struct {
@@ -668,11 +867,11 @@ func (s *Store) OrganizeVaultWithCustom(endpoint string, model string) OrganizeR
 
 	var chatResp chatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
-		return OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to parse chat response: %v", err)}
+		return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to parse chat response: %v", err)}, false
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return OrganizeResult{Success: false, Message: "LLM returned an empty response choices list."}
+		return organizeRun{}, OrganizeResult{Success: false, Message: "LLM returned an empty response choices list."}, false
 	}
 
 	llmJSONContent := chatResp.Choices[0].Message.Content
@@ -686,12 +885,44 @@ func (s *Store) OrganizeVaultWithCustom(endpoint string, model string) OrganizeR
 		tokensUsed = (len(fullPrompt) + len(jsonContent)) / 4
 	}
 
-	prop, errRes := s.buildProposalFromJSON(jsonContent, model, tokensUsed)
-	if !errRes.Success {
-		return errRes
+	return organizeRun{jsonContent: jsonContent, modelUsed: model, tokensUsed: tokensUsed}, OrganizeResult{}, true
+}
+
+func (s *Store) runOrganizeModelCustom(ctx context.Context, endpoint string, model string) (organizeRun, OrganizeResult, bool) {
+	return s.runOrganizeChat(ctx, normalizeOrganizeChatURL(endpoint), model, os.Getenv("AUXLY_LLM_KEY"))
+}
+
+func (s *Store) PlanOrganizeWithProvider(ctx context.Context, provider, customURL, model string) (OrganizeProposal, OrganizeResult) {
+	baseURL, apiKey, res, ok := resolveOrganizeProvider(provider, customURL)
+	if !ok {
+		return OrganizeProposal{}, res
+	}
+	run, res, proceed := s.runOrganizeChat(ctx, strings.TrimRight(baseURL, "/")+"/v1/chat/completions", model, apiKey)
+	if !proceed {
+		return OrganizeProposal{}, res
+	}
+	return s.buildProposalFromJSON(run.jsonContent, run.modelUsed, run.tokensUsed)
+}
+
+func (s *Store) PlanOrganizeWithCustom(ctx context.Context, endpoint, model string) (OrganizeProposal, OrganizeResult) {
+	run, res, proceed := s.runOrganizeModelCustom(ctx, endpoint, model)
+	if !proceed {
+		return OrganizeProposal{}, res
+	}
+	return s.buildProposalFromJSON(run.jsonContent, run.modelUsed, run.tokensUsed)
+}
+
+// OrganizeVaultWithCustom performs memory vault consolidation against a custom HTTP LLM API (like local Ollama, LM Studio, etc.).
+func (s *Store) OrganizeVaultWithCustom(endpoint string, model string) OrganizeResult {
+	prop, res := s.PlanOrganizeWithCustom(context.Background(), endpoint, model)
+	if !res.Success {
+		return res
+	}
+	if len(prop.Changes) == 0 {
+		return res
 	}
 	diff := s.ApplyOrganizeChanges(prop.Changes)
-	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using custom model %s!", model), Diff: diff, TokensUsed: tokensUsed}
+	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using custom model %s!", prop.ModelUsed), Diff: diff, TokensUsed: prop.TokensUsed}
 }
 
 // generateDiff creates a clean line-by-line de-duplication diff showing exactly which lines were removed (-) and added (+).
