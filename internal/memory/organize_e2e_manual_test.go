@@ -38,17 +38,6 @@ func TestOrganizeE2E_RealAgent_TempVault(t *testing.T) {
 	res := store.OrganizeVaultWithAgent(agentName, path)
 	t.Logf("Success=%v\nMessage=%s\nDiff=%s", res.Success, res.Message, res.Diff)
 
-	// If this provider isn't yet on the verified-safe allowlist, it must be a safe
-	// refusal, never a real (unsafe) run. The zero-loss/contamination checks below
-	// are the acceptance gate that QUALIFIES a provider for the allowlist.
-	if !organizeAgentSafe(agentName) {
-		if res.Success || !strings.Contains(res.Message, "isn't available") {
-			t.Fatalf("unverified agent must be safety-gated; got Success=%v msg=%s", res.Success, res.Message)
-		}
-		t.Logf("unverified agent correctly gated: %s", res.Message)
-		return
-	}
-
 	if !res.Success {
 		t.Fatalf("organize FAILED via %s: %s", agentName, res.Message)
 	}

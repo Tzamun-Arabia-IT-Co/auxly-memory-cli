@@ -1,6 +1,8 @@
 package memory
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -16,23 +18,32 @@ func TestBuildAgentArgs_HeadlessInvocationPerProvider(t *testing.T) {
 	const prompt = "ORGANIZE THIS VAULT"
 
 	tests := []struct {
-		name      string
-		agentName string
-		mustHave  []string // flags/subcommands that must appear before the prompt
+		name             string
+		agentName        string
+		model            string
+		mustHave         []string // flags/subcommands that must appear before the prompt
+		mustNotHave      []string
+		expectModelValue string
 	}{
 		{"claude is headless + MCP-isolated + tool-disabled + model-pinned", "Claude Code / CLI",
-			[]string{"-p", "--strict-mcp-config", "--mcp-config", "--tools", "--model", "haiku"}},
-		{"codex uses the exec subcommand under a read-only sandbox", "Codex IDE Desktop",
-			[]string{"exec", "--sandbox", "read-only"}},
-		{"antigravity uses --print", "Antigravity CLI", []string{"--print"}},
-		{"gemini is headless", "Gemini CLI", []string{"-p"}},
-		{"cursor is headless text output", "Cursor IDE", []string{"-p", "--output-format", "text"}},
-		{"unknown falls back to -p, never bare", "Some Future Agent", []string{"-p"}},
+			"sonnet", []string{"-p", "--strict-mcp-config", "--mcp-config", "--tools", "--model"}, nil, "sonnet"},
+		{"claude empty model defaults to haiku", "Claude Code / CLI",
+			"", []string{"-p", "--model"}, nil, "haiku"},
+		{"codex uses the exec subcommand under a read-only sandbox, outside a git repo", "Codex IDE Desktop",
+			"gpt-5.2-codex", []string{"exec", "--sandbox", "read-only", "--skip-git-repo-check", "--model"}, nil, "gpt-5.2-codex"},
+		{"codex omits model flag when empty", "Codex IDE Desktop",
+			"", []string{"exec", "--sandbox", "read-only", "--skip-git-repo-check"}, []string{"--model"}, ""},
+		{"antigravity uses --print and ignores model", "Antigravity CLI", "ignored-model", []string{"--print"}, []string{"--model", "-m", "ignored-model"}, ""},
+		{"gemini is headless with optional model", "Gemini CLI", "gemini-2.5-flash", []string{"-p", "-m"}, nil, "gemini-2.5-flash"},
+		{"gemini omits model flag when empty", "Gemini CLI", "", []string{"-p"}, []string{"-m"}, ""},
+		{"cursor is headless text output with optional model", "Cursor IDE", "sonnet-4", []string{"-p", "--output-format", "text", "--model"}, nil, "sonnet-4"},
+		{"cursor omits model flag when empty", "Cursor IDE", "", []string{"-p", "--output-format", "text"}, []string{"--model"}, ""},
+		{"unknown falls back to -p, never bare", "Some Future Agent", "ignored", []string{"-p"}, []string{"--model", "-m", "ignored"}, ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := buildAgentArgs(tc.agentName, prompt)
+			args := buildAgentArgs(tc.agentName, tc.model, prompt)
 
 			// The prompt must be the final argument.
 			if len(args) == 0 || args[len(args)-1] != prompt {
@@ -50,6 +61,14 @@ func TestBuildAgentArgs_HeadlessInvocationPerProvider(t *testing.T) {
 					t.Errorf("expected flag %q in invocation, got: %s", want, joined)
 				}
 			}
+			for _, banned := range tc.mustNotHave {
+				if containsArg(args[:len(args)-1], banned) {
+					t.Errorf("did not expect arg %q in invocation, got: %s", banned, joined)
+				}
+			}
+			if tc.expectModelValue != "" && !containsArg(args[:len(args)-1], tc.expectModelValue) {
+				t.Errorf("expected model value %q in invocation, got: %s", tc.expectModelValue, joined)
+			}
 
 			// SECURITY: the consolidation embeds user-vault content (prompt-injection
 			// vector) and needs no tools — never pass a permission/sandbox-bypass flag.
@@ -65,7 +84,7 @@ func TestBuildAgentArgs_HeadlessInvocationPerProvider(t *testing.T) {
 	}
 }
 
-// TestProviderKeyAndAllowlist locks the provider mapping and the verified-safe set.
+// TestProviderKeyAndAllowlist locks the provider mapping.
 func TestProviderKeyAndAllowlist(t *testing.T) {
 	cases := map[string]string{
 		"Claude Code / CLI": "claude",
@@ -80,36 +99,83 @@ func TestProviderKeyAndAllowlist(t *testing.T) {
 			t.Errorf("providerKey(%q)=%q want %q", name, got, want)
 		}
 	}
-	// No agent is on the verified-safe allowlist yet — agentic isolation is unproven,
-	// so every CLI agent must be gated to the tool-less Direct LLM / Custom paths.
-	for _, name := range []string{"Claude Code / CLI", "Antigravity CLI", "Codex IDE Desktop", "Gemini CLI", "Cursor IDE", "Some Future Agent"} {
-		if organizeAgentSafe(name) {
-			t.Errorf("%q must not be safe yet (agentic isolation unproven)", name)
-		}
-	}
 }
 
-// TestOrganizeVaultWithAgent_UnverifiedAgentGated: an unverified agent must be
-// refused BEFORE any exec. /bin/echo exists, so a failed gate would surface an
-// empty-output error rather than the refusal — proving we short-circuit early.
-func TestOrganizeVaultWithAgent_UnverifiedAgentGated(t *testing.T) {
+func TestOrganizeAgent_NotGated(t *testing.T) {
 	store := NewStore(t.TempDir())
 	if err := store.Write("identity.md", "# Identity\n- Name: Test\n"); err != nil {
 		t.Fatal(err)
 	}
-	res := store.OrganizeVaultWithAgent("Some Future Agent", "/bin/echo")
-	if res.Success {
-		t.Fatalf("expected a safety refusal, got success: %s", res.Message)
+	_, res := store.PlanOrganizeWithAgent(context.Background(), "Claude Code / CLI", "/bin/echo", "")
+	if strings.Contains(res.Message, "isn't available") {
+		t.Errorf("agent plan path must not be gated, got: %s", res.Message)
 	}
-	if !strings.Contains(res.Message, "isn't available") {
-		t.Errorf("expected a safety-refusal message, got: %s", res.Message)
+}
+
+func TestPlanOrganize_DoesNotWrite(t *testing.T) {
+	store := NewStore(t.TempDir())
+	store.WorkspaceRoot = ""
+	if err := store.Write("identity.md", "# Identity\n- Name: Test\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write("projects.md", "# Projects\n- Alpha\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _ = store.PlanOrganizeWithAgent(context.Background(), "Some Future Agent", "/bin/echo", "")
+	if c, _ := store.View("identity.md"); c != "# Identity\n- Name: Test\n" {
+		t.Errorf("planning must not write identity.md; got: %q", c)
+	}
+	if c, _ := store.View("projects.md"); c != "# Projects\n- Alpha\n" {
+		t.Errorf("planning must not write projects.md; got: %q", c)
+	}
+}
+
+func TestResolveOrganizeProvider(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("AUXLY_LLM_KEY", "")
+
+	baseURL, apiKey, res, ok := resolveOrganizeProvider("ollama", "")
+	if !ok || baseURL != "http://localhost:11434" || apiKey != "" {
+		t.Fatalf("ollama = (%q, %q, %v, %v), want localhost/no-key/ok", baseURL, apiKey, res, ok)
+	}
+
+	_, _, res, ok = resolveOrganizeProvider("openai", "")
+	if ok || !strings.Contains(res.Message, "OPENAI_API_KEY not set") {
+		t.Fatalf("openai without key should fail clearly, got ok=%v message=%q", ok, res.Message)
+	}
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	baseURL, apiKey, _, ok = resolveOrganizeProvider("openai", "")
+	if !ok || baseURL != "https://api.openai.com" || apiKey != "sk-test" {
+		t.Fatalf("openai with key = (%q, %q, ok=%v)", baseURL, apiKey, ok)
+	}
+
+	_, _, res, ok = resolveOrganizeProvider("gemini", "")
+	if ok || !strings.Contains(res.Message, "GEMINI_API_KEY not set") {
+		t.Fatalf("gemini without key should fail clearly, got ok=%v message=%q", ok, res.Message)
+	}
+	t.Setenv("GEMINI_API_KEY", "gem-test")
+	baseURL, apiKey, _, ok = resolveOrganizeProvider("gemini", "")
+	if !ok || baseURL != "https://generativelanguage.googleapis.com/v1beta/openai" || apiKey != "gem-test" {
+		t.Fatalf("gemini with key = (%q, %q, ok=%v)", baseURL, apiKey, ok)
+	}
+
+	_, _, res, ok = resolveOrganizeProvider("custom", "")
+	if ok || !strings.Contains(res.Message, "Custom endpoint URL is empty") {
+		t.Fatalf("custom empty URL should fail clearly, got ok=%v message=%q", ok, res.Message)
+	}
+	t.Setenv("AUXLY_LLM_KEY", "custom-key")
+	baseURL, apiKey, _, ok = resolveOrganizeProvider("custom", "http://example.test/")
+	if !ok || baseURL != "http://example.test" || apiKey != "custom-key" {
+		t.Fatalf("custom with key = (%q, %q, ok=%v)", baseURL, apiKey, ok)
 	}
 }
 
 // TestScrubbedOrganizeEnv_DropsAuxlyVars proves the child env can't leak a vault
 // pointer to the spawned agent.
 func TestScrubbedOrganizeEnv_DropsAuxlyVars(t *testing.T) {
-	t.Setenv("AUXLY_MEMORY_PATH", "/Users/lab/.auxly/memory")
+	t.Setenv("AUXLY_MEMORY_PATH", "/home/user/.auxly/memory")
 	t.Setenv("AUXLY_PROVIDER", "claude")
 	for _, kv := range scrubbedOrganizeEnv() {
 		if strings.HasPrefix(kv, "AUXLY_") {
@@ -192,4 +258,104 @@ func TestOrganizeTimeout_EnvOverride(t *testing.T) {
 		}
 	}
 	_ = os.Unsetenv("AUXLY_ORGANIZE_TIMEOUT")
+}
+
+// TestIsOrganizableFile locks which files the organize pass may touch: user-memory
+// taxonomy files only — never agents.md or non-taxonomy setup/instruction files.
+func TestIsOrganizableFile(t *testing.T) {
+	organizable := []string{"identity.md", "personal.md", "preferences.md", "infra.md", "products.md", "projects.md", "daily.md", "business.md"}
+	for _, f := range organizable {
+		if !IsOrganizableFile(f) {
+			t.Errorf("%s should be organizable", f)
+		}
+	}
+	excluded := []string{"agents.md", "AGENTS.md", "CLAUDE.md", "CODEX.md", "GEMINI.md", "providers.md", "unified_memory.md", "random.txt"}
+	for _, f := range excluded {
+		if IsOrganizableFile(f) {
+			t.Errorf("%s must NOT be organizable (setup/agent/non-memory file)", f)
+		}
+	}
+}
+
+// TestBuildProposalDropsSetupFiles proves the output-side guard: even if the model
+// returns a setup file or agents.md, it never becomes a proposed change.
+func TestBuildProposalDropsSetupFiles(t *testing.T) {
+	store := NewStore(t.TempDir())
+	payload := `{"files":[
+		{"name":"identity.md","content":"# Identity\n- Name: New\n"},
+		{"name":"agents.md","content":"# Agents\n- rewritten setup\n"},
+		{"name":"CLAUDE.md","content":"# Claude rules\n- tampered\n"}
+	]}`
+	prop, res := store.buildProposalFromJSON(payload, "test", 0)
+	if !res.Success {
+		t.Fatalf("buildProposalFromJSON failed: %s", res.Message)
+	}
+	for _, c := range prop.Changes {
+		if c.Name == "agents.md" || c.Name == "CLAUDE.md" {
+			t.Errorf("proposal must not include setup file %q", c.Name)
+		}
+	}
+	if len(prop.Changes) != 1 || prop.Changes[0].Name != "identity.md" {
+		t.Errorf("expected only identity.md in proposal, got %+v", prop.Changes)
+	}
+}
+
+// TestExtractJSON_StripsFencesAndTrailingProse verifies the extractor unwraps a
+// ```json fence and returns only the first balanced object, dropping trailing prose
+// even when that prose itself contains braces (a common agent-CLI epilogue).
+func TestExtractJSON_StripsFencesAndTrailingProse(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"plain", `{"files":[]}`, `{"files":[]}`},
+		{"fenced", "```json\n{\"files\":[]}\n```", `{"files":[]}`},
+		{"trailing-prose", `{"files":[]}` + "\nLet me know if you need anything else!", `{"files":[]}`},
+		{"trailing-braces", `{"files":[]}` + "\nLet me know if {you} want more.", `{"files":[]}`},
+		{"leading-noise", "Loading workspace...\n" + `{"files":[]}`, `{"files":[]}`},
+		{"brace-in-string", `{"files":[{"name":"a.md","content":"use {braces} here"}]}`, `{"files":[{"name":"a.md","content":"use {braces} here"}]}`},
+	}
+	for _, c := range cases {
+		if got := extractJSON(c.in); got != c.want {
+			t.Errorf("%s: extractJSON = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestBuildProposalFromJSON_RepairsUnescapedQuotes reproduces the antigravity/Gemini
+// failure (an unescaped " inside a content value, e.g. "Loading") and asserts the
+// lenient repair fallback salvages a usable proposal instead of failing the run.
+func TestBuildProposalFromJSON_RepairsUnescapedQuotes(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if err := store.Write("identity.md", "# Identity\n"); err != nil {
+		t.Fatal(err)
+	}
+	// The model wrote the word Loading wrapped in straight quotes without escaping
+	// them, which Go's json rejects with: invalid character 'L' after key:value pair.
+	bad := `{"files":[{"name":"identity.md","content":"# Identity\n- Status: "Loading" now"}]}`
+	if err := json.Unmarshal([]byte(bad), &struct {
+		Files []struct{ Name, Content string }
+	}{}); err == nil {
+		t.Fatal("test premise broken: payload should be invalid JSON")
+	}
+	prop, res := store.buildProposalFromJSON(bad, "antigravity", 0)
+	if !res.Success {
+		t.Fatalf("repair fallback should salvage the payload, got: %s", res.Message)
+	}
+	if len(prop.Changes) != 1 || prop.Changes[0].Name != "identity.md" {
+		t.Fatalf("want 1 change for identity.md, got %+v", prop.Changes)
+	}
+	if !strings.Contains(prop.Changes[0].NewContent, `"Loading"`) {
+		t.Errorf("repaired content should preserve the quoted word, got: %q", prop.Changes[0].NewContent)
+	}
+}
+
+// TestRepairAgentJSON_PreservesValidStructure ensures the repair pass leaves real
+// string delimiters intact (quotes followed by structural tokens) and only escapes
+// genuine interior quotes and raw control characters.
+func TestRepairAgentJSON_PreservesValidStructure(t *testing.T) {
+	valid := `{"files":[{"name":"a.md","content":"clean"}]}`
+	if got := repairAgentJSON(valid); got != valid {
+		t.Errorf("repair altered valid JSON: %q", got)
+	}
+	if err := json.Unmarshal([]byte(repairAgentJSON(valid)), &struct{}{}); err != nil {
+		t.Errorf("repaired valid JSON no longer parses: %v", err)
+	}
 }

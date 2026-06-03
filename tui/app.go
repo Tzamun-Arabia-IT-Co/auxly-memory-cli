@@ -22,6 +22,7 @@ const (
 	screenActivity
 	screenBrowser
 	screenDiff
+	screenMemoryOrg
 	screenAnalytics
 	screenSettings
 	screenSSH
@@ -35,6 +36,7 @@ var screenNames = []string{
 	"Activity",
 	"Files",
 	"Approvals",
+	"Memory Org",
 	"Analytics",
 	"Settings",
 	"Remote",
@@ -49,6 +51,7 @@ type model struct {
 	height     int
 
 	// Sub-models
+	memoryOrg  organizeModel
 	dashboard  dashboardModel
 	activity   activityModel
 	auditTrail auditTrailModel
@@ -87,6 +90,7 @@ func NewApp(memoryPath string) *model {
 		logger:     logger,
 		pendingMgr: pendingMgr,
 		usageMgr:   usageMgr,
+		memoryOrg:  newOrganizeModel(store, memoryPath, logger),
 		dashboard:  newDashboardModel(logger, pendingMgr, memoryPath, usageMgr),
 		activity:   newActivityModel(logger),
 		auditTrail: newAuditTrailModel(logger),
@@ -136,12 +140,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-		if m.screen == screenSettings && m.settings.configuringCustom {
+		if m.screen == screenMemoryOrg && m.memoryOrg.capturesInput() {
+			var cmd tea.Cmd
+			m.memoryOrg, cmd = m.memoryOrg.Update(msg)
+			return m, cmd
+		}
+
+		// The Customizations confirm dialog owns the keyboard (y/n/esc) so digits
+		// and tab don't switch screens out from under it.
+		if m.screen == screenSettings && m.settings.cust.capturesInput() {
 			var cmd tea.Cmd
 			m.settings, cmd = m.settings.Update(msg)
-			if m.vpReady {
-				m.syncViewport()
-			}
 			return m, cmd
 		}
 
@@ -168,30 +177,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "4":
 			return m, m.gotoScreen(screenDiff)
 		case "5":
-			return m, m.gotoScreen(screenAnalytics)
+			return m, m.gotoScreen(screenMemoryOrg)
 		case "6":
-			return m, m.gotoScreen(screenSettings)
+			return m, m.gotoScreen(screenAnalytics)
 		case "7":
-			return m, m.gotoScreen(screenSSH)
+			return m, m.gotoScreen(screenSettings)
 		case "8":
-			return m, m.gotoScreen(screenSkills)
+			return m, m.gotoScreen(screenSSH)
 		case "9":
+			return m, m.gotoScreen(screenSkills)
+		case "0":
 			return m, m.gotoScreen(screenAuditTrail)
 		case "]", "tab":
 			if msg.String() == "tab" && ((m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
-				(m.screen == screenSSH && m.ssh.editingHost) ||
-				(m.screen == screenSettings && (m.settings.configuringCustom || m.settings.showingDiff || m.settings.confirmingRun))) {
+				(m.screen == screenSSH && m.ssh.editingHost)) {
 				break
 			}
 			next := m.screen
 			if next == screenViewer {
 				next = screenBrowser
 			}
-			return m, m.gotoScreen((next + 1) % 9)
+			return m, m.gotoScreen((next + 1) % 10)
 		case "[", "shift+tab", "backtab":
 			if (msg.String() == "shift+tab" || msg.String() == "backtab") && ((m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
-				(m.screen == screenSSH && m.ssh.editingHost) ||
-				(m.screen == screenSettings && (m.settings.configuringCustom || m.settings.showingDiff || m.settings.confirmingRun))) {
+				(m.screen == screenSSH && m.ssh.editingHost)) {
 				break
 			}
 			prev := m.screen
@@ -199,9 +208,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				prev = screenBrowser
 			}
 			if prev == 0 {
-				return m, m.gotoScreen(8)
+				return m, m.gotoScreen(9)
 			}
-			return m, m.gotoScreen((prev - 1) % 9)
+			return m, m.gotoScreen((prev - 1) % 10)
 		case "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
 			// Scroll the content viewport on long pages, unless a modal/editor owns
 			// these keys.
@@ -225,6 +234,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 		// Propagate window size to all submodels immediately so they adapt responsively
+		m.memoryOrg, _ = m.memoryOrg.Update(msg)
 		m.dashboard, _ = m.dashboard.Update(msg)
 		m.activity, _ = m.activity.Update(msg)
 		m.auditTrail, _ = m.auditTrail.Update(msg)
@@ -265,6 +275,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Delegate to sub-model
 	var cmd tea.Cmd
 	switch m.screen {
+	case screenMemoryOrg:
+		m.memoryOrg, cmd = m.memoryOrg.Update(msg)
 	case screenDashboard:
 		m.dashboard, cmd = m.dashboard.Update(msg)
 	case screenActivity:
@@ -303,7 +315,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // scrolls its own content, so they render directly.
 func (m model) usesViewport() bool {
 	switch m.screen {
-	case screenDashboard, screenViewer:
+	case screenMemoryOrg, screenDashboard, screenViewer:
 		return false
 	}
 	return true
@@ -314,7 +326,7 @@ func (m model) usesViewport() bool {
 func (m model) inModalSubmode() bool {
 	switch m.screen {
 	case screenSettings:
-		return m.settings.configuringCustom || m.settings.showingDiff || m.settings.confirmingRun
+		return false
 	case screenSSH:
 		return m.ssh.editingHost
 	case screenActivity:
@@ -328,6 +340,8 @@ func (m model) inModalSubmode() bool {
 // screenContent renders only the active screen's body (no banner/tabs/footer).
 func (m model) screenContent() string {
 	switch m.screen {
+	case screenMemoryOrg:
+		return m.memoryOrg.View()
 	case screenDashboard:
 		return m.dashboard.View()
 	case screenActivity:
@@ -408,7 +422,7 @@ func (m model) View() string {
 		// pushed off the top, and content scrolls instead of being truncated.
 		out = fmt.Sprintf("%s\n%s\n\n%s\n\n%s", banner, tabs, m.contentVP.View(), footer)
 	} else {
-		// Dashboard / viewer manage their own height. The dashboard tightens its body
+		// Dashboard / Memory Org / viewer manage their own height. The dashboard tightens its body
 		// to fit (full logo always); the clamp keeps the chrome on screen if a pane is
 		// too short for even the compact body.
 		content := m.screenContent()
@@ -460,17 +474,21 @@ func clampContentHeight(content string, maxLines int) string {
 func (m model) renderTabs() string {
 	var tabs string
 	for i, name := range screenNames {
+		key := fmt.Sprintf("%d", i+1)
+		if i == 9 {
+			key = "0"
+		}
 		if screen(i) == m.screen {
 			tabs += lipgloss.NewStyle().
 				Bold(true).
 				Foreground(ColorPrimary).
 				Padding(0, 1).
-				Render(fmt.Sprintf("[%d] %s", i+1, name))
+				Render(fmt.Sprintf("[%s] %s", key, name))
 		} else {
 			tabs += lipgloss.NewStyle().
 				Foreground(ColorDim).
 				Padding(0, 1).
-				Render(fmt.Sprintf(" %d  %s", i+1, name))
+				Render(fmt.Sprintf(" %s  %s", key, name))
 		}
 	}
 	return lipgloss.NewStyle().
@@ -482,6 +500,8 @@ func (m model) renderTabs() string {
 func (m model) renderFooter() string {
 	var footerText string
 	switch m.screen {
+	case screenMemoryOrg:
+		footerText = "up/down: Choose • Enter: Run/Submit • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenDashboard:
 		if m.dashboard.selectedAgent != "" {
 			footerText = "Tab: Switch popup tabs • Esc: Close popup • q: Quit"
@@ -513,15 +533,7 @@ func (m model) renderFooter() string {
 	case screenAnalytics:
 		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenSettings:
-		if m.settings.showingDiff {
-			footerText = "j/k: Scroll diff • Esc/Enter: Close diff • q: Quit"
-		} else if m.settings.confirmingRun {
-			footerText = "y/n or Enter/Esc: Confirm/Cancel run • q: Quit"
-		} else if m.settings.configuringCustom {
-			footerText = "Enter: Fetch models/configure • Esc: Cancel • q: Quit"
-		} else {
-			footerText = "↑/↓: Select option • ←/→: Cycle agent overrides • Enter: Toggle option/Run • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
-		}
+		footerText = "↑/↓: Select option • ←/→: Switch Settings section • Enter: Toggle option • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenSSH:
 		footerText = "j/k: Select • c: Connect new • t: Test • p: Print config • d: Remove • Tab/[ / ]: Switch tabs • q: Quit"
 	case screenSkills:
@@ -554,6 +566,8 @@ func (m model) renderFooter() string {
 
 func (m *model) refreshCurrentScreen() tea.Cmd {
 	switch m.screen {
+	case screenMemoryOrg:
+		return m.memoryOrg.Refresh()
 	case screenDashboard:
 		// Re-read the Live Usage opt-in each time the dashboard is (re)entered so
 		// the Settings toggle takes effect without restarting the TUI.

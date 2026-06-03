@@ -12,7 +12,9 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/sharing"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage"
@@ -30,6 +32,9 @@ type dashboardModel struct {
 	memoryPath       string
 	activeProviders  []string
 	recentWrites     []audit.Entry
+	composition      []categoryStat        // per-category memory breakdown (left column)
+	pendingFiles     []pending.PendingFile // queued approvals (shown inline when > 0)
+	remoteScope      map[string]string     // host → access scope ("read · 6 files")
 	sessions         []agentSession
 	unregistered     int // live mcp-servers running but not in the session registry
 	updateAvail      bool
@@ -66,6 +71,9 @@ type dashboardRefreshMsg struct {
 	trustCfg        *trust.Config
 	activeProviders []string
 	recentWrites    []audit.Entry
+	composition     []categoryStat
+	pendingFiles    []pending.PendingFile
+	remoteScope     map[string]string
 	sessions        []agentSession
 	unregistered    int
 	updateAvail     bool
@@ -178,9 +186,10 @@ func (m dashboardModel) Refresh() tea.Cmd {
 			}
 		}
 		var pendingCnt int
+		var pendingFiles []pending.PendingFile
 		if m.pendingMgr != nil {
-			files, _ := m.pendingMgr.List()
-			pendingCnt = len(files)
+			pendingFiles, _ = m.pendingMgr.List()
+			pendingCnt = len(pendingFiles)
 		}
 		var trustCfg *trust.Config
 		if m.memoryPath != "" {
@@ -192,6 +201,7 @@ func (m dashboardModel) Refresh() tea.Cmd {
 			activeProviders, _ = m.logger.ActiveProviders(5 * time.Minute)
 			recentWrites, _ = m.logger.TailWrites(10)
 		}
+		composition := computeComposition(m.memoryPath)
 		mcpError := getClaudeMCPError()
 		sessions := gatherSessions()
 		// gatherSessions already reconciles the registry against live servers;
@@ -203,6 +213,9 @@ func (m dashboardModel) Refresh() tea.Cmd {
 				unregistered++
 			}
 		}
+		// Resolve each connected remote box's access scope once (read/write + how many
+		// files it may see) so the connections list shows WHAT each box can reach.
+		remoteScope := computeRemoteScopes(m.memoryPath, sessions)
 		latest, updateAvail := update.Available()
 		return dashboardRefreshMsg{
 			stats:           stats,
@@ -210,6 +223,9 @@ func (m dashboardModel) Refresh() tea.Cmd {
 			trustCfg:        trustCfg,
 			activeProviders: activeProviders,
 			recentWrites:    recentWrites,
+			composition:     composition,
+			pendingFiles:    pendingFiles,
+			remoteScope:     remoteScope,
 			sessions:        sessions,
 			unregistered:    unregistered,
 			updateAvail:     updateAvail,
@@ -233,6 +249,9 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		m.trustCfg = msg.trustCfg
 		m.activeProviders = msg.activeProviders
 		m.recentWrites = msg.recentWrites
+		m.composition = msg.composition
+		m.pendingFiles = msg.pendingFiles
+		m.remoteScope = msg.remoteScope
 		m.sessions = msg.sessions
 		m.unregistered = msg.unregistered
 		if !m.updating {
@@ -554,6 +573,13 @@ func (m dashboardModel) renderBody(compact bool) string {
 	clockStr := time.Now().Format("02/01/2006 15:04:05")
 	clockHeader := lipgloss.NewStyle().Foreground(ColorDim).Render("🕒 Time: " + clockStr)
 	headerRow := lipgloss.JoinHorizontal(lipgloss.Top, title, "         ", clockHeader)
+	// The freshness signal rides on the header row (no extra height); only in full
+	// mode so cramped terminals stay byte-identical to before.
+	if !compact {
+		if fresh := m.renderFreshness(); fresh != "" {
+			headerRow = lipgloss.JoinHorizontal(lipgloss.Top, headerRow, "      ", fresh)
+		}
+	}
 	if m.reloaded {
 		refreshed := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true).Render("   ⟳ Force refreshed")
 		headerRow = lipgloss.JoinHorizontal(lipgloss.Top, headerRow, refreshed)
@@ -593,17 +619,32 @@ func (m dashboardModel) renderBody(compact bool) string {
 			"Writes Today:   %s\n"+
 			"Total Entries:  %s\n"+
 			"Pending Queue:  %s"+sep+
-			"📂 %s\n%s"+sep+
-			"🔌 %s\n%s",
+			"📂 %s\n%s",
 		bold.Render("System Diagnostics"),
 		green.Render(fmt.Sprintf("%d", m.stats.WritesToday)),
 		lipgloss.NewStyle().Foreground(ColorSecondary).Render(fmt.Sprintf("%d", m.stats.TotalEntries)),
 		pendingText,
 		bold.Render("Memory Store:"),
 		dim.Render(memStorePath),
-		bold.Render("Active Connections:"),
-		m.renderConnectionsSummary(compact),
 	)
+	// Enrichment depth scales with terminal height so the rich dashboard fits more
+	// terminals before falling back to compact: taller panes show more rows.
+	enrichN := 9
+	switch {
+	case m.height > 0 && m.height < 56:
+		enrichN = 4
+	case m.height > 0 && m.height < 64:
+		enrichN = 6
+	}
+	// Memory-by-category breakdown sits in the left column's spare height — full
+	// mode only, so compact panes don't grow.
+	if !compact {
+		if comp := m.renderComposition(enrichN); comp != "" {
+			diagContent += sep + comp
+		}
+	}
+	diagContent += sep + fmt.Sprintf("🔌 %s\n%s",
+		bold.Render("Active Connections:"), m.renderConnectionsSummary(compact))
 	leftCol := diagStyle.Render(diagContent)
 
 	// Right Column: Connected Agent Grid — only DETECTED brands (shared with the
@@ -640,6 +681,16 @@ func (m dashboardModel) renderBody(compact bool) string {
 	}
 
 	rightCol := fmt.Sprintf("%s\n%s", StyleHeader.Render("📡 Connected Agent Brands"), gridSection)
+	// Pending approvals (when any) and the "what just happened" feed fill the space
+	// under the grid — full mode only. Pending sits first: it's actionable.
+	if !compact {
+		if pend := m.renderPendingInline(5); pend != "" {
+			rightCol += "\n\n" + pend
+		}
+		if feed := m.renderRecentFeed(enrichN); feed != "" {
+			rightCol += "\n\n" + feed
+		}
+	}
 
 	var dashboardContent string
 	if m.width > 0 && m.width < 116 {
@@ -669,11 +720,13 @@ func (m dashboardModel) renderBody(compact bool) string {
 		b.WriteString(banner + "\n")
 	}
 	// Drop the blank lines around the content on short terminals to reclaim rows.
+	// In full mode keep one separator above the content and hug the footer below it,
+	// so the rich body needs one less row and fits more terminals.
 	if compact {
 		b.WriteString(dashboardContent + "\n")
 	} else {
 		b.WriteString("\n")
-		b.WriteString(dashboardContent + "\n\n")
+		b.WriteString(dashboardContent + "\n")
 	}
 
 	if m.selectedAgent != "" {
@@ -690,6 +743,273 @@ func (m dashboardModel) renderBody(compact bool) string {
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+// categoryStat is one row of the dashboard's memory-composition breakdown.
+type categoryStat struct {
+	label   string
+	items   int   // bullet/fact lines in the category file
+	size    int64 // file size in bytes
+	private bool  // personal tier (shown with a lock)
+}
+
+// computeComposition reads the vault and counts memory items per taxonomy category,
+// so the dashboard can show what KIND of memory the user has (not just a total).
+// Items are bullet lines ("- " / "* "); empty/heading/footer lines are ignored.
+func computeComposition(memoryPath string) []categoryStat {
+	if memoryPath == "" {
+		return nil
+	}
+	store := memory.NewStore(memoryPath)
+	files, err := store.List()
+	if err != nil {
+		return nil
+	}
+	sizeByFile := make(map[string]int64, len(files))
+	for _, f := range files {
+		sizeByFile[f.Name] = f.Size
+	}
+	var out []categoryStat
+	for _, c := range memory.Taxonomy {
+		content, err := store.View(c.File)
+		if err != nil {
+			continue // category file doesn't exist yet
+		}
+		items := 0
+		for _, ln := range strings.Split(content, "\n") {
+			t := strings.TrimSpace(ln)
+			if strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "* ") {
+				items++
+			}
+		}
+		out = append(out, categoryStat{
+			label:   c.Slug,
+			items:   items,
+			size:    sizeByFile[c.File],
+			private: c.Tier == memory.TierPersonal,
+		})
+	}
+	return out
+}
+
+// renderComposition draws the per-category breakdown with proportional bars, busiest
+// category first. Only categories that hold at least one item are shown, capped at
+// maxRows so the left column stays short enough to fit the terminal.
+func (m dashboardModel) renderComposition(maxRows int) string {
+	stats := make([]categoryStat, 0, len(m.composition))
+	maxItems := 0
+	for _, c := range m.composition {
+		if c.items > 0 {
+			stats = append(stats, c)
+			if c.items > maxItems {
+				maxItems = c.items
+			}
+		}
+	}
+	if len(stats) == 0 {
+		return ""
+	}
+	sort.SliceStable(stats, func(i, j int) bool { return stats[i].items > stats[j].items })
+
+	const barW = 10
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	track := lipgloss.NewStyle().Foreground(lipgloss.Color("237")) // a visible-but-quiet bar track
+	hidden := 0
+	if maxRows > 0 && len(stats) > maxRows {
+		hidden = len(stats) - maxRows
+		stats = stats[:maxRows]
+	}
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Bold(true).Render("🗂  Memory by category"))
+	for _, c := range stats {
+		filled := 0
+		if maxItems > 0 {
+			filled = c.items * barW / maxItems
+			if filled == 0 {
+				filled = 1
+			}
+		}
+		bar := lipgloss.NewStyle().Foreground(ColorPrimary).Render(strings.Repeat("█", filled)) +
+			track.Render(strings.Repeat("░", barW-filled))
+		label := c.label
+		if c.private {
+			label += " 🔒"
+		}
+		// Pad by DISPLAY width (not rune count) so the 🔒 emoji's two cells don't
+		// shove the personal row's bar a column to the right.
+		const labelCol = 13
+		if pad := labelCol - runewidth.StringWidth(label); pad > 0 {
+			label += strings.Repeat(" ", pad)
+		}
+		b.WriteString(fmt.Sprintf("\n%s %s %s",
+			label, bar, dim.Render(fmt.Sprintf("%3d", c.items))))
+	}
+	if hidden > 0 {
+		b.WriteString(dim.Render(fmt.Sprintf("\n%-13s +%d more", "", hidden)))
+	}
+	return b.String()
+}
+
+// renderRecentFeed lists the most recent memory writes (newest first) so the
+// dashboard answers "what just happened" without leaving the tab.
+func (m dashboardModel) renderRecentFeed(maxRows int) string {
+	if len(m.recentWrites) == 0 {
+		return ""
+	}
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	var b strings.Builder
+	b.WriteString(StyleHeader.Render("🕘 Recent Memory Changes"))
+	n := len(m.recentWrites)
+	if n > maxRows {
+		n = maxRows
+	}
+	for i := 0; i < n; i++ {
+		e := m.recentWrites[i]
+		ts := dim.Render(fmt.Sprintf("%-6s", feedTimestamp(e)))
+		typeLabel, typeColor := activityType(e)
+		tag := lipgloss.NewStyle().Foreground(typeColor).Render(fmt.Sprintf("%-10s", typeLabel))
+		// "who": provider in its brand color, width-padded (ANSI-aware).
+		whoR := colorProvider(e.Provider)
+		if gap := 11 - lipgloss.Width(whoR); gap > 0 {
+			whoR += strings.Repeat(" ", gap)
+		}
+		file := e.File
+		if file == "" {
+			file = "—"
+		}
+		added, removed := diffCounts(e.Diff)
+		delta := ""
+		if added > 0 || removed > 0 {
+			delta = "  " + lipgloss.NewStyle().Foreground(ColorSuccess).Render(fmt.Sprintf("+%d", added)) +
+				"/" + lipgloss.NewStyle().Foreground(ColorDanger).Render(fmt.Sprintf("-%d", removed))
+		}
+		b.WriteString(fmt.Sprintf("\n%s %s %s%-14s%s",
+			ts, tag, whoR, file, delta))
+	}
+	return b.String()
+}
+
+// feedTimestamp shows the clock time for today's writes and a short date for older
+// ones, so a row from a previous day isn't mistaken for "just now".
+func feedTimestamp(e audit.Entry) string {
+	t := parseTS(e.Timestamp)
+	now := time.Now()
+	if t.YearDay() == now.YearDay() && t.Year() == now.Year() {
+		return t.Format("15:04")
+	}
+	return t.Format("Jan 2")
+}
+
+// computeRemoteScopes resolves, per connected remote host, what that box can reach:
+// read vs read/write and how many files it may see. Uses the same sharing ACL the
+// host enforces, so the dashboard reflects the real grant (default is read-only over
+// all non-personal files when no per-client config exists).
+func computeRemoteScopes(memoryPath string, sessions []agentSession) map[string]string {
+	if memoryPath == "" {
+		return nil
+	}
+	var names []string
+	if files, err := memory.NewStore(memoryPath).List(); err == nil {
+		for _, f := range files {
+			names = append(names, f.Name)
+		}
+	}
+	out := map[string]string{}
+	for _, s := range sessions {
+		if !s.Remote || s.Host == "" {
+			continue
+		}
+		if _, done := out[s.Host]; done {
+			continue
+		}
+		share := sharing.LoadForRemoteHost(memoryPath, s.Host)
+		readable := 0
+		for _, ok := range sharing.AllowedReads(share, names) {
+			if ok {
+				readable++
+			}
+		}
+		access := "read"
+		for _, n := range names {
+			if sharing.CanWrite(share, n, names) {
+				access = "read/write"
+				break
+			}
+		}
+		out[s.Host] = fmt.Sprintf("%s · %d file(s)", access, readable)
+	}
+	return out
+}
+
+// renderPendingInline surfaces queued approvals right on the dashboard (only when
+// the queue is non-empty) so a waiting change is impossible to miss.
+func (m dashboardModel) renderPendingInline(maxRows int) string {
+	if len(m.pendingFiles) == 0 {
+		return ""
+	}
+	warn := lipgloss.NewStyle().Foreground(ColorWarning).Bold(true)
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	var b strings.Builder
+	b.WriteString(warn.Render(fmt.Sprintf("⚠ %d Pending Approval(s)", len(m.pendingFiles))))
+	n := len(m.pendingFiles)
+	if n > maxRows {
+		n = maxRows
+	}
+	for i := 0; i < n; i++ {
+		p := m.pendingFiles[i]
+		b.WriteString(fmt.Sprintf("\n  %-22s %s",
+			strings.TrimSuffix(p.Name, ".md"),
+			dim.Render(humanizeAgo(time.Since(p.ModTime)))))
+	}
+	if len(m.pendingFiles) > maxRows {
+		b.WriteString(dim.Render(fmt.Sprintf("\n  …and %d more", len(m.pendingFiles)-maxRows)))
+	}
+	b.WriteString("\n" + dim.Render("  → review in Approvals (4)"))
+	return b.String()
+}
+
+// renderFreshness is the one-line "is anything happening" signal for the header.
+func (m dashboardModel) renderFreshness() string {
+	if m.stats == nil || m.stats.LastWriteTime == "" {
+		return ""
+	}
+	ago := humanizeAgo(time.Since(parseTS(m.stats.LastWriteTime)))
+	s := "✎ Last write: " + ago
+	if len(m.recentWrites) > 0 {
+		w := m.recentWrites[0]
+		if w.File != "" {
+			s += " · " + w.Provider + " → " + w.File
+		}
+	}
+	return lipgloss.NewStyle().Foreground(ColorDim).Render(s)
+}
+
+// diffCounts tallies +/- lines in an audit diff string.
+func diffCounts(diff string) (added, removed int) {
+	for _, ln := range strings.Split(diff, "\n") {
+		t := strings.TrimSpace(ln)
+		switch {
+		case strings.HasPrefix(t, "+"):
+			added++
+		case strings.HasPrefix(t, "-"):
+			removed++
+		}
+	}
+	return added, removed
+}
+
+// humanizeAgo renders a duration as a compact relative time ("just now", "4m ago").
+func humanizeAgo(d time.Duration) string {
+	switch {
+	case d < 45*time.Second:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
 }
 
 // renderUpdateBanner shows the one-click self-update prompt / progress / result.
@@ -1080,11 +1400,17 @@ func (m dashboardModel) renderConnectionsSummary(compact bool) string {
 					teal.Render("●"), cyan.Render(host), dim.Render(loc), dim.Render(countSuffix)))
 				continue
 			}
+			// Scope rides on the same detail line (not a new row) to keep the left
+			// column short enough that the rich dashboard still fits shorter terminals.
+			detail := fmt.Sprintf("%s · %s · %s", loc, osLabel, s.Provider)
+			if sc := m.remoteScope[s.Host]; sc != "" {
+				detail += " · 🔑 " + sc
+			}
 			sb.WriteString(fmt.Sprintf("%s %s%s\n   %s\n",
 				teal.Render("●"),
 				cyan.Render(host),
 				dim.Render(countSuffix),
-				dim.Render(fmt.Sprintf("%s · %s · %s", loc, osLabel, s.Provider)),
+				dim.Render(detail),
 			))
 		}
 

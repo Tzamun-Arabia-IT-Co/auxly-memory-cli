@@ -18,10 +18,10 @@ func TestRemoteScreenAutoRefreshes(t *testing.T) {
 
 	// Enter the Remote tab via the real key path; entry must return a command so the
 	// data tick is seeded alongside the one-shot refresh.
-	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'7'}})
+	u, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'8'}})
 	m = u.(model)
 	if m.screen != screenSSH {
-		t.Fatalf("'7' should open the Remote screen, got %v", m.screen)
+		t.Fatalf("'8' should open the Remote screen, got %v", m.screen)
 	}
 	if cmd == nil {
 		t.Fatal("entering Remote must seed a command (refresh + data tick batch)")

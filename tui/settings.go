@@ -1,20 +1,15 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"gopkg.in/yaml.v3"
@@ -26,50 +21,22 @@ type trustConfig struct {
 }
 
 type settingsModel struct {
-	memoryPath            string
-	cursor                int
-	agents                []detect.Agent
-	trust                 trustConfig
-	editing               bool
-	editField             int
-	trustLevels           []string
-	organizing            bool
-	organizeResult        string
-	store                 *memory.Store
-	selectedOrganizeAgent int // -2 for Custom, -1 for Direct LLM, 0+ for specific index in unique agents
-	width                 int
-	height                int
-
-	// Custom Local AI Popup State
-	configuringCustom   bool
-	customURL           string
-	customModels        []string
-	customModelIdx      int
-	fetchingModels      bool
-	customError         string
-	selectedCustomModel string
-	selectedCustomURL   string
-
-	// Organize Diff Popup State
-	organizeDiff string
-	showingDiff  bool
-	diffScrollY  int
-
-	// Animated spinner frame while an organize run is in flight.
-	organizeSpin int
-
-	// Persistent Stats State
-	lastRun        string
-	lastTokensUsed int
-	confirmingRun  bool
+	memoryPath  string
+	cursor      int
+	agents      []detect.Agent
+	trust       trustConfig
+	trustLevels []string
+	width       int
+	height      int
 
 	// Live Usage opt-in (calls each agent's provider with its stored login —
 	// off keeps Auxly fully local). Persisted via config.SaveSettings.
 	liveUsage bool
 
-	// Sub-tab state: 0 = General (trust + organize), 1 = Agents (dashboard
-	// show/hide). Switched with ←/→ when not on the organize selector.
+	// Sub-tab state: 0 = General (trust), 1 = Agents (dashboard show/hide),
+	// 2 = Customizations (Claude Code statusline).
 	subTab int
+	cust   customizationsModel
 
 	// Agents sub-tab: the toggleable brand list (mirrors the dashboard's
 	// candidate set — detected + active + currently-hidden) and its cursor.
@@ -79,105 +46,19 @@ type settingsModel struct {
 	hiddenAgents map[string]bool
 }
 
-type organizeStats struct {
-	LastRun    string `json:"last_run"`
-	TokensUsed int    `json:"tokens_used"`
-}
-
 type settingsRefreshMsg struct {
 	agents      []detect.Agent
 	trust       trustConfig
-	stats       organizeStats
 	agentBrands []agentCard
 }
 
-type settingsOrganizeResultMsg struct {
-	success    bool
-	msg        string
-	diff       string
-	tokensUsed int
-}
-
-type customModelsFetchedMsg struct {
-	success bool
-	models  []string
-	err     string
-}
-
-// settingsSpinTickMsg drives the animated "Organizing…" spinner.
-type settingsSpinTickMsg struct{}
-
-func settingsSpinTick() tea.Cmd {
-	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return settingsSpinTickMsg{} })
-}
-
-func (m settingsModel) fetchCustomModels(url string) tea.Cmd {
-	return func() tea.Msg {
-		endpoint := strings.TrimRight(url, "/") + "/v1/models"
-		client := &http.Client{Timeout: 3 * time.Second}
-		resp, err := client.Get(endpoint)
-		if err != nil {
-			endpoint = strings.TrimRight(url, "/") + "/api/tags"
-			resp, err = client.Get(endpoint)
-			if err != nil {
-				return customModelsFetchedMsg{success: false, err: "Endpoint is unreachable: " + err.Error()}
-			}
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return customModelsFetchedMsg{success: false, err: fmt.Sprintf("HTTP status %d", resp.StatusCode)}
-		}
-
-		bodyBytes, _ := io.ReadAll(resp.Body)
-
-		type modelItem struct {
-			ID string `json:"id"`
-		}
-		type modelsResp struct {
-			Data []modelItem `json:"data"`
-		}
-
-		type ollamaModelItem struct {
-			Name string `json:"name"`
-		}
-		type ollamaModelsResp struct {
-			Models []ollamaModelItem `json:"models"`
-		}
-
-		var mResp modelsResp
-		if err := json.Unmarshal(bodyBytes, &mResp); err == nil && len(mResp.Data) > 0 {
-			var list []string
-			for _, item := range mResp.Data {
-				list = append(list, item.ID)
-			}
-			return customModelsFetchedMsg{success: true, models: list}
-		}
-
-		var oResp ollamaModelsResp
-		if err := json.Unmarshal(bodyBytes, &oResp); err == nil && len(oResp.Models) > 0 {
-			var list []string
-			for _, item := range oResp.Models {
-				list = append(list, item.Name)
-			}
-			return customModelsFetchedMsg{success: true, models: list}
-		}
-
-		return customModelsFetchedMsg{success: false, err: "Failed to parse model list from endpoint response"}
-	}
-}
-
 func newSettingsModel(memPath string, logger *audit.Logger) settingsModel {
-	store := memory.NewStore(memPath)
 	return settingsModel{
-		memoryPath:            memPath,
-		trustLevels:           []string{"auto", "require_approval", "read_only"},
-		store:                 store,
-		selectedOrganizeAgent: -2,
-		customURL:             "http://localhost:11434",
-		liveUsage:             config.LoadSettings().LiveUsage,
-		logger:                logger,
-		hiddenAgents:          loadHiddenAgentSet(),
+		memoryPath:   memPath,
+		trustLevels:  []string{"auto", "require_approval", "read_only"},
+		liveUsage:    config.LoadSettings().LiveUsage,
+		logger:       logger,
+		hiddenAgents: loadHiddenAgentSet(),
 	}
 }
 
@@ -205,25 +86,6 @@ func (m settingsModel) getUniqueAgents() []detect.Agent {
 	return unique
 }
 
-func (m settingsModel) getCLIAgents() []detect.Agent {
-	var list []detect.Agent
-	seen := make(map[string]bool)
-	for _, a := range m.agents {
-		isCLI := strings.Contains(a.Name, "CLI") || strings.Contains(a.Name, "Code") || a.Connection == "MCP+Shell" || a.Connection == "Shell"
-		// Only offer agents with a real runnable executable — organization
-		// fork/execs this, so a config dir/file (e.g. ~/.gemini/antigravity-cli)
-		// must never be selectable.
-		if isCLI && a.Command != "" {
-			if seen[a.Provider] {
-				continue
-			}
-			seen[a.Provider] = true
-			list = append(list, a)
-		}
-	}
-	return list
-}
-
 func (m settingsModel) Refresh() tea.Cmd {
 	memPath := m.memoryPath
 	logger := m.logger
@@ -237,17 +99,9 @@ func (m settingsModel) Refresh() tea.Cmd {
 			yaml.Unmarshal(data, &trust)
 		}
 
-		var stats organizeStats
-		statsPath := filepath.Join(memPath, ".last_organize.json")
-		sData, err := os.ReadFile(statsPath)
-		if err == nil {
-			json.Unmarshal(sData, &stats)
-		}
-
 		return settingsRefreshMsg{
 			agents:      agents,
 			trust:       trust,
-			stats:       stats,
 			agentBrands: buildAgentSettingsBrands(agents, logger),
 		}
 	}
@@ -271,101 +125,8 @@ func buildAgentSettingsBrands(agents []detect.Agent, logger *audit.Logger) []age
 	return buildAgentCards(provs)
 }
 
-func (m settingsModel) runOrganize() tea.Cmd {
-	return func() tea.Msg {
-		cliAgents := m.getCLIAgents()
-		var res memory.OrganizeResult
-		if m.selectedOrganizeAgent == -2 {
-			endpoint := m.selectedCustomURL
-			if endpoint == "" {
-				endpoint = "http://localhost:11434"
-			}
-			model := m.selectedCustomModel
-			if model == "" {
-				model = "qwen2.5-coder:7b"
-			}
-			res = m.store.OrganizeVaultWithCustom(endpoint, model)
-		} else if m.selectedOrganizeAgent >= 0 && m.selectedOrganizeAgent < len(cliAgents) {
-			target := cliAgents[m.selectedOrganizeAgent]
-			res = m.store.OrganizeVaultWithAgent(target.Name, target.Command)
-		} else {
-			res = m.store.OrganizeVaultWithAgent("Direct LLM", "")
-		}
-
-		if res.Success {
-			stats := organizeStats{
-				LastRun:    time.Now().Format("2006-01-02 15:04:05"),
-				TokensUsed: res.TokensUsed,
-			}
-			statsPath := filepath.Join(m.memoryPath, ".last_organize.json")
-			if sData, err := json.Marshal(stats); err == nil {
-				_ = os.WriteFile(statsPath, sData, 0644)
-			}
-		}
-
-		return settingsOrganizeResultMsg{
-			success:    res.Success,
-			msg:        res.Message,
-			diff:       res.Diff,
-			tokensUsed: res.TokensUsed,
-		}
-	}
-}
-
-// diffPopupWidth bounds the results popup to the terminal so a wide diff can
-// never push the box past the screen edge.
-func (m settingsModel) diffPopupWidth() int {
-	w := m.width
-	if w <= 0 {
-		w = 80
-	}
-	pw := w - 8
-	if pw > 64 {
-		pw = 64
-	}
-	if pw < 34 {
-		pw = 34
-	}
-	return pw
-}
-
-// diffViewportHeight bounds how many diff lines the popup shows at once, scaled
-// to the terminal height and capped so the popup never dominates the screen.
-func (m settingsModel) diffViewportHeight() int {
-	h := m.height
-	if h <= 0 {
-		h = 24
-	}
-	vp := h - 14 // leave room for title, header, footer, borders, margins
-	if vp < 6 {
-		vp = 6
-	}
-	if vp > 14 {
-		vp = 14
-	}
-	return vp
-}
-
 func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case customModelsFetchedMsg:
-		m.fetchingModels = false
-		if msg.success {
-			m.customModels = msg.models
-			m.customModelIdx = 0
-			m.customError = ""
-		} else {
-			m.customError = msg.err
-			m.customModels = nil
-		}
-		return m, nil
-	case settingsSpinTickMsg:
-		// Keep animating only while a run is in flight; stop cleanly otherwise.
-		if m.organizing {
-			m.organizeSpin++
-			return m, settingsSpinTick()
-		}
-		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -373,67 +134,15 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 	case settingsRefreshMsg:
 		m.agents = msg.agents
 		m.trust = msg.trust
-		m.lastRun = msg.stats.LastRun
-		m.lastTokensUsed = msg.stats.TokensUsed
 		m.agentBrands = msg.agentBrands
 		if m.agentCursor >= len(m.agentBrands) {
 			m.agentCursor = 0
 		}
-	case settingsOrganizeResultMsg:
-		m.organizing = false
-		m.organizeResult = msg.msg
-		m.organizeDiff = msg.diff
-		m.diffScrollY = 0
-		if msg.success {
-			m.lastTokensUsed = msg.tokensUsed
-			m.lastRun = time.Now().Format("2006-01-02 15:04:05")
-			if msg.diff != "" {
-				m.showingDiff = true
-			}
-		}
-		return m, m.Refresh()
+	case statuslineAppliedMsg:
+		// Result of an in-process statusline apply (Customizations sub-tab).
+		m.cust = m.cust.handleApplied(msg)
+		return m, nil
 	case tea.MouseMsg:
-		if m.showingDiff {
-			if msg.Type == tea.MouseWheelUp {
-				if m.diffScrollY > 0 {
-					m.diffScrollY--
-				}
-				return m, nil
-			}
-			if msg.Type == tea.MouseWheelDown {
-				lines := strings.Split(m.organizeDiff, "\n")
-				if m.diffScrollY < len(lines)-m.diffViewportHeight() {
-					m.diffScrollY++
-				}
-				return m, nil
-			}
-			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
-				// Click outside the (dynamically sized) popup closes it.
-				popW := m.diffPopupWidth()
-				popH := m.diffViewportHeight() + 10 // title+header+footer+borders
-				popX := (m.width - popW) / 2
-				if popX < 2 {
-					popX = 2
-				}
-				popY := 3
-				if msg.X < popX || msg.X > popX+popW || msg.Y < popY || msg.Y > popY+popH {
-					m.showingDiff = false
-					return m, nil
-				}
-			}
-			return m, nil
-		}
-		if m.confirmingRun {
-			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
-				m.confirmingRun = false
-				return m, nil
-			}
-			return m, nil
-		}
-		if m.configuringCustom {
-			return m, nil
-		}
-		// Sub-tab bar + Agents-tab clicks (handled before the General hit-test).
 		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
 			w := m.width
 			if w <= 0 {
@@ -445,7 +154,6 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			viewLines := strings.Split(m.View(), "\n")
 			clickedY := msg.Y - contentOffsetY
 
-			// The sub-tab bar is the only row carrying both section labels.
 			for idx, line := range viewLines {
 				clean := stripANSI(line)
 				if strings.Contains(clean, subTabGeneralLabel) && strings.Contains(clean, subTabAgentsLabel) {
@@ -478,40 +186,16 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				}
 				return m, nil
 			}
-		}
-		if m.subTab == 0 && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
-			w := m.width
-			if w <= 0 {
-				w = 80
-			}
-			banner := renderBanner(w)
-			tabRow := strings.Count(banner, "\n")
-			contentOffsetY := tabRow + 4
-
-			viewStr := m.View()
-			viewLines := strings.Split(viewStr, "\n")
 
 			defaultTrustLineY := -1
-			agentToUseLineY := -1
-			runButtonLineY := -1
 			liveUsageLineY := -1
 			providerLineYs := make(map[string]int)
-
 			uniqueAgents := m.getUniqueAgents()
 			for idx, line := range viewLines {
 				clean := stripANSI(line)
 				if strings.Contains(clean, "Default Trust") {
 					defaultTrustLineY = idx
 				}
-				if strings.Contains(clean, "Agent to Use:") {
-					agentToUseLineY = idx
-				}
-				if strings.Contains(clean, "RUN ON-DEMAND ORGANIZATION") {
-					runButtonLineY = idx
-				}
-				// The toggle row carries the [ON]/[OFF] badge; the heading line
-				// ("Live Usage") and the description lines are excluded so only the
-				// interactive row hit-tests.
 				if strings.Contains(clean, "Live Usage") &&
 					(strings.Contains(clean, "[ON]") || strings.Contains(clean, "[OFF]")) {
 					liveUsageLineY = idx
@@ -523,27 +207,19 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				}
 			}
 
-			clickedViewLineY := msg.Y - contentOffsetY
-
-			if clickedViewLineY == defaultTrustLineY && defaultTrustLineY != -1 {
+			if clickedY == defaultTrustLineY && defaultTrustLineY != -1 {
 				m.cursor = 0
 				m.trust.Default = m.cycleTrust(m.trust.Default)
 				return m, m.saveTrust()
 			}
-
 			for provider, lineY := range providerLineYs {
-				if clickedViewLineY == lineY {
-					providerIdx := -1
+				if clickedY == lineY {
 					for i, a := range uniqueAgents {
 						if a.Provider == provider {
-							providerIdx = i
+							m.cursor = i + 1
 							break
 						}
 					}
-					if providerIdx != -1 {
-						m.cursor = providerIdx + 1
-					}
-
 					if m.trust.Providers == nil {
 						m.trust.Providers = make(map[string]map[string]string)
 					}
@@ -559,34 +235,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 					return m, m.saveTrust()
 				}
 			}
-
-			if (clickedViewLineY == agentToUseLineY || clickedViewLineY == agentToUseLineY+1) && agentToUseLineY != -1 {
-				m.cursor = len(uniqueAgents) + 2
-				dir := 1
-				if msg.X < 55 {
-					dir = -1
-				}
-				m.cycleOrganizeAgent(dir)
-				return m, nil
-			}
-
-			if clickedViewLineY == runButtonLineY && runButtonLineY != -1 {
-				m.cursor = len(uniqueAgents) + 3
-				if m.selectedOrganizeAgent == -2 && m.selectedCustomURL == "" {
-					m.configuringCustom = true
-					m.customModels = nil
-					m.customError = ""
-					m.fetchingModels = false
-					return m, nil
-				}
-				if !m.organizing {
-					m.confirmingRun = true
-					m.organizeResult = ""
-					return m, nil
-				}
-			}
-
-			if clickedViewLineY == liveUsageLineY && liveUsageLineY != -1 {
+			if clickedY == liveUsageLineY && liveUsageLineY != -1 {
 				m.cursor = len(uniqueAgents) + 1
 				return m, m.toggleLiveUsage()
 			}
@@ -594,89 +243,24 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 	case tea.KeyMsg:
 		uniqueAgents := m.getUniqueAgents()
 
-		if m.showingDiff {
-			switch msg.String() {
-			case "up", "k":
-				if m.diffScrollY > 0 {
-					m.diffScrollY--
-				}
-				return m, nil
-			case "down", "j":
-				lines := strings.Split(m.organizeDiff, "\n")
-				if m.diffScrollY < len(lines)-m.diffViewportHeight() {
-					m.diffScrollY++
-				}
-				return m, nil
-			case "esc", "enter", "q", " ":
-				m.showingDiff = false
-				return m, nil
-			default:
-				return m, nil
-			}
-		}
-
-		if m.confirmingRun {
-			switch msg.String() {
-			case "y", "Y", "enter":
-				m.confirmingRun = false
-				m.organizing = true
-				m.organizeResult = ""
-				m.organizeSpin = 0
-				return m, tea.Batch(m.runOrganize(), settingsSpinTick())
-			case "n", "N", "esc":
-				m.confirmingRun = false
-				return m, nil
-			default:
-				return m, nil
-			}
-		}
-
-		if m.configuringCustom {
-			switch msg.String() {
-			case "esc":
-				m.configuringCustom = false
-				return m, nil
-			case "up", "k":
-				if len(m.customModels) > 0 {
-					if m.customModelIdx > 0 {
-						m.customModelIdx--
-					}
-				}
-				return m, nil
-			case "down", "j":
-				if len(m.customModels) > 0 {
-					if m.customModelIdx < len(m.customModels)-1 {
-						m.customModelIdx++
-					}
-				}
-				return m, nil
-			case "enter":
-				if len(m.customModels) > 0 {
-					m.selectedCustomURL = m.customURL
-					m.selectedCustomModel = m.customModels[m.customModelIdx]
-					m.configuringCustom = false
-					m.organizeResult = fmt.Sprintf("✓ Endpoint %s and model %s configured!", m.selectedCustomURL, m.selectedCustomModel)
+		if m.subTab == 2 {
+			// The confirm dialog / in-progress apply own the keyboard; otherwise
+			// ←/→ switch sections.
+			if !m.cust.capturesInput() {
+				switch msg.String() {
+				case "h", "left":
+					m.subTab = 1
 					return m, nil
-				} else if !m.fetchingModels {
-					m.fetchingModels = true
-					m.customError = ""
-					return m, m.fetchCustomModels(m.customURL)
+				case "l", "right":
+					m.subTab = 0
+					return m, nil
 				}
-				return m, nil
-			case "backspace":
-				if len(m.customModels) == 0 && len(m.customURL) > 0 {
-					m.customURL = m.customURL[:len(m.customURL)-1]
-				}
-				return m, nil
-			default:
-				if len(m.customModels) == 0 && len(msg.String()) == 1 {
-					m.customURL += msg.String()
-				}
-				return m, nil
 			}
+			var cmd tea.Cmd
+			m.cust, cmd = m.cust.handleKey(msg)
+			return m, cmd
 		}
 
-		// Agents sub-tab: navigate the brand list and toggle dashboard visibility.
 		if m.subTab == 1 {
 			switch msg.String() {
 			case "j", "down":
@@ -687,8 +271,11 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				if m.agentCursor > 0 {
 					m.agentCursor--
 				}
-			case "h", "left", "l", "right":
+			case "h", "left":
 				m.subTab = 0
+			case "l", "right":
+				m.subTab = 2
+				m.cust.refresh()
 			case "enter", " ":
 				if m.agentCursor < len(m.agentBrands) {
 					m.toggleAgentHidden(m.agentBrands[m.agentCursor].id)
@@ -699,7 +286,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 
 		switch msg.String() {
 		case "j", "down":
-			max := len(uniqueAgents) + 3
+			max := len(uniqueAgents) + 1
 			if m.cursor < max {
 				m.cursor++
 			}
@@ -708,17 +295,10 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				m.cursor--
 			}
 		case "h", "left":
-			if m.cursor == len(uniqueAgents)+2 {
-				m.cycleOrganizeAgent(-1)
-			} else {
-				m.subTab = 1
-			}
+			m.subTab = 2
+			m.cust.refresh()
 		case "l", "right":
-			if m.cursor == len(uniqueAgents)+2 {
-				m.cycleOrganizeAgent(1)
-			} else {
-				m.subTab = 1
-			}
+			m.subTab = 1
 		case "enter", " ":
 			if m.cursor == 0 {
 				m.trust.Default = m.cycleTrust(m.trust.Default)
@@ -738,33 +318,6 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				}
 				m.trust.Providers[provider]["trust_level"] = next
 				return m, m.saveTrust()
-			} else if m.cursor == len(uniqueAgents)+2 {
-				if m.selectedOrganizeAgent == -2 {
-					m.configuringCustom = true
-					m.customURL = "http://localhost:11434"
-					if m.selectedCustomURL != "" {
-						m.customURL = m.selectedCustomURL
-					}
-					m.customModels = nil
-					m.customError = ""
-					m.fetchingModels = false
-					return m, nil
-				}
-				m.cycleOrganizeAgent(1)
-				return m, nil
-			} else if m.cursor == len(uniqueAgents)+3 {
-				if m.selectedOrganizeAgent == -2 && m.selectedCustomURL == "" {
-					m.configuringCustom = true
-					m.customModels = nil
-					m.customError = ""
-					m.fetchingModels = false
-					return m, nil
-				}
-				if !m.organizing {
-					m.confirmingRun = true
-					m.organizeResult = ""
-					return m, nil
-				}
 			} else if m.cursor == len(uniqueAgents)+1 {
 				return m, m.toggleLiveUsage()
 			}
@@ -806,31 +359,6 @@ func (m *settingsModel) toggleAgentHidden(id string) {
 	_ = config.SaveSettings(next)
 }
 
-func (m *settingsModel) cycleOrganizeAgent(dir int) {
-	cliAgents := m.getCLIAgents()
-
-	if len(cliAgents) == 0 {
-		m.selectedOrganizeAgent = -2
-		return
-	}
-
-	m.selectedOrganizeAgent += dir
-
-	if m.selectedOrganizeAgent == -1 {
-		if dir > 0 {
-			m.selectedOrganizeAgent = 0
-		} else {
-			m.selectedOrganizeAgent = -2
-		}
-	}
-
-	if m.selectedOrganizeAgent < -2 {
-		m.selectedOrganizeAgent = len(cliAgents) - 1
-	} else if m.selectedOrganizeAgent >= len(cliAgents) {
-		m.selectedOrganizeAgent = -2
-	}
-}
-
 func (m settingsModel) cycleTrust(current string) string {
 	switch current {
 	case "auto":
@@ -847,13 +375,15 @@ func (m settingsModel) cycleTrust(current string) string {
 func (m settingsModel) saveTrust() tea.Cmd {
 	trust := m.trust
 	memPath := m.memoryPath
+	logger := m.logger
 	return func() tea.Msg {
 		trustPath := filepath.Join(memPath, "trust.yaml")
 		data, err := yaml.Marshal(&trust)
 		if err == nil {
-			os.WriteFile(trustPath, data, 0644)
+			_ = os.WriteFile(trustPath, data, 0644)
 		}
-		return settingsRefreshMsg{agents: detect.InstalledAgents(), trust: trust}
+		agents := detect.InstalledAgents()
+		return settingsRefreshMsg{agents: agents, trust: trust, agentBrands: buildAgentSettingsBrands(agents, logger)}
 	}
 }
 
@@ -862,6 +392,7 @@ func (m settingsModel) saveTrust() tea.Cmd {
 const (
 	subTabGeneralLabel = "General"
 	subTabAgentsLabel  = "Agents"
+	subTabCustomLabel  = "Customizations"
 )
 
 // renderSubTabBar draws the "General | Agents" section switcher, highlighting
@@ -870,15 +401,20 @@ const (
 func (m settingsModel) renderSubTabBar() string {
 	active := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Underline(true)
 	inactive := StyleSubtitle
-	gen, ag := inactive.Render(subTabGeneralLabel), inactive.Render(subTabAgentsLabel)
-	if m.subTab == 1 {
+	gen := inactive.Render(subTabGeneralLabel)
+	ag := inactive.Render(subTabAgentsLabel)
+	cu := inactive.Render(subTabCustomLabel)
+	switch m.subTab {
+	case 1:
 		ag = active.Render(subTabAgentsLabel)
-	} else {
+	case 2:
+		cu = active.Render(subTabCustomLabel)
+	default:
 		gen = active.Render(subTabGeneralLabel)
 	}
 	sep := StyleSubtitle.Render("    ")
 	hint := StyleSubtitle.Render("   ←/→ switch section")
-	return "  " + gen + sep + ag + hint
+	return "  " + gen + sep + ag + sep + cu + hint
 }
 
 // agentsView renders the Agents sub-tab: a toggleable list controlling which
@@ -968,6 +504,15 @@ func (m settingsModel) View() string {
 	if m.subTab == 1 {
 		return m.agentsView()
 	}
+	if m.subTab == 2 {
+		var sb strings.Builder
+		sb.WriteString(StyleTitle.Render("Settings & Access Configuration"))
+		sb.WriteString("\n\n")
+		sb.WriteString(m.renderSubTabBar())
+		sb.WriteString("\n\n")
+		sb.WriteString(m.cust.panel())
+		return sb.String()
+	}
 
 	cyan := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
 	purple := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary)
@@ -981,39 +526,17 @@ func (m settingsModel) View() string {
 	if w <= 0 {
 		w = 80
 	}
-
 	stacked := w > 0 && w < 95
-
-	// Width of right panel card
-	var rightInnerWidth int
-	if stacked {
-		rightInnerWidth = w - 10
-		if rightInnerWidth < 30 {
-			rightInnerWidth = 40
-		}
-	} else {
-		rightInnerWidth = w - 60
-		if rightInnerWidth < 30 {
-			rightInnerWidth = 30
-		}
-	}
-
 	uniqueAgents := m.getUniqueAgents()
-
-	// compact: on shorter terminals, tighten the General view so it FITS without
-	// scrolling — drop box padding, blank separators, and verbose help, and lay the
-	// agent overrides in two columns. The richer spacing returns on tall terminals.
 	compact := m.height > 0 && m.height < 48
 
-	// 1. LEFT PANEL: Trust & Access Controls
-	var leftLines []string
-	leftLines = append(leftLines, bold.Render("Trust & Access Controls"))
+	var lines []string
+	lines = append(lines, bold.Render("Trust & Access Controls"))
 	if !compact {
-		leftLines = append(leftLines, dim.Render("Manage active security levels"))
+		lines = append(lines, dim.Render("Manage active security levels"))
 	}
-	leftLines = append(leftLines, "")
+	lines = append(lines, "")
 
-	// Default Trust row
 	cursorDefault := "  "
 	if m.cursor == 0 {
 		cursorDefault = cyan.Render("▸ ")
@@ -1022,40 +545,20 @@ func (m settingsModel) View() string {
 	if defaultTrust == "" {
 		defaultTrust = "require_approval"
 	}
-
-	// Pad fields correctly accounting for ANSI escape sequences
-	defaultTrustRow := fmt.Sprintf("%s%-18s %s",
-		cursorDefault,
-		"Default Trust",
-		m.renderTrust(defaultTrust, green, yellow, red),
-	)
+	defaultTrustRow := fmt.Sprintf("%s%-18s %s", cursorDefault, "Default Trust", m.renderTrust(defaultTrust, green, yellow, red))
 	if m.cursor == 0 {
-		defaultTrustRow = fmt.Sprintf("%s%s %s",
-			cursorDefault,
-			bold.Render("Default Trust"),
-			m.renderTrust(defaultTrust, green, yellow, red),
-		)
+		defaultTrustRow = fmt.Sprintf("%s%s %s", cursorDefault, bold.Render("Default Trust"), m.renderTrust(defaultTrust, green, yellow, red))
 	}
-	leftLines = append(leftLines, defaultTrustRow)
+	lines = append(lines, defaultTrustRow)
 	if !compact {
-		leftLines = append(leftLines, "")
+		lines = append(lines, "")
 	}
-	leftLines = append(leftLines, purple.Render("   Agent Security Overrides"))
+	lines = append(lines, purple.Render("   Agent Security Overrides"))
 	if !compact {
-		leftLines = append(leftLines, "")
+		lines = append(lines, "")
 	}
 
-	// agentCell renders one override row: cursor marker + (possibly truncated) name
-	// + trust badge. Two-column mode uses a narrower name field.
 	twoCol := compact && !stacked && len(uniqueAgents) > 6
-	if twoCol {
-		// The left box widens to hold two columns, so shrink the right box to keep
-		// the side-by-side pair within the terminal width (with a small margin).
-		rightInnerWidth = w - 70
-		if rightInnerWidth < 28 {
-			rightInnerWidth = 28
-		}
-	}
 	agentCell := func(i int) string {
 		a := uniqueAgents[i]
 		cur := "  "
@@ -1084,8 +587,6 @@ func (m settingsModel) View() string {
 	}
 
 	if twoCol {
-		// Column-major so ↑/↓ walks down column one, then column two. The flat cursor
-		// index still highlights the right agent wherever it lands.
 		rows := (len(uniqueAgents) + 1) / 2
 		const colW = 27
 		for r := 0; r < rows; r++ {
@@ -1093,20 +594,19 @@ func (m settingsModel) View() string {
 			if r+rows < len(uniqueAgents) {
 				line += agentCell(r + rows)
 			}
-			leftLines = append(leftLines, line)
+			lines = append(lines, line)
 		}
 	} else {
 		for i := range uniqueAgents {
-			leftLines = append(leftLines, agentCell(i))
+			lines = append(lines, agentCell(i))
 		}
 	}
 
-	// Live Usage toggle (opt-in network panel). Cursor sits last.
-	leftLines = append(leftLines, "")
-	leftLines = append(leftLines, purple.Render("   Live Usage"))
+	lines = append(lines, "")
+	lines = append(lines, purple.Render("   Live Usage"))
 	if !compact {
-		leftLines = append(leftLines, dim.Render("   Calls each agent's provider with its stored"))
-		leftLines = append(leftLines, dim.Render("   login — off keeps Auxly fully local."))
+		lines = append(lines, dim.Render("   Calls each agent's provider with its stored"))
+		lines = append(lines, dim.Render("   login — off keeps Auxly fully local."))
 	}
 	cursorLive := "  "
 	if m.cursor == len(uniqueAgents)+1 {
@@ -1122,162 +622,32 @@ func (m settingsModel) View() string {
 	} else {
 		liveLabel = fmt.Sprintf("%-18s", liveLabel)
 	}
-	leftLines = append(leftLines, fmt.Sprintf("%s%s %s", cursorLive, liveLabel, liveState))
+	lines = append(lines, fmt.Sprintf("%s%s %s", cursorLive, liveLabel, liveState))
 
-	// 2. RIGHT PANEL: Memory Organization
-	var rightLines []string
-	rightLines = append(rightLines, bold.Render("On-Demand Memory Organization"))
-	rightLines = append(rightLines, dim.Render("De-duplicate and summarize facts"))
-	rightLines = append(rightLines, "")
-
-	cliAgents := m.getCLIAgents()
-
-	// Determine active agent string selection
-	agentSelectStr := "[ Custom LLM Endpoint ]"
-	if m.selectedOrganizeAgent == -2 {
-		if m.selectedCustomModel != "" {
-			agentSelectStr = fmt.Sprintf("[ Custom: %s ]", m.selectedCustomModel)
-		}
-	} else if m.selectedOrganizeAgent >= 0 && m.selectedOrganizeAgent < len(cliAgents) {
-		agentSelectStr = fmt.Sprintf("[ %s ]", cliAgents[m.selectedOrganizeAgent].Name)
+	padW := w - 10
+	if padW < 40 {
+		padW = 40
 	}
-
-	cursorAgentSelect := "  "
-	if m.cursor == len(uniqueAgents)+2 {
-		cursorAgentSelect = cyan.Render("▸ ")
+	if !stacked && !twoCol && padW > 54 {
+		padW = 54
 	}
-
-	cursorRun := "  "
-	if m.cursor == len(uniqueAgents)+3 {
-		cursorRun = cyan.Render("▸ ")
+	if twoCol {
+		padW = 54
 	}
-
-	rightLines = append(rightLines, fmt.Sprintf("  %sAgent to Use:", cursorAgentSelect))
-	rightLines = append(rightLines, fmt.Sprintf("  %s", cyan.Render("◀ "+agentSelectStr+" ▶")))
-	rightLines = append(rightLines, "")
-
-	if m.organizing {
-		spin := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary).Render(spinnerFrame(m.organizeSpin))
-		rightLines = append(rightLines, fmt.Sprintf("  %s  %s", spin, yellow.Render("Organizing memory vault… please wait")))
-	} else {
-		// A beautiful clickable button styling
-		btnStyle := lipgloss.NewStyle().
-			Background(ColorPrimary).
-			Foreground(lipgloss.Color("255")).
-			Bold(true).
-			Padding(0, 3)
-		if m.cursor == len(uniqueAgents)+3 {
-			btnStyle = btnStyle.Background(ColorSecondary)
-		}
-		rightLines = append(rightLines, fmt.Sprintf("  %s %s", cursorRun, btnStyle.Render(" RUN ON-DEMAND ORGANIZATION ")))
+	var padded []string
+	for _, line := range lines {
+		padded = append(padded, padLine(line, padW))
 	}
-	rightLines = append(rightLines, "")
-
-	if m.organizeResult != "" {
-		resStyle := green
-		if !strings.HasPrefix(m.organizeResult, "✓") {
-			resStyle = red
-		}
-		rightLines = append(rightLines, fmt.Sprintf("  %s", resStyle.Render(m.organizeResult)))
-		rightLines = append(rightLines, "")
-	}
-
-	if !compact {
-		rightLines = append(rightLines, dim.Render("How it works:"))
-		rightLines = append(rightLines, dim.Render("Combines chronological facts, resolves duplicates, and refines"))
-		rightLines = append(rightLines, dim.Render("sections into clean, structured summaries using a local LLM."))
-		rightLines = append(rightLines, dim.Render("Does NOT overwrite your core identity, projects, or active scopes."))
-		rightLines = append(rightLines, "")
-	}
-
-	estTokens := m.store.GetEstimatedTokens()
-	if m.lastRun != "" {
-		rightLines = append(rightLines, fmt.Sprintf("%-23s %s", dim.Render("Last Run:"), bold.Render(m.lastRun)))
-		tokenStr := fmt.Sprintf("%d tokens", m.lastTokensUsed)
-		if m.lastTokensUsed == 0 {
-			tokenStr = "Unknown"
-		}
-		rightLines = append(rightLines, fmt.Sprintf("%-23s %s", dim.Render("Actual Tokens Used:"), bold.Render(tokenStr)))
-	}
-	rightLines = append(rightLines, fmt.Sprintf("%-23s %s", dim.Render("Estimated Token Cost:"), bold.Render(fmt.Sprintf("~%d tokens", estTokens))))
-	rightLines = append(rightLines, fmt.Sprintf("%-23s %s", dim.Render("Recommended Frequency:"), bold.Render("Optional; once a week or after ~30 writes.")))
-
-	// Wrap long lines in rightLines that exceed rightInnerWidth
-	var wrappedRightLines []string
-	for _, line := range rightLines {
-		if visibleWidth(line) > rightInnerWidth {
-			wrapped := wrapText(line, rightInnerWidth)
-			wrappedRightLines = append(wrappedRightLines, wrapped...)
-		} else {
-			wrappedRightLines = append(wrappedRightLines, line)
-		}
-	}
-	rightLines = wrappedRightLines
-
-	// Mathematical Height Alignment
-	if !stacked {
-		if len(leftLines) < len(rightLines) {
-			diff := len(rightLines) - len(leftLines)
-			for i := 0; i < diff; i++ {
-				leftLines = append(leftLines, "")
-			}
-		} else if len(rightLines) < len(leftLines) {
-			diff := len(leftLines) - len(rightLines)
-			for i := 0; i < diff; i++ {
-				rightLines = append(rightLines, "")
-			}
-		}
-	}
-
-	var leftPadW int
-	if stacked {
-		leftPadW = w - 10
-		if leftPadW < 40 {
-			leftPadW = 40
-		}
-	} else if twoCol {
-		leftPadW = 54 // wider box to hold two agent columns (we have the width)
-	} else {
-		leftPadW = 40
-	}
-
-	var paddedLeftLines []string
-	for _, line := range leftLines {
-		paddedLeftLines = append(paddedLeftLines, padLine(line, leftPadW))
-	}
-
-	var paddedRightLines []string
-	for _, line := range rightLines {
-		paddedRightLines = append(paddedRightLines, padLine(line, rightInnerWidth))
-	}
-
-	// Drop the boxes' vertical padding when compact to reclaim two rows.
 	vPad := 1
 	if compact {
 		vPad = 0
 	}
-	leftColStyle := lipgloss.NewStyle().
+	panel := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPrimary).
-		Padding(vPad, 2)
+		Padding(vPad, 2).
+		Render(strings.Join(padded, "\n"))
 
-	leftPanel := leftColStyle.Render(strings.Join(paddedLeftLines, "\n"))
-
-	rightColStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorDim).
-		Padding(vPad, 2)
-
-	rightPanel := rightColStyle.Render(strings.Join(paddedRightLines, "\n"))
-
-	var content string
-	if !stacked {
-		content = lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, "  ", rightPanel)
-	} else {
-		content = lipgloss.JoinVertical(lipgloss.Left, leftPanel, "", rightPanel)
-	}
-
-	// The section title + sub-tab bar use tighter spacing when compact.
 	titleSep := "\n\n"
 	if compact {
 		titleSep = "\n"
@@ -1287,182 +657,8 @@ func (m settingsModel) View() string {
 	sb.WriteString(titleSep)
 	sb.WriteString(m.renderSubTabBar())
 	sb.WriteString(titleSep)
-	sb.WriteString(content)
-
-	fullView := sb.String()
-
-	if m.configuringCustom {
-		var pb strings.Builder
-		pb.WriteString(bold.Render("⚙️  Configure Custom LLM Endpoint") + "\n")
-		pb.WriteString(dim.Render("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n\n")
-
-		pb.WriteString("Endpoint URL (Press [Enter] to fetch models):\n")
-		urlColor := cyan
-		if m.fetchingModels {
-			urlColor = yellow
-		}
-		pb.WriteString(urlColor.Render("  "+m.customURL) + "\n\n")
-
-		if m.fetchingModels {
-			pb.WriteString(yellow.Render(" ⏳ Querying available models from endpoint...") + "\n\n")
-		} else if m.customError != "" {
-			pb.WriteString(red.Render(" ⚠️ Error: "+m.customError) + "\n\n")
-		} else if len(m.customModels) > 0 {
-			pb.WriteString(green.Render(" ✓ Successfully loaded ") + bold.Render(fmt.Sprintf("%d models", len(m.customModels))) + ":\n")
-			pb.WriteString(dim.Render(" (Use Up/Down arrows to select model & Enter to save)") + "\n\n")
-
-			start := m.customModelIdx - 1
-			if start < 0 {
-				start = 0
-			}
-			end := start + 4
-			if end > len(m.customModels) {
-				end = len(m.customModels)
-				start = end - 4
-				if start < 0 {
-					start = 0
-				}
-			}
-
-			for i := start; i < end; i++ {
-				cursor := "  "
-				if i == m.customModelIdx {
-					cursor = cyan.Render("▸ ")
-				}
-				modelName := m.customModels[i]
-				if i == m.customModelIdx {
-					pb.WriteString(fmt.Sprintf("%s%s\n", cursor, bold.Render(modelName)))
-				} else {
-					pb.WriteString(fmt.Sprintf("%s%s\n", cursor, dim.Render(modelName)))
-				}
-			}
-			pb.WriteString("\n")
-		} else {
-			pb.WriteString(dim.Render(" Type local AI endpoint URL (e.g. http://localhost:11434)") + "\n\n")
-		}
-
-		pb.WriteString(dim.Render(" [Enter]: Confirm/Fetch • [Esc]: Cancel & Return"))
-
-		popupStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorPrimary).
-			Background(lipgloss.Color("0")).
-			Padding(1, 2).
-			Width(52)
-
-		popupStr := popupStyle.Render(pb.String())
-		fullView = overlayPopup(fullView, popupStr, 12, 5)
-	}
-
-	if m.showingDiff {
-		popW := m.diffPopupWidth()
-		innerW := popW - 6 // account for border (2) + horizontal padding (4)
-		if innerW < 20 {
-			innerW = 20
-		}
-		viewportHeight := m.diffViewportHeight()
-
-		var pb strings.Builder
-		pb.WriteString(bold.Render("🎉 Organization Results") + "\n")
-		pb.WriteString(dim.Render(strings.Repeat("━", innerW)) + "\n\n")
-		pb.WriteString(green.Render("✓ Deduplication & consolidation summary:") + "\n\n")
-
-		lines := strings.Split(m.organizeDiff, "\n")
-
-		// Clamp scroll to the dynamic viewport.
-		maxScroll := len(lines) - viewportHeight
-		if maxScroll < 0 {
-			maxScroll = 0
-		}
-		if m.diffScrollY > maxScroll {
-			m.diffScrollY = maxScroll
-		}
-		if m.diffScrollY < 0 {
-			m.diffScrollY = 0
-		}
-		endIdx := m.diffScrollY + viewportHeight
-		if endIdx > len(lines) {
-			endIdx = len(lines)
-		}
-
-		for i := m.diffScrollY; i < endIdx; i++ {
-			// Truncate each line to the inner width so a long diff line can never
-			// widen the popup past the terminal.
-			line := clampLine(lines[i], innerW)
-			switch {
-			case strings.HasPrefix(lines[i], "- "):
-				pb.WriteString(red.Render(line) + "\n")
-			case strings.HasPrefix(lines[i], "+ "):
-				pb.WriteString(green.Render(line) + "\n")
-			default:
-				pb.WriteString(dim.Render(line) + "\n")
-			}
-		}
-
-		if len(lines) > viewportHeight {
-			pb.WriteString(dim.Render(fmt.Sprintf(" (%d-%d of %d) • ↑/↓ · j/k · wheel", m.diffScrollY+1, endIdx, len(lines))) + "\n")
-		} else {
-			pb.WriteString("\n")
-		}
-		pb.WriteString(dim.Render(" [Esc]/[Enter] or click outside to close"))
-
-		popupStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorSuccess).
-			Background(lipgloss.Color("0")).
-			Padding(1, 2).
-			Width(popW)
-
-		popupStr := popupStyle.Render(pb.String())
-		popX := (m.width - popW) / 2
-		if popX < 2 {
-			popX = 2
-		}
-		fullView = overlayPopup(fullView, popupStr, popX, 3)
-	}
-
-	if m.confirmingRun {
-		var pb strings.Builder
-		pb.WriteString(bold.Render("🤔 Confirm Memory Vault Organization") + "\n")
-		pb.WriteString(dim.Render("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━") + "\n\n")
-
-		pb.WriteString("Are you sure you want to run memory optimization?\n\n")
-
-		agentStr := "[ Local LLM / Direct API ]"
-		cliAgents := m.getCLIAgents()
-		if m.selectedOrganizeAgent == -2 {
-			if m.selectedCustomModel != "" {
-				agentStr = fmt.Sprintf("Custom Model: %s", m.selectedCustomModel)
-			} else {
-				agentStr = "Custom LLM Endpoint"
-			}
-		} else if m.selectedOrganizeAgent >= 0 && m.selectedOrganizeAgent < len(cliAgents) {
-			agentStr = cliAgents[m.selectedOrganizeAgent].Name
-		}
-
-		pb.WriteString(fmt.Sprintf("%-18s %s\n", dim.Render("Target Agent:"), bold.Render(agentStr)))
-
-		estCost := m.store.GetEstimatedTokens()
-		pb.WriteString(fmt.Sprintf("%-18s %s\n\n", dim.Render("Est. Token Cost:"), bold.Render(fmt.Sprintf("~%d tokens", estCost))))
-
-		pb.WriteString(dim.Render("This will scan all files, de-duplicate chronological") + "\n")
-		pb.WriteString(dim.Render("facts, and consolidate them into structured summaries.") + "\n\n")
-
-		pb.WriteString(bold.Render("  [Y] Yes, Run") + "   " + dim.Render("[N] Cancel") + "\n\n")
-		pb.WriteString(dim.Render(" Press [Y] or [Enter] to run, [N] or [Esc] to cancel"))
-
-		popupStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(ColorWarning).
-			Background(lipgloss.Color("0")).
-			Padding(1, 2).
-			Width(48)
-
-		popupStr := popupStyle.Render(pb.String())
-		fullView = overlayPopup(fullView, popupStr, 14, 5)
-	}
-
-	return fullView
+	sb.WriteString(panel)
+	return sb.String()
 }
 
 func (m settingsModel) renderTrust(trust string, green, yellow, red lipgloss.Style) string {

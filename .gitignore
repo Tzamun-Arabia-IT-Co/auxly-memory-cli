@@ -53,8 +53,10 @@ Thumbs.db
 .codex/
 brand-logos/
 
-# Internal planning doc kept locally, not shipped in the public repo.
-docs/memory-rework-plan.md
+# Internal planning/design docs (specs, roadmaps, design drafts) kept locally —
+# never shipped in the public repo. User-facing docs live at the repo root
+# (README.md, CHANGELOG.md). The whole docs/ tree is internal by policy.
+docs/
 
 # Generated workspace agent rules (written by `auxly setup`/`init`, create-if-missing).
 # Not source — keep them out of the tree so setup never dirties the repo.
@@ -64,3 +66,6 @@ docs/memory-rework-plan.md
 .geminirules
 .clauderules
 .codexrules
+
+# agent-tooling project-id cache (not part of the repo)
+cache/
