@@ -498,6 +498,14 @@ func init() {
 	hostCmd.AddCommand(hostReconnectCmd)
 	hostCmd.AddCommand(hostForgetCmd)
 
+	hostVersionsCmd.Flags().BoolVar(&hostVersionsJSON, "json", false, "emit machine-readable JSON (used by the TUI)")
+	hostUpdateCmd.Flags().BoolVar(&hostUpdateAll, "all", false, "update every connected box that is outdated and idle")
+	hostUpdateCmd.Flags().BoolVar(&hostUpdateForce, "force", false, "update even a box that is serving a live session (single-box only)")
+	hostStatuslineCmd.Flags().BoolVar(&hostStatuslineAll, "all", false, "push the statusline to every connected box")
+	hostCmd.AddCommand(hostVersionsCmd)
+	hostCmd.AddCommand(hostUpdateCmd)
+	hostCmd.AddCommand(hostStatuslineCmd)
+
 	rootCmd.AddCommand(hostCmd)
 }
 

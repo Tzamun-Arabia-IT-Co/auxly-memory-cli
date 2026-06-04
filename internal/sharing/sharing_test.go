@@ -164,3 +164,47 @@ func TestHostMatches(t *testing.T) {
 		}
 	}
 }
+
+// TestWithDefaultWrite covers the opt-in default-write upgrade (config
+// DefaultRemoteWrite). It only applies to a MATCHED share with no explicit write
+// config, never broadens an authoritative per-file WriteFiles grant, and never
+// synthesizes write for an unmatched (nil) share.
+func TestWithDefaultWrite(t *testing.T) {
+	t.Run("nil share stays nil (unmatched never gets write)", func(t *testing.T) {
+		if got := WithDefaultWrite(nil); got != nil {
+			t.Errorf("WithDefaultWrite(nil) = %v, want nil", got)
+		}
+	})
+
+	t.Run("no explicit config is upgraded to write", func(t *testing.T) {
+		in := &ClientShare{}
+		got := WithDefaultWrite(in)
+		if !CanWrite(got, "infra.md", vault) {
+			t.Error("default-write should make a visible shared file writable")
+		}
+		if CanWrite(got, "personal.md", vault) {
+			t.Error("default-write must NOT expose personal files")
+		}
+		if in.Access == AccessWrite {
+			t.Error("WithDefaultWrite must not mutate its input (immutability)")
+		}
+	})
+
+	t.Run("explicit per-file WriteFiles stays authoritative", func(t *testing.T) {
+		in := &ClientShare{WriteFiles: []string{"projects.md"}}
+		got := WithDefaultWrite(in)
+		if !CanWrite(got, "projects.md", vault) {
+			t.Error("explicitly-granted file should remain writable")
+		}
+		if CanWrite(got, "infra.md", vault) {
+			t.Error("default-write must NOT broaden an explicit WriteFiles grant")
+		}
+	})
+
+	t.Run("already-write is unchanged", func(t *testing.T) {
+		got := WithDefaultWrite(&ClientShare{Access: AccessWrite})
+		if !CanWrite(got, "infra.md", vault) {
+			t.Error("an already-write share should stay writable")
+		}
+	})
+}

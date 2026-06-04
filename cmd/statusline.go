@@ -8,17 +8,19 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/statusline"
 	"github.com/spf13/cobra"
 )
 
 var (
-	statuslineSegment      bool
-	statuslineWrap         bool   // `statusline --wrap` render mode
-	statuslineInstallWrap  bool   // `statusline install --wrap` mode (distinct flag owner)
-	statuslineRefreshUsage bool   // hidden: refresh the usage cache, then exit (no render)
-	statuslineProvider     string // `--provider`: which agent's plan usage to show (default: auto)
-	statuslineAgent        string // `install/uninstall --agent`: claude|cursor|antigravity|all
+	statuslineSegment            bool
+	statuslineWrap               bool   // `statusline --wrap` render mode
+	statuslineInstallWrap        bool   // `statusline install --wrap` mode (distinct flag owner)
+	statuslineInstallEnableUsage bool   // `statusline install --enable-usage`: also opt into Live Usage
+	statuslineRefreshUsage       bool   // hidden: refresh the usage cache, then exit (no render)
+	statuslineProvider           string // `--provider`: which agent's plan usage to show (default: auto)
+	statuslineAgent              string // `install/uninstall --agent`: claude|cursor|antigravity|all
 )
 
 var statuslineCmd = &cobra.Command{
@@ -68,6 +70,7 @@ func init() {
 	statuslineCmd.Flags().BoolVar(&statuslineRefreshUsage, "refresh-usage", false, "")
 	_ = statuslineCmd.Flags().MarkHidden("refresh-usage")
 	statuslineInstallCmd.Flags().BoolVar(&statuslineInstallWrap, "wrap", false, "append Auxly to the agent's existing statusline instead of replacing it")
+	statuslineInstallCmd.Flags().BoolVar(&statuslineInstallEnableUsage, "enable-usage", false, "also turn on Live Usage so the statusline's plan-usage line renders")
 	statuslineInstallCmd.Flags().StringVar(&statuslineAgent, "agent", "claude", "agent to install for: claude|cursor|antigravity|all")
 	statuslineUninstallCmd.Flags().StringVar(&statuslineAgent, "agent", "claude", "agent to uninstall for: claude|cursor|antigravity|all")
 	statuslineCmd.AddCommand(statuslineInstallCmd)
@@ -98,6 +101,20 @@ func runStatuslineInstall() error {
 	mode := "full"
 	if statuslineInstallWrap {
 		mode = "wrap"
+	}
+	// Optionally turn Live Usage on so the statusline's plan-usage line actually
+	// renders (it's network-free at render time but only self-refreshes when Live
+	// Usage is opted in). Used by the host to carry its usage preference to a remote.
+	if statuslineInstallEnableUsage {
+		s := config.LoadSettings()
+		if !s.LiveUsage {
+			s.LiveUsage = true
+			if err := config.SaveSettings(s); err != nil {
+				fmt.Printf("⚠ could not enable Live Usage: %v\n", err)
+			} else {
+				fmt.Println("✓ Live Usage enabled — the statusline usage line will populate on the next renders.")
+			}
+		}
 	}
 	agents := resolveAgents(statuslineAgent)
 	if len(agents) == 0 {

@@ -149,6 +149,11 @@ func TestCanonicalProvider(t *testing.T) {
 		"":                "",
 		"  Claude ":       "claude",
 		"mystery":         "mystery",
+		// Phantom "Claude Code (Recommended)" from Memory Org folds into the real
+		// Claude Code brand; the "organize" op tag gets no card.
+		"Claude Code (Recommended)": "claude-code",
+		"claude code (recommended)": "claude-code",
+		"organize":                  "",
 	}
 	for in, want := range cases {
 		if got := canonicalProvider(in); got != want {

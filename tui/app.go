@@ -146,11 +146,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-		// The Customizations confirm dialog owns the keyboard (y/n/esc) so digits
-		// and tab don't switch screens out from under it.
+		// The Customizations confirm dialog / sync sub-panel own the keyboard (y/n/esc,
+		// ↑/↓, space) so digits and tab don't switch screens out from under them. This
+		// path early-returns, so refresh the viewport too — otherwise the page (rendered
+		// inside the content viewport) keeps showing a STALE frame and panel navigation
+		// (e.g. the sync box list) looks frozen even though the cursor advanced.
 		if m.screen == screenSettings && m.settings.cust.capturesInput() {
 			var cmd tea.Cmd
 			m.settings, cmd = m.settings.Update(msg)
+			if m.vpReady {
+				m.syncViewport()
+			}
 			return m, cmd
 		}
 

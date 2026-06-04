@@ -950,7 +950,11 @@ func (m organizeModel) submit() (organizeModel, tea.Cmd) {
 	// audit log so the write shows up as durable history in the Audit Trail tab. The
 	// per-file diff is logged too, so the user can inspect exactly what was written.
 	m.diff = m.store.ApplyOrganizeChanges(approved)
-	provider := m.runProvider
+	// Attribute the write to a CANONICAL brand id, never the raw display label —
+	// logging "Claude Code (Recommended)" created a phantom agent card. canonicalProvider
+	// folds that label into the real "claude-code" brand (and leaves "antigravity" etc.
+	// untouched); an unmappable label falls back to the non-card "organize" tag.
+	provider := canonicalProvider(m.runProvider)
 	if provider == "" {
 		provider = "organize"
 	}

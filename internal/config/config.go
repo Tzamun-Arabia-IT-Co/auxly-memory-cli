@@ -43,6 +43,35 @@ type Settings struct {
 	// to keep current automatically.
 	AutoUpdate bool `json:"autoUpdate,omitempty"`
 
+	// UpdateRemotesOnConnect opts into keeping the REMOTE current as part of the
+	// connect flow: when this machine connects to a host and finds an older auxly
+	// there, it bumps it in place over the same SSH (and ensures the remote's
+	// statusline), skipping a host that's serving a live session. Off by default —
+	// connect otherwise only verifies auxly is present, never mutating the remote
+	// binary. The `--update-remote` flag overrides this per invocation.
+	UpdateRemotesOnConnect bool `json:"updateRemotesOnConnect,omitempty"`
+
+	// DefaultRemoteWrite flips the per-remote sharing default from read-only to
+	// read+write for KNOWN clients (those listed in clients.yaml) that have no
+	// explicit per-file write grant. Off by default — the sharing model stays
+	// fail-closed/read-only for everyone else, and an UNMATCHED/unknown remote is
+	// never granted write by this flag. An explicit per-file WriteFiles grant always
+	// takes precedence. Enable it when you trust every box you connect (e.g. your
+	// own fleet) and want write access without per-box setup.
+	DefaultRemoteWrite bool `json:"defaultRemoteWrite,omitempty"`
+
+	// SyncStatuslineToRemotes is the master switch for carrying THIS machine's
+	// statusline preference to connected boxes: when on, applying a statusline change
+	// in Settings → Customizations also pushes it to the selected boxes
+	// (StatuslineSyncBoxes) over SSH. Off by default. A manual "sync now" works
+	// regardless of this flag.
+	SyncStatuslineToRemotes bool `json:"syncStatuslineToRemotes,omitempty"`
+
+	// StatuslineSyncBoxes is the set of connected-box names selected for statusline
+	// sync (by name, matching clients.yaml). Empty means no box is selected. Used by
+	// both the auto-sync (above) and the "sync selected" action.
+	StatuslineSyncBoxes []string `json:"statuslineSyncBoxes,omitempty"`
+
 	// HiddenAgents lists canonical provider/brand ids the user has chosen to hide
 	// from the dashboard grid (Settings → Agents). Empty (the default) shows every
 	// detected or active agent. Hiding only affects the dashboard display — it

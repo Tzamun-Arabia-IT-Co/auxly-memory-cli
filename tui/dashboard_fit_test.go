@@ -283,10 +283,10 @@ func TestSSHWizardRepaintsInViewport(t *testing.T) {
 		t.Fatalf("'c' must open the method step (editingHost=%v step=%q)", m.ssh.editingHost, m.ssh.formStep)
 	}
 	before := stripANSI(m.contentVP.View())
-	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}}) // pick "lan"
+	u, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}}) // pick "relay" (now first)
 	m = u.(model)
-	if m.ssh.formMethod != "lan" {
-		t.Fatalf("digit '1' must select lan (got %q)", m.ssh.formMethod)
+	if m.ssh.formMethod != "relay" {
+		t.Fatalf("digit '1' must select relay (got %q)", m.ssh.formMethod)
 	}
 	after := stripANSI(m.contentVP.View())
 	if after == before {

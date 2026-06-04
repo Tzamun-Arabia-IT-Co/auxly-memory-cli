@@ -5,6 +5,100 @@ All notable changes to Auxly Memory CLI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.0.10] - 2026-06-04
+
+Fleet-management release: manage, update, and wire your remote boxes from the host;
+a relay-first connect wizard with a per-file permissions step; usage that actually
+renders on remote statuslines across versions; and a cleaner Settings → General.
+
+### Added — Manage remote-box updates + permissions from the host
+
+- **Per-box "update available" badge** on the **Remote** tab: a throttled, async SSH
+  sweep (`auxly host versions`) flags any connected box running an older auxly as
+  `⬆ 1.0.9→1.0.10`. Network-bound work stays off the UI thread and only runs when
+  you're a host with boxes (no boxes ⇒ no SSH, no `/version` call — still local-first).
+- **One-click box update**: press **`u`** on a box to bump its auxly over SSH
+  (`auxly host update <name>`), or **`B`** on the **Dashboard** to update *all*
+  outdated boxes at once. A box **serving a live session is skipped** (use
+  `--force` for a single box). The Dashboard shows a prompt — *"N connected boxes
+  need an update — press [B]"* — whenever any box is behind.
+- **Per-box permission column**: each connected box now shows its effective memory
+  access — `read-only`, `read+write`, `read+write·Nf` (per-file grant), or
+  `read+write*` (via the default below).
+- New `auxly host versions [--json]` and `auxly host update [name|--all] [--force]`
+  commands back the above (and are scriptable on their own). A skipped (live) box
+  offers an in-TUI **`[f]` force-update** instead of dropping to a terminal.
+- **The remote statusline mirrors your preference**: updating a box installs its
+  statusline in the **same wrap-vs-replace mode** you use locally, and — when you
+  use **Live Usage** — makes the box's **plan-usage line actually render**, across
+  versions. On a box new enough to take `statusline install --enable-usage` the
+  opt-in is **persisted** (the box self-refreshes); on any box it then **primes the
+  usage cache during sync** by running the box's `statusline --refresh-usage`, so the
+  usage line shows on the very next render even on boxes that can't store the opt-in
+  (the render gates on cached data, not the setting). The per-box result is reported
+  honestly — "Live Usage on the box", "usage refreshed now (update the box to keep it
+  self-refreshing)", or "couldn't be primed — the box needs a fetchable agent token".
+- **Statusline sync manager** in **Settings → Customizations** (press `s`): a master
+  **auto-sync** toggle (push your statusline to boxes whenever you change it),
+  **per-box** include/exclude, **all/none**, and **sync-now** — all boxes (`y`) or
+  one at a time (`⏎`). Backed by `auxly host statusline [names…|--all]`. A box is
+  re-synced even when it's already on the latest version (config edits are
+  non-disruptive), so the statusline/usage applies without a version bump.
+
+### Changed — Connect wizard puts relay first and adds a permissions step
+
+- **Relay is now the first connection method** (`1`) in the **`c` → Connect** wizard —
+  it's the primary flow (serve THIS Mac's memory to a NAT'd/shared box). lan/vpn/
+  bastion/public shift to `2`–`5`.
+- **The relay flow has a permissions step right after the name.** The wizard is now
+  `method → relay server → name → permissions → connect`: before anything is set up,
+  you pick what the box may access per file — **Off / Read / Read+Write** (`←/→` to
+  cycle, `a` all-read, `n` none). Non-personal files default to **Read+Write** (a
+  connected box is normally a full peer of your memory); `personal.md` is **Off** by
+  default with its exposure warning. The choice is applied to the box once provisioned, and
+  the result panel confirms how many files were made readable/writable. (Consumer
+  methods, where this Mac only *reads another host's* memory, have nothing to share
+  and submit straight from the name step.) The standalone `s` "Share files" action on
+  an existing box is unchanged.
+
+### Fixed
+
+- **Settings → General navigation no longer feels stuck on the Live Usage row.**
+  Live Usage and Auto-Update were two separate cursor stops rendered on the *same*
+  line, so pressing ↓ moved the cursor sideways within one line instead of to a new
+  row. They now render on **separate lines** (on normal-height terminals), so ↑/↓
+  moves one visible row at a time; a click on either row toggles the right one. Short
+  terminals keep both on one line to preserve the no-scroll fit guarantee.
+- **No more phantom "Claude Code (Recommended)" agent card.** Memory Org was
+  attributing its writes to the picker's *display label*, which the dashboard then
+  rendered as a bogus agent. Writes are now attributed to the canonical brand id,
+  and historical entries fold into the real **Claude Code CLI** card.
+
+### Added — Opt-in default read/write for known remotes
+
+- **`defaultRemoteWrite`** setting (off by default): when on, a **known** box
+  (listed in `clients.yaml`) with no explicit per-file grant defaults to
+  **read+write** instead of read-only. The sharing model stays fail-closed for
+  everyone else — an **unmatched/unknown remote is never granted write** by this
+  flag, and an explicit per-file `write_files` grant always takes precedence.
+
+### Added — Keep the remote current as part of connecting (opt-in)
+
+- **`connect --update-remote`** (and a persisted **`updateRemotesOnConnect`**
+  setting, off by default): when this machine connects to a host and finds an
+  **older auxly** there, it now bumps it **in place over the same SSH** the
+  connection doctor already uses — no separate `auxly update` on the remote. It is
+  **driven from the connecting (already-updated) side**, so it works even when the
+  remote is too old to self-update.
+- The same step **ensures the Auxly statusline on the remote** for its detected
+  agents (`auxly statusline install --agent all` over SSH).
+- **Live-session guard:** a host that's serving a live `mcp-server` relay is
+  **skipped** (it'll pick up the update on its next idle connect) so a binary is
+  never swapped out from under an active session. Everything is best-effort and
+  narrated — a failure never aborts the connect.
+
 ## [1.0.9] - 2026-06-04
 
 ### Added — Statusline now works for Cursor CLI and Antigravity CLI, not just Claude Code

@@ -402,12 +402,20 @@ flowchart LR
 On the **consumer** box, run the wizard and pick how the two machines reach each other:
 
 ```bash
-auxly connect          # wizard: LAN / VPN / bastion / public / relay
+auxly connect          # wizard: relay / LAN / VPN / bastion / public
 auxly connect list     # show configured hosts + connected boxes
 auxly connect auto     # one-command bootstrap when a host advertises an offer
 ```
 
+The wizard's steps are **method → host → name → permissions → connect**. For a **relay** connection (the first option — serve *this* machine's memory to a NAT'd box), the **permissions** step lets you pick what the box may access per file — **Off / Read / Read+Write** (`←/→` to cycle, `a` all-read, `n` none) — *before* it connects. Non-personal files default to **Read+Write**; `personal.md` is **Off** with an exposure warning. Consumer methods (LAN/VPN/bastion/public) only read the *remote's* memory, so they skip the permissions step.
+
 `auxly connect auto` also carries your setup onto the new machine: it wires the MCP launcher + skills **and installs the Auxly statusline** for that box's detected agents (idempotent — a machine with its own statusline is left alone). To keep a remote on the latest release automatically, enable **Auto-Update** in **Settings** (or set `"autoUpdate": true` in `~/.auxly/settings.json`) — each machine then self-updates in place after a session, so a publish reaches every box without a manual `auxly update`.
+
+Connecting to a host whose auxly is **older** than yours? Add **`--update-remote`** (or set `"updateRemotesOnConnect": true`) and `connect` bumps it **in place over the same SSH** and ensures its statusline — driven from your already-updated side, so it works even when the remote is too old to self-update. A host serving a **live session is skipped** (it updates on its next idle connect), so a running relay is never interrupted.
+
+**Managing your boxes from the host.** The **Remote** tab shows each connected box's **memory permission** (`read-only` / `read+write` / `read+write·Nf`) and flags any box running an older auxly with a `⬆ 1.0.9→1.0.10` badge. Press **`u`** on a box to update it over SSH, or **`B`** on the **Dashboard** to update *every* outdated box at once (live boxes are skipped). The same is scriptable: `auxly host versions` and `auxly host update <name>|--all`. To grant write access to your fleet without per-box setup, enable **`"defaultRemoteWrite": true`** — known boxes (in `clients.yaml`) then default to read+write, while unknown remotes stay read-only and explicit per-file grants still win.
+
+**Push your statusline to the fleet.** When you update a box (or sync from **Settings → Customizations**, press `s`), its statusline is installed in the **same wrap-vs-replace mode** you use locally. If you run **Live Usage**, the box's **plan-usage line is primed during the sync** (via the box's own `statusline --refresh-usage`) so it renders on the next draw — even on a box too old to persist the opt-in. The sync manager offers a master **auto-sync** toggle, **per-box** include/exclude, and **sync-now** (all boxes or one at a time).
 
 Auxly is **network-agnostic** and stores **no network credentials** — you bring the reachability, it rides on top:
 
@@ -434,9 +442,9 @@ auxly host down        # stop serving
 
 ### Choose what each box can see
 
-A remote never gets your whole vault by default — every served box carries its **own** per-remote file-sharing allow-list. In the dashboard's **Remote** tab, highlight a connected box and press **`s`** to open its **Share files** checklist (listed in taxonomy order), then toggle individual files and set **read** vs. **write** access for that box specifically.
+A remote never gets your whole vault by default — every served box carries its **own** per-remote file-sharing allow-list. You set it at connect time in the relay wizard's **permissions** step, and you can change it anytime: in the dashboard's **Remote** tab, highlight a connected box and press **`s`** to open its **Share files** checklist (listed in taxonomy order), then toggle individual files and set **Off / Read / Read+Write** for that box specifically.
 
-It's **fail-closed**: `personal.md` (and the aggregate profile) are **never** shared unless you explicitly check them, and the default for a newly connected box is *all non-personal files, read-only*. So a trusted laptop can read everything while a CI box sees only `projects.md` — and your private life facts stay on your machine.
+It's **fail-closed for what matters**: `personal.md` (and the aggregate profile) are **never** shared unless you explicitly turn them on, and an **unmatched/unknown remote is never granted write**. So a trusted laptop can be a full read+write peer while a CI box sees only `projects.md` read-only — and your private life facts stay on your machine.
 
 ### See where writes come from
 
