@@ -48,6 +48,25 @@ func (c *ClientShare) effectiveAccess() string {
 	return AccessRead
 }
 
+// WithDefaultWrite returns a share whose effective access is read+write when the
+// opt-in default-write policy is active (config DefaultRemoteWrite). It is only
+// meant for a MATCHED, non-nil share, and it upgrades ONLY when there is no
+// explicit write config: an authoritative per-file WriteFiles grant is left
+// untouched (never broadened), and a nil (unmatched) share returns nil so an
+// unknown remote is never granted write. Immutable — returns a copy, never
+// mutating the input.
+func WithDefaultWrite(share *ClientShare) *ClientShare {
+	if share == nil {
+		return nil // unmatched remote: never default to write
+	}
+	if len(share.WriteFiles) > 0 || share.effectiveAccess() == AccessWrite {
+		return share // explicit grant is authoritative; leave it exactly as-is
+	}
+	upgraded := *share // copy
+	upgraded.Access = AccessWrite
+	return &upgraded
+}
+
 // AllowedReads returns the set of files a remote may READ, fail-closed.
 //
 //   - Explicit SharedFiles → exactly that set.

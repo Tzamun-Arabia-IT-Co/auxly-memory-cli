@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/session"
@@ -117,6 +118,12 @@ func NewServer(memoryPath string) *Server {
 	s.isRemote = meta.Source == "ssh-remote"
 	if s.isRemote {
 		s.share = sharing.LoadForRemoteHost(memoryPath, meta.RemoteHost)
+		// Opt-in default-write (config DefaultRemoteWrite): upgrade a MATCHED client
+		// with no explicit per-file grant to read+write. A nil/unmatched share is
+		// left read-only — an unknown remote never gains write from this flag.
+		if s.share != nil && config.LoadSettings().DefaultRemoteWrite {
+			s.share = sharing.WithDefaultWrite(s.share)
+		}
 	}
 	return s
 }

@@ -339,8 +339,9 @@ func runDoctor(p remoteProfile) error {
 	// run in the host's cmd.exe/PowerShell shell. So we probe auxly directly and,
 	// if it's not available, guide the user with the PowerShell one-liner.
 	if targetOS == "windows" {
-		if _, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
+		if out, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
 			fmt.Println("   ✓ auxly present on host (Windows)")
+			ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
 			return nil
 		}
 		fmt.Printf("   ⚠ auxly is not reachable on the Windows host %s.\n", p.Host)
@@ -360,8 +361,9 @@ func runDoctor(p remoteProfile) error {
 	fmt.Printf("   ✓ Host reachable (uname: %s)\n", uname)
 
 	// auxly already present?
-	if _, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
+	if out, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
 		fmt.Println("   ✓ auxly present on host")
+		ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
 		return nil
 	}
 
@@ -370,11 +372,15 @@ func runDoctor(p remoteProfile) error {
 	if _, instErr := runSSH(p, "sh", "-c", "'curl -fsSL "+remoteInstallURL+" | sh'"); instErr != nil {
 		return fmt.Errorf("failed to install auxly on host %s: %w", p.Host, instErr)
 	}
-	if _, verErr := runSSH(p, "auxly", "--version"); verErr != nil {
+	out, verErr := runSSH(p, "auxly", "--version")
+	if verErr != nil {
 		return fmt.Errorf("auxly still missing on host %s after install attempt: %w", p.Host, verErr)
 	}
 	fmt.Println("   ✓ auxly installed on host")
 	recordProvision(p)
+	// A fresh silent install already lands the latest binary, so the version check
+	// is a no-op here — but still wire the remote statusline when opted in.
+	ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
 	return nil
 }
 
@@ -708,6 +714,12 @@ func init() {
 	connectUseCmd.Flags().StringVar(&useMemPath, "mem-path", "", "host memory folder to serve (passed as --path)")
 	connectUseCmd.Flags().StringVar(&useHostBin, "host-bin", "", "absolute path to auxly ON THE HOST (when not on the host's SSH PATH, e.g. macOS /usr/local/bin)")
 	connectDisconnectCmd.Flags().BoolVar(&disconnectPurge, "purge", false, "also remove the installed /auxly-* skills from this machine")
+
+	// Opt-in remote maintenance: bump an older auxly on the host (and ensure its
+	// statusline) as part of connecting, over the same SSH. Persistent so every
+	// connect subcommand that runs the doctor honours it; otherwise the persisted
+	// UpdateRemotesOnConnect setting decides.
+	connectCmd.PersistentFlags().BoolVar(&connectUpdateRemote, "update-remote", false, "if the host's auxly is older, update it in place over SSH (skips a host mid-session)")
 
 	connectCmd.AddCommand(connectListCmd)
 	connectCmd.AddCommand(connectRemoveCmd)

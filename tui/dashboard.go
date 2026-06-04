@@ -24,23 +24,29 @@ import (
 )
 
 type dashboardModel struct {
-	logger           *audit.Logger
-	pendingMgr       *pending.Manager
-	stats            *audit.Stats
-	pendingCnt       int
-	trustCfg         *trust.Config
-	memoryPath       string
-	activeProviders  []string
-	recentWrites     []audit.Entry
-	composition      []categoryStat        // per-category memory breakdown (left column)
-	pendingFiles     []pending.PendingFile // queued approvals (shown inline when > 0)
-	remoteScope      map[string]string     // host → access scope ("read · 6 files")
-	sessions         []agentSession
-	unregistered     int // live mcp-servers running but not in the session registry
-	updateAvail      bool
-	updateLatest     string
-	updating         bool
-	updateResult     string
+	logger          *audit.Logger
+	pendingMgr      *pending.Manager
+	stats           *audit.Stats
+	pendingCnt      int
+	trustCfg        *trust.Config
+	memoryPath      string
+	activeProviders []string
+	recentWrites    []audit.Entry
+	composition     []categoryStat        // per-category memory breakdown (left column)
+	pendingFiles    []pending.PendingFile // queued approvals (shown inline when > 0)
+	remoteScope     map[string]string     // host → access scope ("read · 6 files")
+	sessions        []agentSession
+	unregistered    int // live mcp-servers running but not in the session registry
+	updateAvail     bool
+	updateLatest    string
+	updating        bool
+	updateResult    string
+	// Connected-box updates (#3): how many boxes need an auxly bump, refreshed by a
+	// throttled SSH sweep; boxesUpdating gates the one-key "update all" action.
+	boxesOutdated    int
+	boxesProbedAt    time.Time
+	boxesUpdating    bool
+	boxUpdateNote    string
 	lastRefresh      time.Time
 	blinkCycle       int
 	animationStarted bool
@@ -283,7 +289,26 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		// Usage isn't on the cards anymore; it's fetched on demand when the [u]
 		// popup opens (and on the Analytics Usage tab), to keep background load
 		// off the rate-limited endpoints.
-		return m, m.Refresh()
+		cmds := []tea.Cmd{m.Refresh()}
+		// Throttled connected-box version sweep (#3): SSH-bound, so at most once a
+		// minute. The command no-ops (no SSH, no network) when there are no boxes.
+		if !m.boxesUpdating && time.Since(m.boxesProbedAt) > 60*time.Second {
+			m.boxesProbedAt = time.Now()
+			cmds = append(cmds, probeRemoteVersionsCmd())
+		}
+		return m, tea.Batch(cmds...)
+	case remoteVersionsMsg:
+		m.boxesOutdated = outdatedCount(msg.statuses)
+		return m, nil
+	case boxesUpdatedMsg:
+		m.boxesUpdating = false
+		m.boxesProbedAt = time.Time{} // force an immediate re-sweep next tick
+		if msg.err != nil {
+			m.boxUpdateNote = "✗ box update failed"
+		} else {
+			m.boxUpdateNote = msg.summary
+		}
+		return m, nil
 	case usageReportsMsg:
 		for _, r := range msg.reports {
 			m.usageReports[r.Provider] = r
@@ -534,6 +559,14 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 					return dashboardUpdateDoneMsg{path: path, err: err}
 				}
 			}
+		case "B":
+			// One-key update of all outdated, idle connected boxes (#3). Live boxes
+			// are skipped by the host-side command.
+			if m.boxesOutdated > 0 && !m.boxesUpdating {
+				m.boxesUpdating = true
+				m.boxUpdateNote = "updating connected boxes…"
+				return m, updateAllBoxesCmd()
+			}
 		}
 	}
 	return m, nil
@@ -717,6 +750,9 @@ func (m dashboardModel) renderBody(compact bool) string {
 	var b strings.Builder
 	b.WriteString(headerRow + "\n")
 	if banner := m.renderUpdateBanner(); banner != "" {
+		b.WriteString(banner + "\n")
+	}
+	if banner := m.renderBoxUpdateBanner(); banner != "" {
 		b.WriteString(banner + "\n")
 	}
 	// Drop the blank lines around the content on short terminals to reclaim rows.
@@ -1028,6 +1064,27 @@ func (m dashboardModel) renderUpdateBanner() string {
 		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).
 			Render(fmt.Sprintf("  ⬆ Update available: v%s (you have v%s) — press [U] to update",
 				m.updateLatest, update.Current))
+	}
+	return ""
+}
+
+// renderBoxUpdateBanner shows the connected-box update prompt / progress /
+// result — the host-side companion to renderUpdateBanner (which is for THIS
+// machine). Pressing [B] updates every outdated, idle box.
+func (m dashboardModel) renderBoxUpdateBanner() string {
+	switch {
+	case m.boxesUpdating:
+		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).
+			Render("  ⏳ Updating connected boxes…")
+	case m.boxesOutdated > 0:
+		plural := "box needs"
+		if m.boxesOutdated > 1 {
+			plural = "boxes need"
+		}
+		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).
+			Render(fmt.Sprintf("  ⬆ %d connected %s an update — press [B] to update all (live boxes skipped)", m.boxesOutdated, plural))
+	case m.boxUpdateNote != "":
+		return lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true).Render("  " + m.boxUpdateNote)
 	}
 	return ""
 }
@@ -1829,11 +1886,16 @@ var providerAlias = map[string]string{
 	"antigravity-cli":   "antigravity",
 	"antigravity-agent": "antigravity",
 	"as":                "android-studio",
+	// Legacy: Memory Org once logged its writes under the picker's DISPLAY label,
+	// which spawned a phantom "Claude Code (Recommended)" card. Fold any such
+	// historical entry into the real Claude Code brand so it merges, not duplicates.
+	"claude code (recommended)": "claude-code",
+	"claude code":               "claude-code",
 }
 
 // nonAgentProviders are audit "providers" that are not user-facing agents and
-// must never get a dashboard card (internal bookkeeping / empty).
-var nonAgentProviders = map[string]bool{"system": true, "": true}
+// must never get a dashboard card (internal bookkeeping / empty / organize op).
+var nonAgentProviders = map[string]bool{"system": true, "": true, "organize": true}
 
 // canonicalProvider normalizes an audit/detect provider tag to its dashboard
 // brand id, returning "" for tags that should not produce a card at all.

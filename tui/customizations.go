@@ -2,9 +2,11 @@ package tui
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/statusline"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -31,6 +33,18 @@ type customizationsModel struct {
 	detected   bool             // focused agent is installed on this machine
 	width      int
 	height     int
+
+	// Remote statusline-sync sub-panel ([s]): master auto-sync toggle + per-box
+	// selection + manual "sync now" (all or one). syncOpen owns the keyboard while
+	// shown. syncCursor: 0 = master row, 1..N = box rows.
+	syncOpen     bool
+	syncCursor   int
+	syncBoxes    []clientRow
+	syncSelected map[string]bool
+	syncMaster   bool
+	syncing      bool
+	syncSpin     int // spinner frame while a sync exec is in flight
+	syncStatus   string
 }
 
 // statuslineAppliedMsg carries the result of an in-process install/uninstall back
@@ -130,6 +144,9 @@ func (m customizationsModel) switchAgent(delta int) customizationsModel {
 }
 
 func (m customizationsModel) handleKey(msg tea.KeyMsg) (customizationsModel, tea.Cmd) {
+	if m.syncOpen {
+		return m.handleSyncKey(msg)
+	}
 	if m.applying {
 		return m, nil // input is frozen while the write is in flight
 	}
@@ -143,6 +160,8 @@ func (m customizationsModel) handleKey(msg tea.KeyMsg) (customizationsModel, tea
 		return m, nil
 	}
 	switch msg.String() {
+	case "s", "S":
+		return m.openSync(), nil
 	case "a":
 		nm := m.switchAgent(1)
 		return nm, nm.previewRefreshCmd()
@@ -243,7 +262,9 @@ func (m customizationsModel) handleApplied(msg statuslineAppliedMsg) customizati
 	return m
 }
 
-func (m customizationsModel) capturesInput() bool { return m.confirming || m.applying }
+func (m customizationsModel) capturesInput() bool {
+	return m.confirming || m.applying || m.syncOpen
+}
 
 // previewInputFor synthesizes a session for the preview from real local context (cwd
 // + a representative model per agent), so lines 3–4 use the user's actual data and
@@ -292,6 +313,9 @@ func (m customizationsModel) agentSwitcher() string {
 
 // panel renders the Customizations sub-tab body (the caller adds title + sub-tab bar).
 func (m customizationsModel) panel() string {
+	if m.syncOpen {
+		return m.syncPanel()
+	}
 	dim := StyleSubtitle
 	bold := lipgloss.NewStyle().Bold(true)
 	accent := lipgloss.NewStyle().Foreground(ColorPrimary)
@@ -382,6 +406,14 @@ func (m customizationsModel) panel() string {
 			style = lipgloss.NewStyle().Foreground(ColorDanger)
 		}
 		b.WriteString("\n" + style.Render(m.status) + "\n")
+	}
+
+	if n := len(readClients()); n > 0 {
+		syncState := lipgloss.NewStyle().Foreground(ColorWarning).Render("off")
+		if config.LoadSettings().SyncStatuslineToRemotes {
+			syncState = good.Render("on")
+		}
+		b.WriteString("\n" + accent.Render("[s]") + dim.Render(" sync this statusline to your "+strconv.Itoa(n)+" remote box(es) ▸  auto-sync: ") + syncState)
 	}
 
 	b.WriteString("\n" + dim.Render("a switch agent · ↑/↓ choose · ⏎ apply (with confirm) · or run: "+agentCLICommand(t, m.optionIdx)))

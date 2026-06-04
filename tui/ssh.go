@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"gopkg.in/yaml.v3"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 )
 
@@ -76,6 +77,7 @@ const (
 	formStepHost   = "host"
 	formStepJump   = "jump"
 	formStepName   = "name"
+	formStepShare  = "share" // relay only: pick what the box may read/write, pre-connect
 )
 
 type sshModel struct {
@@ -119,12 +121,31 @@ type sshModel struct {
 	// is set only while the form is open.
 	editingHost bool
 
+	// per-box update status (#1/#2): keyed by lowercased box name, populated async
+	// by probeRemoteVersionsCmd. nil until the first sweep completes. defaultWrite
+	// mirrors the DefaultRemoteWrite setting so the permission column shows the
+	// effective access. versionsProbed guards against re-kicking the SSH sweep.
+	versions       map[string]clientVersionStatus
+	defaultWrite   bool
+	versionsProbed bool
+	lastUpdateBox  string // box targeted by the last [u] update, for [f] force-retry
+
 	// per-remote file-sharing modal state (mode == sshModeShare, §10)
 	shareOpen   bool           // modal visible
 	shareClient clientRow      // the inbound client being edited
 	shareFiles  []string       // rows, in taxonomy order
 	shareState  map[string]int // file → shareOff | shareRead | shareReadWrite
 	shareCursor int            // highlighted row within the modal
+
+	// Post-connect share step (relay flow). When pendingShare is set, a successful
+	// add opens the per-file sharing modal for the newly provisioned inbound client
+	// as the FINAL wizard step — relay makes THIS Mac the host, so choosing what the
+	// box may read/write is the natural last move. preShareNames snapshots the client
+	// names that existed before the run so the new one is found by diff; pendingShareNm
+	// is the friendly name the user typed (a fallback match for a re-add).
+	pendingShare   bool
+	pendingShareNm string
+	preShareNames  map[string]bool
 }
 
 // Per-file sharing tri-state, cycled with ←/→ in the share modal.
@@ -186,7 +207,13 @@ func sshDataTickCmd() tea.Cmd {
 
 func newSSHModel() sshModel {
 	h, ok := readHostInfo()
-	return sshModel{remotes: readRemotes(), clients: readClients(), host: h, hostOK: ok}
+	return sshModel{
+		remotes:      readRemotes(),
+		clients:      readClients(),
+		host:         h,
+		hostOK:       ok,
+		defaultWrite: config.LoadSettings().DefaultRemoteWrite,
+	}
 }
 
 func (m sshModel) Refresh() tea.Cmd {
@@ -545,6 +572,10 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 	case sshExecDoneMsg:
 		m.status = msg.status
 		m.mode = sshModeList
+		m.versionsProbed = false // re-sweep versions after any action
+		// The [K]-to-terminal key path leaves the captured-run flow, so drop any armed
+		// share intent — it must not carry over and pop open on a later, unrelated run.
+		m.pendingShare, m.pendingShareNm, m.preShareNames = false, "", nil
 		return m, m.Refresh()
 
 	case progressEvent:
@@ -574,7 +605,27 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 			m.remotes = readRemotes() // reload lists behind the result panel
 			m.clients = readClients()
 			m.host, m.hostOK = readHostInfo()
+			m.versionsProbed = false // an update may have changed box versions
 			m.cursor = clampCursor(m.cursor, m.listLen())
+			// A relay add that succeeded (and didn't stall on a key) produces a new
+			// inbound client — apply the permissions the user chose in the wizard's
+			// share step to its clients.yaml entry, and confirm it in the result panel.
+			if m.pendingShare && m.progressOK && !m.progressNeeded {
+				if nc, ok := newlyAddedClient(m.clients, m.preShareNames, m.pendingShareNm); ok {
+					shared, writes := shareSelection(m.shareFiles, m.shareState)
+					saveClientSharing(nc, shared, writes)
+					m.clients = readClients()
+					m.cursor = clampCursor(m.cursor, m.listLen())
+					m.progressOut = append(m.progressOut,
+						fmt.Sprintf("✓ Permissions applied to %s — %d readable, %d writable", nc.Name, len(shared), len(writes)))
+					m.status = "Configured access for " + nc.Name
+				}
+			}
+			// Keep the share intent alive while a key step is pending ([p]/[K] on the
+			// result panel re-runs the provision); clear it only once no retry is queued.
+			if !m.progressNeeded {
+				m.pendingShare, m.pendingShareNm, m.preShareNames = false, "", nil
+			}
 			return m, nil
 		}
 		if line := strings.TrimRight(msg.line, "\r"); strings.TrimSpace(line) != "" {
@@ -596,6 +647,10 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 		}
 		return m, nil
 
+	case remoteVersionsMsg:
+		m.versions = versionsByName(msg.statuses)
+		return m, nil
+
 	case sshDataTickMsg:
 		// Only refresh the passive list view. In any sub-mode (form/password/rename/
 		// share/progress/result) leave state untouched so typing and selection are
@@ -605,7 +660,14 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 			m.remotes = readRemotes()
 			m.clients = readClients()
 			m.host, m.hostOK = readHostInfo()
+			m.defaultWrite = config.LoadSettings().DefaultRemoteWrite
 			m.cursor = clampCursor(m.cursor, m.listLen())
+		}
+		// Kick a one-shot version sweep the first time we're on the screen with boxes
+		// (and again after an update resets the flag). SSH-bound, so never on a hot path.
+		if !m.versionsProbed && m.hostOK && len(m.clients) > 0 {
+			m.versionsProbed = true
+			return m, tea.Batch(sshDataTickCmd(), probeRemoteVersionsCmd())
 		}
 		return m, sshDataTickCmd()
 
@@ -775,7 +837,17 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 				return m, runSub(sub, args...)
 			}
 		}
+		// A live box was skipped: offer an in-TUI force-update (ends its live
+		// session by replacing the binary). Only when the last action was a skip.
+		if m.lastUpdateBox != "" && updateResultKind(m.progressOut) == "skipped" {
+			switch msg.String() {
+			case "f", "F":
+				box := m.lastUpdateBox
+				return m.beginCapturedSub("Force-updating "+box, "host", "update", box, "--force")
+			}
+		}
 		m.mode = sshModeList // any other key closes the result panel
+		m.lastUpdateBox = ""
 		return m, nil
 
 	case sshModePassword:
@@ -820,6 +892,13 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 				return m, nil
 			case "s":
 				return m.openShare(c), nil
+			case "u":
+				// One-click update (#2): bump this box's auxly over SSH. The host-side
+				// command skips it if the box is serving a live session — the result
+				// panel then offers [f] to force it (see sshModeResult).
+				m.status = ""
+				m.lastUpdateBox = c.Name
+				return m.beginCapturedSub("Updating "+c.Name, "host", "update", c.Name)
 			case "x":
 				m.mode = sshModeConfirm
 				return m, nil
@@ -848,6 +927,11 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 // ── add-host form ─────────────────────────────────────────────────
 
 func (m sshModel) handleFormKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
+	// The permissions step is a tri-state picker, not text entry — route it to its
+	// own handler (arrows/space cycle, enter submits, esc cancels the whole form).
+	if m.formStep == formStepShare {
+		return m.handleFormShareKey(msg)
+	}
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.mode = sshModeList
@@ -864,19 +948,20 @@ func (m sshModel) handleFormKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 	case tea.KeyRunes:
 		s := string(msg.Runes)
 		if m.formStep == formStepMethod {
-			// Method is the first, most important choice. 5 = relay (this Mac is the
-			// host, served to a NAT'd/shared box); the rest reach an external host.
+			// Method is the first, most important choice. 1 = relay (this Mac is the
+			// host, served to a NAT'd/shared box) — the primary flow, shown first; the
+			// rest reach an external host this Mac consumes.
 			switch s {
 			case "1":
-				m.formMethod = "lan"
-			case "2":
-				m.formMethod = "vpn"
-			case "3":
-				m.formMethod = "bastion"
-			case "4":
-				m.formMethod = "public"
-			case "5":
 				m.formMethod = "relay"
+			case "2":
+				m.formMethod = "lan"
+			case "3":
+				m.formMethod = "vpn"
+			case "4":
+				m.formMethod = "bastion"
+			case "5":
+				m.formMethod = "public"
 			default:
 				return m, nil
 			}
@@ -929,6 +1014,18 @@ func (m sshModel) advanceForm() (sshModel, tea.Cmd) {
 		}
 		m.formStep = formStepName
 	case formStepName:
+		// Relay makes THIS Mac the host serving the box, so the next step is choosing
+		// what the box may access. Consumer methods only read the remote's memory —
+		// there's nothing to share — so they submit straight away.
+		if m.formMethod == "relay" {
+			m.shareFiles = memory.OrderedFiles()
+			m.shareState = defaultShareState(m.shareFiles)
+			m.shareCursor = 0
+			m.formStep = formStepShare
+			return m, nil
+		}
+		return m.submitForm()
+	case formStepShare:
 		return m.submitForm()
 	}
 	return m, nil
@@ -959,6 +1056,12 @@ func (m sshModel) submitForm() (sshModel, tea.Cmd) {
 		}
 		m.pendingKeySub = "host"
 		m.pendingKeyArgs = keyArgs
+		// The permissions step already captured what the box may access (m.shareState).
+		// Arm its application: once the box is provisioned (it lands as a new inbound
+		// client), write that selection to its clients.yaml entry.
+		m.pendingShare = true
+		m.pendingShareNm = strings.TrimSpace(m.formName)
+		m.preShareNames = clientNameSet(m.clients)
 		return m.beginCapturedSub("Setting up relay via "+host, "host", args...)
 	}
 	osTarget := m.formOS
@@ -1115,6 +1218,132 @@ func renameClient(old, newName string) {
 //  Per-remote file sharing (§10)
 // ─────────────────────────────────────────────────────────────────
 
+// clientNameSet snapshots the set of client names, used to diff the inbound-client
+// list before and after an add run so the freshly provisioned box can be found.
+func clientNameSet(cs []clientRow) map[string]bool {
+	s := make(map[string]bool, len(cs))
+	for _, c := range cs {
+		s[c.Name] = true
+	}
+	return s
+}
+
+// newlyAddedClient finds the client that appeared after an add run: the first whose
+// name wasn't in the pre-run snapshot. Falls back to an exact match on the friendly
+// name the user typed (covers a re-add, where the name already existed and the diff
+// is empty). Returns ok=false when neither resolves a client.
+func newlyAddedClient(cs []clientRow, before map[string]bool, name string) (clientRow, bool) {
+	for _, c := range cs {
+		if !before[c.Name] {
+			return c, true
+		}
+	}
+	if name != "" {
+		for _, c := range cs {
+			if c.Name == name {
+				return c, true
+			}
+		}
+	}
+	return clientRow{}, false
+}
+
+// defaultShareState seeds the per-file tri-state for a brand-new selection (the
+// wizard's permissions step, where no client exists yet): every non-personal file
+// Read+Write, the personal tier Off so it's exposed only by a deliberate host choice.
+// Read+Write is the default because a connected box is normally a full peer of your
+// memory; downgrade any file with ←/→ (or `a` for all-read) before connecting.
+func defaultShareState(files []string) map[string]int {
+	state := make(map[string]int, len(files))
+	for _, f := range files {
+		if memory.IsPersonalFile(f) {
+			state[f] = shareOff
+		} else {
+			state[f] = shareReadWrite
+		}
+	}
+	return state
+}
+
+// shareSelection splits a tri-state map into the shared (readable) and writable file
+// lists clients.yaml stores: Read+Write files appear in both, Read-only in shared
+// only, Off in neither. Order follows files so the output is stable.
+func shareSelection(files []string, state map[string]int) (shared, writes []string) {
+	for _, f := range files {
+		switch state[f] {
+		case shareReadWrite:
+			shared = append(shared, f)
+			writes = append(writes, f)
+		case shareRead:
+			shared = append(shared, f)
+		}
+	}
+	return shared, writes
+}
+
+// handleFormShareKey drives the in-wizard permissions step (formStepShare): the same
+// tri-state picker as the standalone share modal, but Enter submits the whole form
+// (starting the connect) and Esc cancels it. The selection is applied to the box once
+// it's provisioned (see the progressEvent done handler).
+func (m sshModel) handleFormShareKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
+	cycle := func(forward bool) {
+		if m.shareCursor < 0 || m.shareCursor >= len(m.shareFiles) {
+			return
+		}
+		f := m.shareFiles[m.shareCursor]
+		m.shareState[f] = cycleShareState(m.shareState[f], forward)
+	}
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.mode = sshModeList
+		m.editingHost = false
+		return m, nil
+	case tea.KeyEnter:
+		return m.advanceForm() // formStepShare → submitForm
+	case tea.KeyUp:
+		if m.shareCursor > 0 {
+			m.shareCursor--
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.shareCursor < len(m.shareFiles)-1 {
+			m.shareCursor++
+		}
+		return m, nil
+	case tea.KeyLeft:
+		cycle(false)
+		return m, nil
+	case tea.KeyRight, tea.KeySpace:
+		cycle(true)
+		return m, nil
+	}
+	switch msg.String() {
+	case "k":
+		if m.shareCursor > 0 {
+			m.shareCursor--
+		}
+	case "j":
+		if m.shareCursor < len(m.shareFiles)-1 {
+			m.shareCursor++
+		}
+	case "h":
+		cycle(false)
+	case "l":
+		cycle(true)
+	case "a": // all non-personal → read-only
+		for _, f := range m.shareFiles {
+			if !memory.IsPersonalFile(f) {
+				m.shareState[f] = shareRead
+			}
+		}
+	case "n": // none
+		for _, f := range m.shareFiles {
+			m.shareState[f] = shareOff
+		}
+	}
+	return m, nil
+}
+
 // openShare builds the file-sharing modal state for the given inbound client and
 // returns the updated model. Each file is seeded to Off/Read/Read+Write from the
 // client's explicit SharedFiles + WriteFiles (or the §10 default when unset). The
@@ -1238,17 +1467,7 @@ func (m sshModel) handleShareKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 // safe: only the matching entry's shared_files + access are mutated) and reloads
 // the in-memory client list.
 func (m sshModel) saveShare() (sshModel, tea.Cmd) {
-	shared := make([]string, 0, len(m.shareFiles))
-	writes := make([]string, 0, len(m.shareFiles))
-	for _, f := range m.shareFiles {
-		switch m.shareState[f] {
-		case shareReadWrite:
-			shared = append(shared, f)
-			writes = append(writes, f)
-		case shareRead:
-			shared = append(shared, f)
-		}
-	}
+	shared, writes := shareSelection(m.shareFiles, m.shareState)
 	name := m.shareClient.Name
 	saveClientSharing(m.shareClient, shared, writes)
 	m.clients = readClients()
@@ -1436,7 +1655,28 @@ func (m sshModel) View() string {
 					dot = green.Render("●")
 					status = green.Render(fmt.Sprintf("%-9s", "connected"))
 				}
-				row := fmt.Sprintf("%s %-18s %-22s %s %s", dot, truncate(name, 18), truncate(c.Target, 22), status, dim.Render("["+c.Method+"]"))
+				// Permission column (#5): effective memory access for this box.
+				permText, isWrite := permissionLabel(c, m.defaultWrite)
+				permStyle := dim
+				if isWrite {
+					permStyle = ok
+				}
+				perm := permStyle.Render(fmt.Sprintf("%-13s", permText))
+				row := fmt.Sprintf("%s %-18s %-22s %s %s %s", dot, truncate(name, 18), truncate(c.Target, 22), status, dim.Render(fmt.Sprintf("%-7s", "["+c.Method+"]")), perm)
+				// Version cell (#1) from the async sweep: shows each box's actual
+				// version — "✓ 1.0.9" when current, "1.0.0 ⬆1.0.9" when behind.
+				if st, ok2 := m.versions[strings.ToLower(c.Name)]; ok2 {
+					if text, kind := versionCell(st); text != "" {
+						vs := dim
+						switch kind {
+						case "outdated":
+							vs = lipgloss.NewStyle().Foreground(ColorWarning)
+						case "current":
+							vs = green
+						}
+						row += " " + vs.Render(text)
+					}
+				}
 				if i == m.cursor {
 					lines = append(lines, accent.Render("▸ ")+selRow.Render(row))
 				} else {
@@ -1599,10 +1839,22 @@ func (m sshModel) View() string {
 				break
 			}
 		}
+		// An update action exits 0 even when a box is SKIPPED (live) or already
+		// current, so a blanket "✓ Done" would misread a skip as a successful
+		// update. Derive the real outcome from the command's output markers.
+		updateOutcome := updateResultKind(m.progressOut)
 		head := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess).Render("✓ Done")
 		switch {
 		case !m.progressOK:
 			head = lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render("Finished with issues")
+		case updateOutcome == "failed":
+			head = lipgloss.NewStyle().Bold(true).Foreground(ColorDanger).Render("✗ Update failed")
+		case updateOutcome == "skipped":
+			head = lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render("⏭ Skipped — box is live, NOT updated")
+		case updateOutcome == "updated":
+			head = lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess).Render("✓ Updated")
+		case updateOutcome == "current":
+			head = lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess).Render("✓ Already up to date")
 		case actionNeeded:
 			head = lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render("⚠ One more step — not connected yet")
 		}
@@ -1632,6 +1884,8 @@ func (m sshModel) View() string {
 		case actionNeeded:
 			lines = append(lines, accent.Render("Next:")+dim.Render(" run ")+accent.Render("auxly host setup")+dim.Render(" in a terminal to install the relay key, then reconnect."))
 			lines = append(lines, dim.Render("Press any key to close."))
+		case m.lastUpdateBox != "" && updateOutcome == "skipped":
+			lines = append(lines, accent.Render("[f]")+dim.Render(" force the update now ")+lipgloss.NewStyle().Foreground(ColorWarning).Render("(ends "+m.lastUpdateBox+"'s live session)")+dim.Render("   ·   any other key: close"))
 		default:
 			lines = append(lines, dim.Render("Press any key to close."))
 		}
@@ -1660,11 +1914,11 @@ func (m sshModel) View() string {
 
 		// ── Step 1 · Method (the key decision, shown first) ──────────────
 		methodOpts := []struct{ key, val, desc string }{
-			{"1", "lan", "Same network — same Wi-Fi / router / subnet"},
-			{"2", "vpn", "Over a VPN you run (Tailscale, WireGuard…)"},
-			{"3", "bastion", "Through a jump host / bastion gateway"},
-			{"4", "public", "Public IP / custom host + ssh options"},
-			{"5", "relay", "Serve THIS Mac to a NAT'd / shared box"},
+			{"1", "relay", "Serve THIS Mac to a NAT'd / shared box"},
+			{"2", "lan", "Same network — same Wi-Fi / router / subnet"},
+			{"3", "vpn", "Over a VPN you run (Tailscale, WireGuard…)"},
+			{"4", "bastion", "Through a jump host / bastion gateway"},
+			{"5", "public", "Public IP / custom host + ssh options"},
 		}
 		if m.formStep == formStepMethod {
 			lines = append(lines, "  "+boldAccent.Render("How does this machine reach the memory?")+dim.Render("   press 1–5"))
@@ -1757,15 +2011,57 @@ func (m sshModel) View() string {
 				shown = dim.Render("(defaults to host)")
 			}
 			lines = append(lines, "   "+shown+caret)
-		case m.formName != "":
-			lines = append(lines, "  "+check+" "+dim.Render("Name   ")+m.formName)
+		case m.formName != "" || m.formStep == formStepShare:
+			shownName := m.formName
+			if shownName == "" {
+				shownName = dim.Render("(defaults to host)")
+			}
+			lines = append(lines, "  "+check+" "+dim.Render("Name   ")+shownName)
+		}
+
+		// ── Step 5 · Permissions (relay only): what this box may access ──
+		if m.formStep == formStepShare {
+			warnS := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning)
+			okS := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess)
+			lines = append(lines, "")
+			lines = append(lines, "  "+boldAccent.Render("What can this box access?")+dim.Render("   ←/→ cycle  Off · Read · Read+Write"))
+			if m.shareState["personal.md"] != shareOff {
+				lines = append(lines, "  "+warnS.Render("⚠ personal.md is SHARED — exposes your private life (family, health, finances)"))
+			} else {
+				lines = append(lines, "  "+dim.Render("personal.md is private and Off by default — share it only on purpose."))
+			}
+			for i, f := range m.shareFiles {
+				var badge string
+				switch m.shareState[f] {
+				case shareReadWrite:
+					badge = okS.Render("● Read + Write")
+				case shareRead:
+					badge = accent.Render("◐ Read only  ")
+				default:
+					badge = dim.Render("○ Off        ")
+				}
+				row := badge + "  " + fmt.Sprintf("%-16s", f)
+				if memory.IsPersonalFile(f) && m.shareState[f] != shareOff {
+					row += "  " + warnS.Render("⚠ private")
+				}
+				if i == m.shareCursor {
+					lines = append(lines, accent.Render("▸ ")+selRow.Render(row))
+				} else {
+					lines = append(lines, "  "+row)
+				}
+			}
+			lines = append(lines, "")
+			lines = append(lines, accent.Render("↑/↓")+dim.Render(" move · ")+accent.Render("←/→")+dim.Render(" access · ")+
+				accent.Render("a")+dim.Render(" all-read · ")+accent.Render("n")+dim.Render(" none · ")+
+				accent.Render("enter")+dim.Render(" connect · esc cancel"))
 		}
 
 		// ── What the relay flow will do (set expectations) ───────────────
-		if isRelay {
+		if isRelay && m.formStep != formStepShare {
 			lines = append(lines, "")
 			lines = append(lines, dim.Render("  → Opens a reverse tunnel from this Mac, then installs auxly on the"))
 			lines = append(lines, dim.Render("    relay box and wires its agent to your memory. Nothing to run there."))
+			lines = append(lines, dim.Render("  → Next: pick which memory files it may read or read+write, then connect."))
 		}
 	case sshModePrint:
 		lines = append(lines, cyan.Render(fmt.Sprintf("MCP config for %q", m.selectedName()))+dim.Render("  (paste into your IDE)"))
@@ -1794,6 +2090,7 @@ func (m sshModel) View() string {
 				action("r", "Reconnect"),
 				action("e", "Rename"),
 				action("s", "Share files"),
+				action("u", "Update"),
 				action("x", "Remove"),
 			}
 		} else {

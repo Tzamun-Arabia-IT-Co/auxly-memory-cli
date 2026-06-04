@@ -149,9 +149,27 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		return m, nil
 	case statuslineAppliedMsg:
 		// Result of an in-process statusline apply (Customizations sub-tab). On a
-		// successful apply the focus advances to the next agent — refresh its preview.
+		// successful apply the focus advances to the next agent — refresh its preview,
+		// and (if the user opted into auto-sync) push the change to the selected boxes.
 		m.cust = m.cust.handleApplied(msg)
-		return m, m.cust.previewRefreshCmd()
+		cmds := []tea.Cmd{m.cust.previewRefreshCmd()}
+		if msg.ok {
+			if sync := autoSyncStatuslineCmd(); sync != nil {
+				cmds = append(cmds, sync)
+			}
+		}
+		return m, tea.Batch(cmds...)
+	case remoteSyncDoneMsg:
+		// Result of a "sync now" (or auto-sync) push to the boxes.
+		m.cust = m.cust.handleSyncDone(msg)
+		return m, nil
+	case syncSpinTickMsg:
+		// Animate the sync spinner; stop re-arming once the push has returned.
+		if m.cust.syncing {
+			m.cust.syncSpin++
+			return m, syncSpinTick()
+		}
+		return m, nil
 	case tea.MouseMsg:
 		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
 			w := m.width
@@ -199,16 +217,22 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 
 			defaultTrustLineY := -1
 			liveUsageLineY := -1
+			autoUpdateLineY := -1
 			providerLineYs := make(map[string]int)
 			uniqueAgents := m.getUniqueAgents()
 			for idx, line := range viewLines {
 				clean := stripANSI(line)
+				hasBadge := strings.Contains(clean, "[ON]") || strings.Contains(clean, "[OFF]")
 				if strings.Contains(clean, "Default Trust") {
 					defaultTrustLineY = idx
 				}
-				if strings.Contains(clean, "Live Usage") &&
-					(strings.Contains(clean, "[ON]") || strings.Contains(clean, "[OFF]")) {
+				// The Live Usage / Auto-Update toggles share one line in compact mode
+				// (matched as Live Usage) but split onto two otherwise; map each row to
+				// its toggle. The else-if keeps the compact combined line off the auto row.
+				if strings.Contains(clean, "Live Usage") && hasBadge {
 					liveUsageLineY = idx
+				} else if strings.Contains(clean, "Auto-Update") && hasBadge {
+					autoUpdateLineY = idx
 				}
 				for _, a := range uniqueAgents {
 					if strings.Contains(clean, a.Name) && !strings.Contains(clean, "Overrides") && !strings.Contains(clean, "Default Trust") {
@@ -248,6 +272,10 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			if clickedY == liveUsageLineY && liveUsageLineY != -1 {
 				m.cursor = len(uniqueAgents) + 1
 				return m, m.toggleLiveUsage()
+			}
+			if clickedY == autoUpdateLineY && autoUpdateLineY != -1 {
+				m.cursor = len(uniqueAgents) + 2
+				return m, m.toggleAutoUpdate()
 			}
 		}
 	case tea.KeyMsg:
@@ -648,14 +676,26 @@ func (m settingsModel) View() string {
 	if m.autoUpdate {
 		autoState = green.Render("[ON]")
 	}
-	liveLabel, autoLabel := "Live Usage", "Auto-Update"
+	// Pad the plain labels to a fixed width BEFORE styling so the [ON]/[OFF] badges
+	// line up and the bold-on-highlight doesn't shift the column (ANSI in the string
+	// would break %-width formatting).
+	liveLabel := fmt.Sprintf("%-12s", "Live Usage")
+	autoLabel := fmt.Sprintf("%-12s", "Auto-Update")
 	if m.cursor == len(uniqueAgents)+1 {
 		liveLabel = bold.Render(liveLabel)
 	}
 	if m.cursor == len(uniqueAgents)+2 {
 		autoLabel = bold.Render(autoLabel)
 	}
-	lines = append(lines, fmt.Sprintf("%s%s %s     %s%s %s", liveCursor, liveLabel, liveState, autoCursor, autoLabel, autoState))
+	if compact {
+		// Short terminals: keep both on one line to honor the no-scroll fit guarantee.
+		lines = append(lines, fmt.Sprintf("%s%s %s     %s%s %s", liveCursor, liveLabel, liveState, autoCursor, autoLabel, autoState))
+	} else {
+		// Separate rows so ↑/↓ moves the cursor one visible line at a time instead of
+		// hopping sideways between two toggles sharing a line.
+		lines = append(lines, fmt.Sprintf("%s%s %s", liveCursor, liveLabel, liveState))
+		lines = append(lines, fmt.Sprintf("%s%s %s", autoCursor, autoLabel, autoState))
+	}
 
 	padW := w - 10
 	if padW < 40 {
