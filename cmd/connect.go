@@ -15,6 +15,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/session"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/statusline"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -1186,6 +1187,13 @@ func runConnectAuto(cmd *cobra.Command, args []string) error {
 
 	injectRemoteConfigs(p.Name)
 	installAuxlySkills(remoteBanner())
+	// Carry the statusline preference onto this machine too: auto-wire the Auxly
+	// statusline for any detected agent that has none yet (idempotent — a machine
+	// with its own statusline is left alone). Makes the statusline a follows-you
+	// setting instead of a per-box manual step.
+	if wired := statusline.AutoInstallMissing(); len(wired) > 0 {
+		fmt.Printf("   ✓ Installed the Auxly statusline for: %s\n", strings.Join(wired, ", "))
+	}
 	fmt.Println()
 	fmt.Printf("🎉 This machine now uses %s's memory.\n", offer.Name)
 	fmt.Println("👉 RESTART your IDE / agent to load it — then /auxly-remote-connect shows the live link.")

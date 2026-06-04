@@ -5,6 +5,67 @@ All notable changes to Auxly Memory CLI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.9] - 2026-06-04
+
+### Added — Statusline now works for Cursor CLI and Antigravity CLI, not just Claude Code
+
+- `auxly statusline` is now **provider-aware**: it renders natively for **Claude
+  Code, Cursor CLI, and Antigravity CLI**, parsing each agent's session payload
+  (Cursor's `param_summary` / `max_mode` / `autorun` and role-based transcripts;
+  Gemini/Antigravity's `model.name`) and showing **that agent's own plan usage** on
+  line 4 — Claude's 5h+weekly, Cursor's plan/auto, Antigravity's overall. Each
+  provider reads **only its own cache key**, so one agent's usage can never leak into
+  another's statusline.
+- `auxly statusline install --agent claude|cursor|antigravity|all` wires the chosen
+  agent's config (`~/.claude/settings.json`, `~/.cursor/cli-config.json`, or
+  `~/.gemini/antigravity-cli/settings.json`). It is **additive and fully reversible**
+  per agent: the prior command — including a hand-rolled `statusline.sh` — is backed
+  up and restored verbatim on `uninstall`. Each agent's own statusLine extras
+  (Cursor's `padding`/`updateIntervalMs`/`timeoutMs`, Antigravity's `enabled`) and
+  every unrelated settings key are preserved.
+- The installed command carries an explicit `--provider <agent>` flag so render never
+  has to guess; a payload-shape **auto-detect** is the fallback for a hand-edited
+  command.
+- **Settings → Customizations** is now a multi-agent page: an agent switcher (`a` to
+  cycle) over Claude / Cursor / Antigravity, each with its own replace / wrap / none
+  choice and a **live preview rendered with that agent's model + usage line** (the
+  preview self-refreshes, so Cursor/Antigravity read `↻ live`, not `⧗ as of`). The
+  option cursor always starts on **①**, applying an agent **auto-advances** to the
+  next available one, and when an agent already runs Auxly with a saved backup the
+  third option becomes **"Restore my original statusline"** (showing the exact command
+  it puts back). The old "Claude Code only" banner is gone.
+
+### Added — Keep remote machines current automatically
+
+- **Opt-in Auto-Update** (`autoUpdate` setting + a **Settings** toggle, off by
+  default). When on, `auxly` self-updates to the latest published release **in place
+  after an interactive session finishes** — never mid-run, and never on the hot
+  statusline path — so the next launch runs the new binary. Enable it on remote
+  machines and they stay current on every publish without a manual `auxly update`.
+- **Statusline as a follows-you preference**: `auxly connect auto` now also installs
+  the Auxly statusline on the connecting machine for its detected agents. It's
+  **idempotent and non-destructive** — only agents with no statusline yet are wired;
+  a machine running its own statusline is left untouched.
+
+### Fixed
+
+- **Cursor usage no longer shows "no quota data" for an idle plan.** A `200 OK` from
+  Cursor's usage endpoint now always emits the plan (Total)/Auto bars — even at 0% —
+  so a brand-new or just-reset plan renders as full meters instead of looking broken.
+  Errors are reserved for genuine transport/auth failures.
+- **Dropped Cursor's misleading API bar.** Cursor's endpoint reports a non-zero
+  `apiPercentUsed` even for plan-only users who never touch an API key, so it was
+  noise on the statusline. Only the meaningful plan (Total) and Auto quotas are shown.
+- **Statusline no longer renders another agent's usage.** Provider detection no longer
+  treats `used_percentage` as a Cursor signal (Claude Code sends it too, which made a
+  Claude session misread as Cursor), and the installed command bakes in `--provider`
+  so render is deterministic rather than guessing from payload shape.
+
+### Documentation
+
+- README statusline section rewritten for the three agents: `--agent` install matrix,
+  per-agent config-file table, and the corrected "works beyond Claude Code" framing.
+
 ## [1.0.8] - 2026-06-04
 
 ### Changed — Statusline plan-usage is now live, not a frozen snapshot
@@ -146,6 +207,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - TUI: repaint the content viewport in sub-mode key handlers.
 
+[1.0.9]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.9
 [1.0.8]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.8
 [1.0.7]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.7
 [1.0.5]: https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases/tag/v1.0.5

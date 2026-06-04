@@ -37,17 +37,39 @@ const (
 
 const barWidth = 10
 
-// Input is the Claude Code session JSON delivered on the statusline command's stdin.
+// Provider identifies which agent's statusline we are rendering. It selects the
+// usage snapshot (line 4) and the per-agent quirks on lines 1–2 (Cursor sends
+// param_summary/max_mode/autorun and used_percentage; Gemini/Antigravity use
+// model.name; Claude uses thinking/effort).
+const (
+	ProviderClaude      = "claude"
+	ProviderCursor      = "cursor"
+	ProviderAntigravity = "antigravity"
+)
+
+// Input is the agent session JSON delivered on the statusline command's stdin.
+// The shape is shared across Claude Code, Cursor CLI, and Antigravity/Gemini CLI;
+// fields that only one agent sends are simply absent (zero) for the others.
 type Input struct {
 	Model struct {
-		DisplayName string `json:"display_name"`
-		ID          string `json:"id"`
+		DisplayName  string `json:"display_name"`
+		Name         string `json:"name"` // Gemini / Antigravity
+		ID           string `json:"id"`
+		ParamSummary string `json:"param_summary"` // Cursor (e.g. "(fast)")
+		MaxMode      bool   `json:"max_mode"`      // Cursor
 	} `json:"model"`
 	Version   string `json:"version"`
 	Workspace struct {
 		CurrentDir string `json:"current_dir"`
 	} `json:"workspace"`
-	Cwd    string `json:"cwd"`
+	Cwd     string `json:"cwd"`
+	Autorun bool   `json:"autorun"` // Cursor
+	Vim     struct {
+		Mode string `json:"mode"`
+	} `json:"vim"`
+	Worktree struct {
+		Name string `json:"name"`
+	} `json:"worktree"`
 	Effort struct {
 		Level string `json:"level"`
 	} `json:"effort"`
@@ -56,8 +78,10 @@ type Input struct {
 		Enabled bool `json:"enabled"`
 	} `json:"thinking"`
 	ContextWindow struct {
+		UsedPercentage      *float64 `json:"used_percentage"` // Cursor (primary)
 		RemainingPercentage *float64 `json:"remaining_percentage"`
 		TotalInputTokens    *int     `json:"total_input_tokens"`
+		TotalOutputTokens   *int     `json:"total_output_tokens"` // Cursor
 		ContextWindowSize   *int     `json:"context_window_size"`
 		Is1M                bool     `json:"is_1m"`
 	} `json:"context_window"`
@@ -72,10 +96,14 @@ func ReadInput(raw []byte) Input {
 	return in
 }
 
-// Render returns the full multi-line statusline when full is true, or only the
-// Auxly segment lines (memory + plan usage) when full is false (the wrapper appends
-// these after the user's own statusline). Lines with no data are omitted.
-func Render(in Input, full bool) string {
+// Render returns the full multi-line statusline for the given provider when full
+// is true, or only the Auxly segment lines (memory + plan usage) when full is false
+// (the wrapper appends these after the user's own statusline). Lines with no data
+// are omitted. An empty provider defaults to Claude for back-compat.
+func Render(in Input, full bool, provider string) string {
+	if provider == "" {
+		provider = ProviderClaude
+	}
 	// Read the transcript tail ONCE — line 2 (thinking + tokens) and line 3
 	// (activity) both derive from it, and it runs on every statusline refresh.
 	var tx []string
@@ -84,15 +112,45 @@ func Render(in Input, full bool) string {
 	}
 	var lines []string
 	if full {
-		lines = append(lines, renderWhere(in), renderSession(in, tx))
+		lines = append(lines, renderWhere(in, provider), renderSession(in, tx, provider))
 	}
 	if mem := renderMemory(in, tx); mem != "" {
 		lines = append(lines, mem)
 	}
-	if usageLine := renderUsage("claude"); usageLine != "" {
+	if usageLine := renderUsage(provider); usageLine != "" {
 		lines = append(lines, usageLine)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// DetectProvider best-effort infers the agent from the payload shape. It is only the
+// FALLBACK for a missing --provider flag (e.g. a hand-edited statusline command); the
+// explicit flag is always preferred. Only CURSOR-EXCLUSIVE fields count as Cursor
+// signals — param_summary / max_mode / autorun. (used_percentage is NOT exclusive:
+// Claude Code sends it too, so keying on it misdetects a Claude session as Cursor.)
+// A payload with model.name but no display_name is Gemini/Antigravity; everything
+// else — including any normal Claude Code payload — is Claude.
+func DetectProvider(in Input) string {
+	switch {
+	case in.Model.ParamSummary != "" || in.Model.MaxMode || in.Autorun:
+		return ProviderCursor
+	case in.Model.DisplayName == "" && in.Model.Name != "":
+		return ProviderAntigravity
+	default:
+		return ProviderClaude
+	}
+}
+
+// defaultModelLabel is the line-1 model name when the payload omits one — per agent.
+func defaultModelLabel(provider string) string {
+	switch provider {
+	case ProviderCursor:
+		return "Auto"
+	case ProviderAntigravity:
+		return "Gemini"
+	default:
+		return "Claude"
+	}
 }
 
 func workdir(in Input) string {
@@ -106,8 +164,8 @@ func workdir(in Input) string {
 	return wd
 }
 
-// renderWhere = line 1: 📁 folder · 🌿 branch · 🤖 model · 🔖 version.
-func renderWhere(in Input) string {
+// renderWhere = line 1: 📁 folder · 🌿 branch · [wt] · 🤖 model · 🔖 version · extras.
+func renderWhere(in Input, provider string) string {
 	dir := workdir(in)
 	folder := filepath.Base(dir)
 	if folder == "" || folder == "." {
@@ -115,33 +173,65 @@ func renderWhere(in Input) string {
 	}
 	model := in.Model.DisplayName
 	if model == "" {
-		model = "Claude"
+		model = in.Model.Name
+	}
+	if model == "" {
+		model = defaultModelLabel(provider)
 	}
 	out := "📁 " + folder
 	if br := gitBranch(dir); br != "" {
 		out += "  🌿 " + br
 	}
+	if in.Worktree.Name != "" {
+		out += "  [wt:" + in.Worktree.Name + "]"
+	}
 	out += "  🤖 " + model
 	if in.Version != "" {
 		out += "  🔖 v" + in.Version
 	}
+	if in.Autorun {
+		out += "  ⚡ autorun"
+	}
+	if in.Vim.Mode != "" {
+		out += "  ⌨ " + in.Vim.Mode
+	}
 	return out
 }
 
-// renderSession = line 2: 🧠 thinking · ⚡ effort · 🪙 tokens/window · 📊 context bar.
-func renderSession(in Input, tx []string) string {
+// renderSession = line 2: 🧠 mode · ⚡ effort · 🪙 tokens/window · 📊 context bar.
+// The 🧠 tag is the thinking level for Claude/Antigravity; for Cursor (no thinking
+// keywords) it reflects param_summary / max_mode instead.
+func renderSession(in Input, tx []string, provider string) string {
 	tokens, ctxSize, usedPct := contextStats(in, tx)
-	out := "🧠 " + thinkingMode(in, tx)
+	out := "🧠 " + sessionModeTag(in, tx, provider)
 	if in.Effort.Level != "" {
 		out += "  ⚡ " + in.Effort.Level
 	}
 	out += "  🪙 " + fmtTokens(tokens) + "/" + fmtCtx(ctxSize)
+	if in.ContextWindow.TotalOutputTokens != nil && *in.ContextWindow.TotalOutputTokens > 0 {
+		out += " out:" + fmtTokens(*in.ContextWindow.TotalOutputTokens)
+	}
 	if usedPct >= 0 {
 		out += fmt.Sprintf("  📊 %s %s%d%%%s", thresholdBar(usedPct), pctColor(usedPct), usedPct, cReset)
 	} else {
 		out += "  📊 " + cDim + strings.Repeat("▱", barWidth) + cReset + " -"
 	}
 	return out
+}
+
+// sessionModeTag returns the line-2 🧠 tag: Cursor reports param_summary/max_mode;
+// every other provider uses the transcript-derived thinking level.
+func sessionModeTag(in Input, tx []string, provider string) string {
+	if provider == ProviderCursor {
+		if s := strings.Trim(in.Model.ParamSummary, "()"); s != "" {
+			return s
+		}
+		if in.Model.MaxMode {
+			return "max"
+		}
+		return "off"
+	}
+	return thinkingMode(in, tx)
 }
 
 // renderMemory = line 3: 💾 Auxly · link dot · role · last op · pending. Ported from
@@ -179,8 +269,14 @@ func renderUsage(provider string) string {
 		return ""
 	}
 	now := time.Now()
-	labels := map[string]string{"session": "5h", "week": "wk", "weekly": "wk", "overall": "all", "opus": "opus"}
-	icons := map[string]string{"5h": "⏳ ", "wk": "📅 ", "all": "", "opus": "🅾 "}
+	labels := map[string]string{
+		"session": "5h", "week": "wk", "weekly": "wk", "overall": "all", "opus": "opus",
+		"total": "plan", "auto": "auto", "api": "api", // Cursor plan / auto / API buckets
+	}
+	icons := map[string]string{
+		"5h": "⏳ ", "wk": "📅 ", "all": "", "opus": "🅾 ",
+		"plan": "", "auto": "⚡ ", "api": "🔌 ",
+	}
 	sep := " " + cDim + "·" + cReset + " "
 
 	var parts []string
@@ -284,9 +380,12 @@ func contextStats(in Input, tx []string) (tokens, ctxSize, usedPct int) {
 	if tokens == 0 {
 		tokens = lastAssistantTokens(tx)
 	}
-	if in.ContextWindow.RemainingPercentage != nil {
+	switch {
+	case in.ContextWindow.UsedPercentage != nil: // Cursor sends this directly
+		usedPct = int(*in.ContextWindow.UsedPercentage + 0.5)
+	case in.ContextWindow.RemainingPercentage != nil:
 		usedPct = int(100 - *in.ContextWindow.RemainingPercentage + 0.5)
-	} else if tokens > 0 && ctxSize > 0 {
+	case tokens > 0 && ctxSize > 0:
 		usedPct = tokens * 100 / ctxSize
 	}
 	return tokens, ctxSize, usedPct
@@ -562,7 +661,9 @@ func auxlyActivitySegment(name string, input json.RawMessage, suffix string) str
 
 func lastAssistantTokens(lines []string) int {
 	for i := len(lines) - 1; i >= 0; i-- {
-		if !strings.Contains(lines[i], `"type":"assistant"`) {
+		// Claude transcripts mark assistant turns with "type":"assistant"; Cursor's
+		// role-based JSONL uses "role":"assistant" — accept either.
+		if !strings.Contains(lines[i], `"type":"assistant"`) && !strings.Contains(lines[i], `"role":"assistant"`) {
 			continue
 		}
 		var tl transcriptLine

@@ -44,15 +44,20 @@ func usageRefreshLockPath() string { return filepath.Join(auxlyDir(), ".usage-re
 var spawnRefresh = spawnDetachedRefresh
 
 // MaybeRefreshUsage kicks a background usage-cache refresh when Live Usage is
-// enabled and the cached "claude" snapshot (the only provider the statusline
-// shows) is going stale, debounced by a short lock so concurrent renders don't
-// pile up children. It returns immediately and never blocks the statusline; the
-// render itself stays network-free.
-func MaybeRefreshUsage() {
+// enabled and the cached snapshot for the provider this statusline shows (claude,
+// cursor, or antigravity) is going stale, debounced by a short lock so concurrent
+// renders don't pile up children. It returns immediately and never blocks the
+// statusline; the render itself stays network-free. An empty provider defaults to
+// claude. The spawned child refreshes every stale provider in one pass, so the
+// shared lock is correct even when several agents' statuslines render together.
+func MaybeRefreshUsage(provider string) {
+	if provider == "" {
+		provider = ProviderClaude
+	}
 	if !config.LoadSettings().LiveUsage {
 		return // user hasn't opted into networked usage — stay local-first.
 	}
-	if !usageSnapshotStale("claude") {
+	if !usageSnapshotStale(provider) {
 		return // snapshot is fresh enough; the render already shows it live.
 	}
 	if !acquireRefreshLock() {

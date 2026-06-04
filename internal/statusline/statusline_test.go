@@ -92,41 +92,41 @@ func TestInstallUninstallRoundTrip(t *testing.T) {
 	os.WriteFile(filepath.Join(claudeDir, "settings.json"), data, 0o644)
 
 	// Install (wrap) → command becomes auxly, original backed up, other keys kept.
-	if err := Install(true); err != nil {
+	if err := Install(ProviderClaude, true); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	st := CurrentState()
+	st := CurrentState(ProviderClaude)
 	if st.Mode != ModeWrap {
 		t.Errorf("after wrap install, mode = %q, want wrap", st.Mode)
 	}
-	if OriginalCommand() != orig {
-		t.Errorf("original not backed up; got %q", OriginalCommand())
+	if OriginalCommand(ProviderClaude) != orig {
+		t.Errorf("original not backed up; got %q", OriginalCommand(ProviderClaude))
 	}
 	// The unrelated "model" key must be preserved.
-	m, _ := readSettings()
+	m, _ := readSettings(filepath.Join(claudeDir, "settings.json"))
 	if m["model"] != "opusplan" {
 		t.Error("install clobbered an unrelated settings key")
 	}
 
 	// Re-install as full must NOT overwrite the real backup with the auxly command.
-	if err := Install(false); err != nil {
+	if err := Install(ProviderClaude, false); err != nil {
 		t.Fatalf("reinstall full: %v", err)
 	}
-	if OriginalCommand() != orig {
-		t.Errorf("switching modes clobbered the backup; got %q", OriginalCommand())
+	if OriginalCommand(ProviderClaude) != orig {
+		t.Errorf("switching modes clobbered the backup; got %q", OriginalCommand(ProviderClaude))
 	}
-	if CurrentState().Mode != ModeFull {
+	if CurrentState(ProviderClaude).Mode != ModeFull {
 		t.Error("re-install full did not set full mode")
 	}
 
 	// Uninstall restores the original verbatim and clears the backup.
-	if err := Uninstall(); err != nil {
+	if err := Uninstall(ProviderClaude); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	if currentCommand() != orig {
-		t.Errorf("uninstall did not restore original; got %q", currentCommand())
+	if got := CurrentState(ProviderClaude).Command; got != orig {
+		t.Errorf("uninstall did not restore original; got %q", got)
 	}
-	if OriginalCommand() != "" {
+	if OriginalCommand(ProviderClaude) != "" {
 		t.Error("backup should be cleared after restore")
 	}
 }

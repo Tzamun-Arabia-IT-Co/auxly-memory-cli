@@ -95,7 +95,7 @@ func TestMaybeRefreshUsageGating(t *testing.T) {
 
 	// Live Usage OFF → never spawns, even with a missing/stale snapshot.
 	writeLiveUsageSetting(t, home, false)
-	MaybeRefreshUsage()
+	MaybeRefreshUsage("claude")
 	if spawned != 0 {
 		t.Fatalf("LiveUsage off must not spawn; got %d", spawned)
 	}
@@ -103,8 +103,8 @@ func TestMaybeRefreshUsageGating(t *testing.T) {
 	// Live Usage ON + stale snapshot → spawns once; the immediate retry is debounced.
 	writeLiveUsageSetting(t, home, true)
 	writeUsageCache(t, home, time.Now().Add(-usageRefreshAfter-time.Second))
-	MaybeRefreshUsage()
-	MaybeRefreshUsage()
+	MaybeRefreshUsage("claude")
+	MaybeRefreshUsage("claude")
 	if spawned != 1 {
 		t.Fatalf("expected exactly one spawn (second debounced by the lock); got %d", spawned)
 	}
@@ -113,7 +113,7 @@ func TestMaybeRefreshUsageGating(t *testing.T) {
 	// freshness gate, not the debounce.
 	os.Remove(usageRefreshLockPath())
 	writeUsageCache(t, home, time.Now())
-	MaybeRefreshUsage()
+	MaybeRefreshUsage("claude")
 	if spawned != 1 {
 		t.Fatalf("fresh snapshot must not spawn; got %d", spawned)
 	}
