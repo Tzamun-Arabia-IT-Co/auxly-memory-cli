@@ -33,6 +33,10 @@ type settingsModel struct {
 	// off keeps Auxly fully local). Persisted via config.SaveSettings.
 	liveUsage bool
 
+	// Auto-Update opt-in: self-update to the latest release in place after an
+	// interactive session (never mid-run). Persisted via config.SaveSettings.
+	autoUpdate bool
+
 	// Sub-tab state: 0 = General (trust), 1 = Agents (dashboard show/hide),
 	// 2 = Customizations (Claude Code statusline).
 	subTab int
@@ -57,6 +61,7 @@ func newSettingsModel(memPath string, logger *audit.Logger) settingsModel {
 		memoryPath:   memPath,
 		trustLevels:  []string{"auto", "require_approval", "read_only"},
 		liveUsage:    config.LoadSettings().LiveUsage,
+		autoUpdate:   config.LoadSettings().AutoUpdate,
 		logger:       logger,
 		hiddenAgents: loadHiddenAgentSet(),
 	}
@@ -138,10 +143,15 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		if m.agentCursor >= len(m.agentBrands) {
 			m.agentCursor = 0
 		}
-	case statuslineAppliedMsg:
-		// Result of an in-process statusline apply (Customizations sub-tab).
-		m.cust = m.cust.handleApplied(msg)
+	case customizationsPreviewTickMsg:
+		// A scheduled re-render so the statusline preview reflects the background
+		// usage refresh that landed since it was shown (⧗ as of … → ↻ live).
 		return m, nil
+	case statuslineAppliedMsg:
+		// Result of an in-process statusline apply (Customizations sub-tab). On a
+		// successful apply the focus advances to the next agent — refresh its preview.
+		m.cust = m.cust.handleApplied(msg)
+		return m, m.cust.previewRefreshCmd()
 	case tea.MouseMsg:
 		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
 			w := m.width
@@ -276,6 +286,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			case "l", "right":
 				m.subTab = 2
 				m.cust.refresh()
+				return m, m.cust.previewRefreshCmd()
 			case "enter", " ":
 				if m.agentCursor < len(m.agentBrands) {
 					m.toggleAgentHidden(m.agentBrands[m.agentCursor].id)
@@ -286,7 +297,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 
 		switch msg.String() {
 		case "j", "down":
-			max := len(uniqueAgents) + 1
+			max := len(uniqueAgents) + 2 // +1 Live Usage, +2 Auto-Update
 			if m.cursor < max {
 				m.cursor++
 			}
@@ -297,6 +308,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		case "h", "left":
 			m.subTab = 2
 			m.cust.refresh()
+			return m, m.cust.previewRefreshCmd()
 		case "l", "right":
 			m.subTab = 1
 		case "enter", " ":
@@ -320,6 +332,8 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				return m, m.saveTrust()
 			} else if m.cursor == len(uniqueAgents)+1 {
 				return m, m.toggleLiveUsage()
+			} else if m.cursor == len(uniqueAgents)+2 {
+				return m, m.toggleAutoUpdate()
 			}
 		}
 	}
@@ -331,6 +345,15 @@ func (m *settingsModel) toggleLiveUsage() tea.Cmd {
 	m.liveUsage = !m.liveUsage
 	next := config.LoadSettings()
 	next.LiveUsage = m.liveUsage
+	_ = config.SaveSettings(next)
+	return nil
+}
+
+// toggleAutoUpdate flips the Auto-Update opt-in, persisting it to settings.json.
+func (m *settingsModel) toggleAutoUpdate() tea.Cmd {
+	m.autoUpdate = !m.autoUpdate
+	next := config.LoadSettings()
+	next.AutoUpdate = m.autoUpdate
 	_ = config.SaveSettings(next)
 	return nil
 }
@@ -602,27 +625,37 @@ func (m settingsModel) View() string {
 		}
 	}
 
+	// Live Usage and Auto-Update share one section + one toggle row so adding
+	// Auto-Update costs zero extra rows (keeps Settings within the fit guarantee).
 	lines = append(lines, "")
-	lines = append(lines, purple.Render("   Live Usage"))
+	lines = append(lines, purple.Render("   Live Usage  ·  Auto-Update"))
 	if !compact {
-		lines = append(lines, dim.Render("   Calls each agent's provider with its stored"))
-		lines = append(lines, dim.Render("   login — off keeps Auxly fully local."))
+		lines = append(lines, dim.Render("   Live Usage calls providers for quota; Auto-Update"))
+		lines = append(lines, dim.Render("   self-updates after a session. Both off by default."))
 	}
-	cursorLive := "  "
+	liveCursor, autoCursor := "  ", "  "
 	if m.cursor == len(uniqueAgents)+1 {
-		cursorLive = cyan.Render("▸ ")
+		liveCursor = cyan.Render("▸ ")
+	}
+	if m.cursor == len(uniqueAgents)+2 {
+		autoCursor = cyan.Render("▸ ")
 	}
 	liveState := red.Render("[OFF]")
 	if m.liveUsage {
 		liveState = green.Render("[ON]")
 	}
-	liveLabel := "Live Usage"
-	if m.cursor == len(uniqueAgents)+1 {
-		liveLabel = bold.Render("Live Usage") + strings.Repeat(" ", 8)
-	} else {
-		liveLabel = fmt.Sprintf("%-18s", liveLabel)
+	autoState := red.Render("[OFF]")
+	if m.autoUpdate {
+		autoState = green.Render("[ON]")
 	}
-	lines = append(lines, fmt.Sprintf("%s%s %s", cursorLive, liveLabel, liveState))
+	liveLabel, autoLabel := "Live Usage", "Auto-Update"
+	if m.cursor == len(uniqueAgents)+1 {
+		liveLabel = bold.Render(liveLabel)
+	}
+	if m.cursor == len(uniqueAgents)+2 {
+		autoLabel = bold.Render(autoLabel)
+	}
+	lines = append(lines, fmt.Sprintf("%s%s %s     %s%s %s", liveCursor, liveLabel, liveState, autoCursor, autoLabel, autoState))
 
 	padW := w - 10
 	if padW < 40 {

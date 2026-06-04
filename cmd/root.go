@@ -57,6 +57,20 @@ func notifyUpdateAvailable() {
 	if !ok {
 		return
 	}
+	// Opt-in auto-update: apply the new release IN PLACE now that the interactive
+	// command has finished (we're past the command run — never mid-session, and the
+	// hot statusline path is excluded by updateNoticeEligible). The current process
+	// already ran on the old binary; the next launch picks up the new one. Best-effort
+	// — a failed self-update falls through to the manual notice.
+	if config.LoadSettings().AutoUpdate {
+		if _, err := update.SelfUpdate(); err == nil {
+			fmt.Fprintf(os.Stderr,
+				"\n\033[38;5;220m⬆ auxly auto-updated to %s\033[0m (was %s) — the next launch uses it.\n",
+				latest, update.Current)
+			return
+		}
+		// fall through to the manual notice if the self-update failed.
+	}
 	fmt.Fprintf(os.Stderr,
 		"\n\033[38;5;220m⬆ auxly %s is available\033[0m (you have %s) — run \033[1mauxly update\033[0m\n",
 		latest, update.Current)

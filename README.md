@@ -39,7 +39,7 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 - [The dashboard](#the-dashboard)
 - [Remote memory over SSH](#remote-memory-over-ssh)
 - [Live Usage](#live-usage)
-- [Claude Code statusline](#claude-code-statusline)
+- [Statusline (Claude Code · Cursor · Antigravity)](#statusline-claude-code--cursor--antigravity)
 - [Git sync](#git-sync)
 - [Connect any MCP agent](#connect-any-mcp-capable-agent-manual-setup)
 - [Command reference](#command-reference)
@@ -407,6 +407,8 @@ auxly connect list     # show configured hosts + connected boxes
 auxly connect auto     # one-command bootstrap when a host advertises an offer
 ```
 
+`auxly connect auto` also carries your setup onto the new machine: it wires the MCP launcher + skills **and installs the Auxly statusline** for that box's detected agents (idempotent — a machine with its own statusline is left alone). To keep a remote on the latest release automatically, enable **Auto-Update** in **Settings** (or set `"autoUpdate": true` in `~/.auxly/settings.json`) — each machine then self-updates in place after a session, so a publish reaches every box without a manual `auxly update`.
+
 Auxly is **network-agnostic** and stores **no network credentials** — you bring the reachability, it rides on top:
 
 | Method | When |
@@ -467,27 +469,38 @@ auxly usage auth antigravity  # one-time browser consent for Antigravity
 
 ---
 
-## Claude Code statusline
+## Statusline (Claude Code · Cursor · Antigravity)
 
-Auxly ships a productized statusline for **Claude Code** — a rich, multi-line status bar that surfaces your working context, your memory link, and your live plan usage without leaving the editor. Wire it in (additive and fully reversible — your existing statusline is backed up and restored on uninstall):
+Auxly ships a productized statusline for **Claude Code, Cursor CLI, and Antigravity CLI** — a rich, multi-line status bar that surfaces your working context, your memory link, and your live plan usage without leaving the editor. Wire it into one agent or all of them (additive and fully reversible — each agent's existing statusline, even a hand-rolled `statusline.sh`, is backed up and restored on uninstall):
 
 ```bash
-auxly statusline install          # replace your statusline with Auxly's full 4-line view
-auxly statusline install --wrap   # keep your own statusline and append the Auxly segment
-auxly statusline uninstall        # restore your backed-up original
+auxly statusline install                       # Claude Code (default)
+auxly statusline install --agent cursor        # Cursor CLI
+auxly statusline install --agent antigravity   # Antigravity CLI
+auxly statusline install --agent all           # every detected agent at once
+auxly statusline install --wrap                # keep your own statusline and append the Auxly segment
+auxly statusline uninstall --agent <name>      # restore that agent's backed-up original
 ```
 
-It renders four lines: **where** (folder · branch · model · version), **session** (thinking · effort · tokens · context bar), **Auxly memory** (link · role · last op · pending), and **live Claude plan usage** (5h + weekly bars with reset countdowns).
+It renders four lines: **where** (folder · branch · model · version), **session** (thinking/params · effort · tokens · context bar), **Auxly memory** (link · role · last op · pending), and **live plan usage for whichever agent renders it** — Claude's 5h + weekly bars, Cursor's plan/auto, or Antigravity's overall, each with reset countdowns. Each provider reads **only its own usage cache**, so one agent's numbers never bleed into another's line.
 
-The render path **never makes a network call** — it reads only the last-good usage snapshot on disk, so it's safe to run on every prompt. When Live Usage is enabled, the usage line stays **live** during an active session: after printing instantly it triggers a guarded, detached background refresh that updates the snapshot for the next render (debounced, and rate-limited by the same circuit breaker as the dashboard). You can also manage it in the dashboard under **Settings → Customizations**, with a live preview before you apply.
+The render path **never makes a network call** — it reads only the last-good usage snapshot on disk, so it's safe to run on every prompt. When Live Usage is enabled, the usage line stays **live** during an active session: after printing instantly it triggers a guarded, detached background refresh that updates the snapshot for the next render (debounced, and rate-limited by the same circuit breaker as the dashboard). You can also manage it in the dashboard under **Settings → Customizations**, where an agent switcher (`a` to cycle) gives each agent its own replace/wrap/none choice with a live preview before you apply; applying one auto-advances to the next agent, and an agent already running Auxly offers **Restore my original statusline** from the backup.
 
-> Statusline support is Claude Code–specific (other CLIs don't expose a scriptable statusline yet) — your memory still works everywhere.
+Each agent is wired in its own config file, and the installed command carries a `--provider` flag so the right plan usage shows:
+
+| Agent | Config file wired |
+|-------|-------------------|
+| Claude Code | `~/.claude/settings.json` |
+| Cursor CLI | `~/.cursor/cli-config.json` |
+| Antigravity CLI | `~/.gemini/antigravity-cli/settings.json` |
+
+> Agents without a scriptable statusline (Codex, Gemini CLI) aren't wired — your memory still works everywhere.
 
 <div align="center">
 
-<img src="screenshots/statusline.png" alt="Settings → Customizations — Claude Code statusline picker with a live preview" width="820" />
+<img src="screenshots/statusline.png" alt="Settings → Customizations — per-agent statusline picker with a live preview" width="820" />
 
-<sub>Settings → Customizations: pick your statusline mode with a live preview before applying.</sub>
+<sub>Settings → Customizations: switch agents (Claude · Cursor · Antigravity) and pick each one's statusline mode with a live preview before applying.</sub>
 
 </div>
 
@@ -583,8 +596,10 @@ All optional — Auxly creates and manages these for you; edit them by hand any 
 |------|------------------|
 | `~/.auxly/memory/trust.yaml` | Per-provider trust levels (`auto` / `require_approval` / `read_only`) — or use `auxly trust set …` |
 | `~/.auxly/memory/git.yaml` | Git sync remote and behavior (see [Git sync](#git-sync)) |
-| `~/.auxly/settings.json` | Dashboard preferences: `liveUsage` opt-in (off by default) and `hiddenAgents` — toggled in **Settings** |
+| `~/.auxly/settings.json` | Dashboard preferences: `liveUsage` + `autoUpdate` opt-ins (off by default) and `hiddenAgents` — toggled in **Settings** |
 | `~/.claude/settings.json` | Claude Code statusline wiring — managed by `auxly statusline install/uninstall` |
+| `~/.cursor/cli-config.json` | Cursor CLI statusline wiring — `auxly statusline install --agent cursor` |
+| `~/.gemini/antigravity-cli/settings.json` | Antigravity CLI statusline wiring — `auxly statusline install --agent antigravity` |
 
 ### Environment variables
 

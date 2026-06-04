@@ -35,6 +35,14 @@ type Settings struct {
 	// local-first, zero-network behavior.
 	LiveUsage bool `json:"liveUsage"`
 
+	// AutoUpdate opts into self-updating to the latest published release. When on,
+	// `auxly` applies an available update IN PLACE after an interactive command
+	// finishes (never mid-session, never on the hot statusline path), so the next
+	// launch runs the new binary. Off by default — updates otherwise only notify and
+	// wait for a manual `auxly update`. Enable it on machines (e.g. remotes) you want
+	// to keep current automatically.
+	AutoUpdate bool `json:"autoUpdate,omitempty"`
+
 	// HiddenAgents lists canonical provider/brand ids the user has chosen to hide
 	// from the dashboard grid (Settings → Agents). Empty (the default) shows every
 	// detected or active agent. Hiding only affects the dashboard display — it
