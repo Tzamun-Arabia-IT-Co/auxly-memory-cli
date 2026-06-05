@@ -21,6 +21,10 @@ const (
 	osWindows
 )
 
+// winPSPreamble silences PowerShell's progress stream, which otherwise gets
+// serialized as CLIXML noise into the SSH output and pollutes parsed results.
+const winPSPreamble = "$ProgressPreference='SilentlyContinue'; "
+
 // classifyOS maps a declared profile OS string to the command family used over SSH.
 func classifyOS(declared string) remoteOS {
 	switch strings.ToLower(strings.TrimSpace(declared)) {
@@ -91,7 +95,11 @@ func detectRemoteOS(p remoteProfile) (remoteOS, string, error) {
 	}
 
 	// Live probe: Windows fallback.
-	ver, winErr := runSSH(p, "cmd", "/c", "ver")
+	// The box's default ssh shell may be cmd.exe, which mangles `cmd /c ver`
+	// argv over OpenSSH-for-Windows. The EncodedCommand path is quoting-proof
+	// (verified against a real Windows host), so probe Windows that way.
+	ver, winErr := runSSH(p, "powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+		psEncode(winPSPreamble+"[System.Environment]::OSVersion.VersionString"))
 	if winErr == nil {
 		ver = strings.TrimSpace(ver)
 		if strings.Contains(strings.ToLower(ver), "windows") {
@@ -102,7 +110,6 @@ func detectRemoteOS(p remoteProfile) (remoteOS, string, error) {
 			}
 			return osWindows, ver, nil
 		}
-
 		return osUnknown, ver, fmt.Errorf("windows probe returned unrecognized output: %q", ver)
 	}
 
@@ -125,7 +132,7 @@ func runRemoteScript(p remoteProfile, fam remoteOS, posix, powershell string) (s
 			return "", fmt.Errorf("no PowerShell rendering provided for windows target")
 		}
 
-		out, err := runSSH(p, "powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncode(powershell))
+		out, err := runSSH(p, "powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncode(winPSPreamble+powershell))
 		if err != nil {
 			return "", fmt.Errorf("run windows remote script: %w", err)
 		}
