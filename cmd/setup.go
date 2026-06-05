@@ -53,15 +53,35 @@ func getBinaryPath() string {
 		}
 	}
 
-	// Default fallback to ~/.local/bin/auxly
+	// Default fallback: check OS-specific install locations.
 	home, err := os.UserHomeDir()
 	if err == nil {
-		localBin := filepath.Join(home, ".local", "bin", "auxly")
-		if _, err := os.Stat(localBin); err == nil {
-			return localBin
+		var candidates []string
+		if runtime.GOOS == "windows" {
+			localAppData := os.Getenv("LOCALAPPDATA")
+			if localAppData == "" {
+				localAppData = filepath.Join(home, "AppData", "Local")
+			}
+			candidates = []string{
+				filepath.Join(localAppData, "Programs", "auxly", "auxly.exe"),
+				filepath.Join(home, ".local", "bin", "auxly.exe"),
+			}
+		} else {
+			candidates = []string{filepath.Join(home, ".local", "bin", "auxly")}
+		}
+		for _, c := range candidates {
+			if c == "" {
+				continue
+			}
+			if _, err := os.Stat(c); err == nil {
+				return c
+			}
 		}
 	}
 
+	if runtime.GOOS == "windows" {
+		return "auxly.exe"
+	}
 	return "/usr/local/bin/auxly"
 }
 

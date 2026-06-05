@@ -4,7 +4,26 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 )
+
+// AppSupportDir returns the per-application config base directory for the
+// current OS: macOS ~/Library/Application Support, Linux ~/.config,
+// Windows %APPDATA% (Roaming).
+func AppSupportDir(home, app string) string {
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", app)
+	case "linux":
+		return filepath.Join(home, ".config", app)
+	default: // windows (and any other OS falls back to %APPDATA% / home-relative)
+		base := os.Getenv("APPDATA")
+		if base == "" {
+			base = filepath.Join(home, "AppData", "Roaming")
+		}
+		return filepath.Join(base, app)
+	}
+}
 
 type Agent struct {
 	Name     string
@@ -31,7 +50,7 @@ func InstalledAgents() []Agent {
 		binaries   []string
 	}{
 		{"Claude Desktop", "claude", "MCP",
-			[]string{filepath.Join(home, "Library/Application Support/Claude/claude_desktop_config.json")}, nil},
+			[]string{filepath.Join(AppSupportDir(home, "Claude"), "claude_desktop_config.json")}, nil},
 		{"Claude Code / CLI", "claude-code", "MCP+Shell",
 			nil, []string{"claude"}},
 		// Cursor ships two distinct surfaces that each take their own MCP config:
@@ -39,10 +58,10 @@ func InstalledAgents() []Agent {
 		// and the Agent CLI (`cursor-agent`, reads ~/.cursor/mcp.json). Detect them
 		// separately so init shows both and onboards each correctly.
 		{"Cursor IDE", "cursor", "MCP",
-			[]string{filepath.Join(home, "Library/Application Support/Cursor/User/globalStorage/co.heron.cursor/mcpServers.json")},
+			[]string{filepath.Join(AppSupportDir(home, "Cursor"), "User", "globalStorage", "co.heron.cursor", "mcpServers.json")},
 			[]string{"cursor"}},
 		{"Cursor CLI", "cursor", "MCP",
-			[]string{filepath.Join(home, ".cursor/mcp.json")},
+			[]string{filepath.Join(home, ".cursor", "mcp.json")},
 			[]string{"cursor-agent"}},
 		{"Codex IDE Desktop", "codex", "MCP",
 			[]string{filepath.Join(home, ".codex/config.toml")}, nil},
@@ -60,15 +79,15 @@ func InstalledAgents() []Agent {
 		// live in ~/.copilot/mcp-config.json. Detected by that config dir or the
 		// binary on PATH. The older Copilot desktop app dir is kept as a fallback.
 		{"GitHub Copilot CLI", "copilot", "MCP",
-			[]string{filepath.Join(home, ".copilot"), filepath.Join(home, "Library/Application Support/GitHub Copilot")},
+			[]string{filepath.Join(home, ".copilot"), AppSupportDir(home, "GitHub Copilot")},
 			[]string{"copilot"}},
 		// Perplexity for macOS supports MCP via its Connectors UI (requires the
 		// PerplexityXPC helper). There is no writable config file, so auxly detects
 		// the app and surfaces a paste-in connector command during setup.
 		{"Perplexity", "perplexity", "MCP",
-			[]string{filepath.Join(home, "Library/Application Support/Perplexity")}, nil},
+			[]string{AppSupportDir(home, "Perplexity")}, nil},
 		{"Gemini Desktop", "gemini", "Shell",
-			[]string{filepath.Join(home, "Library/Application Support/Gemini")}, nil},
+			[]string{AppSupportDir(home, "Gemini")}, nil},
 		// Warp terminal — detected by its config dir (created once Warp runs); MCP
 		// config is wired at ~/.warp/.mcp.json by knownIDETargets.
 		{"Warp", "warp", "MCP",

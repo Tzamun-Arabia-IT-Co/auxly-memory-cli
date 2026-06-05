@@ -327,17 +327,10 @@ func (m wizardModel) detectAgentsProgressive() tea.Cmd {
 		agents := detect.InstalledAgents()
 		time.Sleep(400 * time.Millisecond)
 
-		var cursorBaseDir string
-		switch runtime.GOOS {
-		case "darwin":
-			cursorBaseDir = filepath.Join(home, "Library/Application Support/Cursor")
-		case "linux":
-			cursorBaseDir = filepath.Join(home, ".config/Cursor")
-		default:
-			cursorBaseDir = filepath.Join(os.Getenv("APPDATA"), "Cursor")
-		}
+		claudeBaseDir := detect.AppSupportDir(home, "Claude")
+		cursorBaseDir := detect.AppSupportDir(home, "Cursor")
 		agentPaths := map[string]string{
-			"claude":      filepath.Join(home, "Library/Application Support/Claude"),
+			"claude":      claudeBaseDir,
 			"cursor":      cursorBaseDir,
 			"claude-code": filepath.Join(home, ".claude"),
 			"gemini":      filepath.Join(home, ".gemini"),

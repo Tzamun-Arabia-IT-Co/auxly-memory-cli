@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.12] - 2026-06-05
+
+**Windows support.** Connecting to a Windows machine as a remote — and running a
+Windows machine as a memory **host** — now works end to end, validated live against a
+real Windows 11 host (build 26100). The root cause was that a Windows host's default
+SSH shell is `cmd.exe`, so Auxly's POSIX `sh -c` provisioning never ran (the
+`'sh' is not recognized` failure). Auxly now detects the remote OS over SSH and speaks
+**PowerShell** to Windows hosts.
+
+### Fixed
+
+- **`auxly connect` to a Windows host works.** A new remote-shell layer detects the
+  target OS over SSH — `uname -sm` for POSIX, falling back to a PowerShell
+  `-EncodedCommand` probe for Windows (the old `cmd /c ver` probe is mangled by
+  OpenSSH-for-Windows when the default shell is `cmd.exe`). Every Windows command is
+  then run through `powershell -NoProfile -NonInteractive -EncodedCommand <UTF-16LE
+  base64>`, which sidesteps cmd.exe/SSH quoting entirely. POSIX hosts are unchanged.
+- **Cross-platform agent detection & configuration.** Agent config locations
+  (Claude Desktop, Cursor, Copilot, Perplexity, Gemini) now resolve under
+  `%APPDATA%` / `%LOCALAPPDATA%` on Windows and `~/.config` on Linux, instead of
+  assuming macOS `~/Library/Application Support`. `getBinaryPath` resolves
+  `auxly.exe` (via `%LOCALAPPDATA%\Programs\auxly` or PATH) on Windows.
+
+### Added
+
+- **A clean Windows host is auto-installed over SSH.** When `auxly` is missing on a
+  reachable Windows host, Auxly installs it via PowerShell
+  (`irm https://auxly.io/cli.ps1 | iex`, TLS-1.2 hardened for older Windows), then
+  re-probes — falling back to `%LOCALAPPDATA%\Programs\auxly\auxly.exe` if the fresh
+  PATH isn't yet live in the SSH session. Verified by wiping auxly from a real box and
+  letting `auxly connect` reinstall it.
+- **Windows as a memory host.** A Windows machine can serve its own vault to your other
+  agents: a consumer's `auxly connect-mcp` launches `auxly mcp-server` on the Windows
+  host over SSH (verified with a live MCP `initialize` handshake). Keep-alive uses
+  Windows Task Scheduler (`schtasks`), already OS-dispatched alongside launchd/systemd.
+- **Self-healing remote OS.** The first successful connect records the detected OS back
+  onto the saved profile, so later steps that can't probe (e.g. installing the SSH key
+  over a password session) use the correct shell family. Windows admin key installs
+  target `%ProgramData%\ssh\administrators_authorized_keys` with the ownership/ACL
+  (`takeown` + `icacls`) that Windows OpenSSH requires.
+
 ## [1.0.11] - 2026-06-05
 
 Polish release: a vault **export** to ~/Downloads, a dashboard **force-update** for
