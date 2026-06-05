@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.16] - 2026-06-06
+
+**Deterministic remote auto-wiring + Remote-tab management hardening.** Adding a box
+(Windows / macOS / Linux) now configures everything on the remote automatically —
+the MCP launcher, `/auxly-*` skills, and the statusline — even while the relay tunnel
+is still coming up. Plus a sweep of fixes to the Remote tab's connection management.
+
+### Fixed
+
+- **Adding a box wires its agent reliably — no more silent half-connect.** The
+  agent-wiring step (`connect use` / `connect auto`) gated ALL config writes on a
+  host-reachability probe. On a freshly-added box the host's keep-alive supervisor
+  dials the reverse tunnel a few seconds *later*, so the box's first probe hit a
+  not-yet-listening port and the function aborted **before** injecting the MCP
+  launcher / skills / statusline — leaving the box "connected" on the host but
+  unconfigured. Now `probeHostReachable` retries across the tunnel-startup window
+  (bounded per attempt) and wiring proceeds **even if the probe never answers** (the
+  launcher, skills, and statusline are local writes that take effect at runtime under
+  the agent's full environment).
+- **`connect use` (host-push path) now installs the statusline too**, matching
+  `connect auto`. Previously only the on-box path installed it.
+- **No duplicate remotes/clients.** Dedup by name OR host+method+user+port, so
+  re-adding the same box never creates a second row.
+- **Deletes persist, and connected boxes stay visible when the host tunnel is down.**
+  `host forget` removes the local record first (bounded best-effort remote cleanup),
+  and the Remote tab lists connected boxes regardless of host-tunnel state.
+- **Provision atomicity.** The connection is recorded before the (sometimes slow)
+  agent-wiring, so a stalled wire never leaves a relay with no matching client row.
+
+### Added
+
+- **Hot-reload relay supervisor.** `auxly host tunnel` reconciles `host.yaml` on an
+  interval — adding or removing a box starts/stops only that relay's tunnel, so the
+  other boxes' live sessions are never dropped.
+- **Runtime keep-alive + connect-retry resilience** for the box→host launcher
+  (ssh keepalives + bounded transport-failure retry).
+- **README: per-OS Uninstall section** (macOS, Linux, Windows, Homebrew) with a
+  memory-vault safety warning.
+
+### Changed
+
+- OS-neutral "this machine" wording across the Remote tab (was hardcoded "Mac").
+
 ## [1.0.15] - 2026-06-05
 
 **Windows remote-command robustness.** Bounds every over-SSH command so a remote

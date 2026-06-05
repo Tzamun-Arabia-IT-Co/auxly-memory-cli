@@ -60,6 +60,7 @@ See the [CHANGELOG](CHANGELOG.md) for the full list.
 - [Why Auxly](#why-auxly)
 - [How it works](#how-it-works)
 - [Install](#install)
+- [Uninstall](#uninstall)
 - [Quick start](#quick-start)
 - [The memory vault](#the-memory-vault)
 - [Trust & access control](#trust--access-control)
@@ -184,6 +185,67 @@ make build         # produces ./auxly
 ```
 
 Prebuilt binaries, `.deb`, and `.rpm` packages are on the [Releases page](https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/releases). Binaries are CGO-free single files — nothing to extract, no shared libraries to install.
+
+---
+
+## Uninstall
+
+Auxly is a single static binary plus a `~/.auxly` data directory — no system services to scrub unless you ran `auxly host setup` (which installs a per-user keep-alive). The steps below remove the binary, the keep-alive (if any), and your local data.
+
+> ⚠️ **`~/.auxly` holds your memory vault** (`~/.auxly/memory`) on your **main** machine. Only delete it on a *consumer* box (one that just uses another machine's memory over SSH), or **after exporting** your vault. On a consumer box `~/.auxly` only holds connection config — safe to delete. Export first with `auxly export` if unsure.
+
+If the machine is wired to an agent, un-wire it first (removes the MCP launcher + `/auxly-*` skills) while the binary still exists:
+
+```bash
+auxly connect disconnect <name> --purge      # <name> = the saved profile, see `auxly connect list`
+```
+
+### macOS & Linux
+
+```bash
+# Remove the keep-alive service if you were a memory HOST (no-op otherwise)
+auxly host down 2>/dev/null || true
+# macOS launchd leftover:
+rm -f ~/Library/LaunchAgents/io.auxly.host.plist
+# Linux systemd-user leftover:
+systemctl --user disable --now auxly-host.service 2>/dev/null || true
+rm -f ~/.config/systemd/user/auxly-host.service
+
+# Remove the binary (whichever path it installed to)
+sudo rm -f /usr/local/bin/auxly
+rm -f ~/.local/bin/auxly
+
+# Remove local data/config  (see vault warning above)
+rm -rf ~/.auxly
+```
+
+### Windows (PowerShell)
+
+```powershell
+# Un-wire agent + skills, then remove host keep-alive task (no-op on a consumer box)
+auxly connect disconnect <name> --purge 2>$null
+schtasks /End /TN "Auxly-Host" 2>$null;  schtasks /Delete /TN "Auxly-Host" /F 2>$null
+
+# Delete the binary + per-user install dir
+$dir = Join-Path $env:LOCALAPPDATA 'Programs\auxly'
+Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+
+# Strip it from your per-user PATH
+$p = [Environment]::GetEnvironmentVariable('Path','User')
+[Environment]::SetEnvironmentVariable('Path', (($p -split ';' | Where-Object { $_ -and $_ -ne $dir }) -join ';'), 'User')
+
+# Delete local data/config  (see vault warning above)
+Remove-Item -Recurse -Force "$env:USERPROFILE\.auxly" -ErrorAction SilentlyContinue
+```
+
+### Homebrew
+
+```bash
+brew uninstall auxly
+rm -rf ~/.auxly      # data is not removed by brew (see vault warning above)
+```
+
+After uninstalling, **restart your terminal and any AI agent** so the dropped MCP launcher and PATH change take effect.
 
 ---
 

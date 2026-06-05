@@ -183,7 +183,7 @@ func TestCreepProgressAlwaysAdvances(t *testing.T) {
 // TestReconnectCompletionIsAMilestone ensures the reconnect's final line snaps the bar
 // near-complete (it previously matched nothing, leaving the bar at 35% until done).
 func TestReconnectCompletionIsAMilestone(t *testing.T) {
-	if got := milestonePct("   ✓ Re-wired ERPAI to this Mac's memory"); got < 90 {
+	if got := milestonePct("   ✓ Re-wired ERPAI to this machine's memory"); got < 90 {
 		t.Errorf("the reconnect 're-wired' line should be a near-complete milestone, got %d%%", got)
 	}
 }

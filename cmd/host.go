@@ -138,7 +138,7 @@ func writeRelayOffer(hc hostConfig) error {
 // ---------------------------------------------------------------------------
 // `auxly host` — make THIS machine's memory reachable to a NAT'd remote box
 // through a public rendezvous, using only outbound SSH (no inbound port, no
-// VPN on the remote). The Mac (host) dials OUT to a public relay and opens a
+// VPN on the remote). This machine (host) dials OUT to a public relay and opens a
 // reverse tunnel (ssh -R) so the relay can forward back to this machine's sshd.
 // A small keep-alive service (launchd / systemd-user) reconnects the tunnel
 // whenever the host is awake. The shared box then reaches this memory by
@@ -314,11 +314,11 @@ func validateRendezvous(hc hostConfig) error {
 	return nil
 }
 
-// provisionConsumer drives the FULL remote setup from the Mac: it installs/updates
+// provisionConsumer drives the FULL remote setup from this machine: it installs/updates
 // auxly on the relay box, authorizes that box's SSH key on THIS machine (so the
-// runtime tunnel auth works), and wires its agent to use this Mac's memory. This
-// is the "connect from the Mac and everything is ready" path — setup is push
-// (Mac→box, reachable for SSH), runtime is pull (box→Mac via the tunnel).
+// runtime tunnel auth works), and wires its agent to use this machine's memory. This
+// is the "connect from this machine and everything is ready" path — setup is push
+// (machine→box, reachable for SSH), runtime is pull (box→machine via the tunnel).
 func provisionConsumer(hc hostConfig) error {
 	user, host, port, err := parseHostSpec(hc.Rendezvous)
 	if err != nil {
@@ -365,35 +365,27 @@ func provisionConsumer(hc hostConfig) error {
 		return fmt.Errorf("remote install did not verify with %s --version: %w", hostAuxlyBin(relay), verifyErr)
 	}
 
-	// 2. Authorize the box's key on THIS Mac so the runtime tunnel auth works.
+	// 2. Authorize the box's key on THIS machine so the runtime tunnel auth works.
 	if kerr := authorizeRemoteKeyLocally(relay); kerr != nil {
-		fmt.Printf("   ⚠ could not authorize the box's key on this Mac: %v\n", kerr)
+		fmt.Printf("   ⚠ could not authorize the box's key on this machine: %v\n", kerr)
 	} else {
-		fmt.Println("   ✓ Authorized the box's SSH key on this Mac")
+		fmt.Println("   ✓ Authorized the box's SSH key on this machine")
 	}
-
-	// 3. Wire the box's agent to this Mac's memory (explicit params — no offer
-	//    dependency; the relay endpoint is localhost:<port> on the box itself).
-	target := fmt.Sprintf("%s@localhost:%d", hostUser, hc.ReversePort)
-	fmt.Println("🔗 Wiring the box's agent to this Mac's memory...")
-	wireArgs := []string{"auxly", "connect", "use", name, "--method", "rendezvous", "--host", target, "--host-bin", macBin}
-	if out, werr := runSSH(relay, wireArgs...); werr != nil {
-		fmt.Printf("   ⚠ remote wiring failed: %v\n   %s\n", werr, firstLine(out))
-		return werr
-	}
-	fmt.Println("   ✓ MCP launcher + skills wired on the box")
 
 	// Capture the box's own hostname so its live ssh-remote session (which reports
 	// that hostname as RemoteHost) maps back to this box row instead of surfacing
 	// as a phantom duplicate. Best-effort — an empty result just falls back to
-	// name/target matching.
+	// name/target matching. Done before wiring so it's recorded even if wiring stalls.
 	boxHostname := ""
 	if out, herr := runSSH(relay, "hostname"); herr == nil {
 		boxHostname = strings.TrimSpace(firstLine(out))
 	}
 
-	// Record the connection so the user can manage it (disconnect / reconnect /
-	// rename / remove) from `auxly host clients` or the TUI.
+	// Record the connection NOW — BEFORE the (sometimes slow, esp. on Windows)
+	// agent wiring — so a stalled or failed wire never leaves a relay with no
+	// matching client row (the "2 relays / 1 box" mismatch). The box is already
+	// reachable over the relay with its key authorized; wiring its agent config is
+	// a convenience that can be retried with [r] reconnect / [u] update.
 	clientName := strings.TrimSpace(hostClientName)
 	if clientName == "" {
 		clientName = host
@@ -401,6 +393,20 @@ func provisionConsumer(hc hostConfig) error {
 	if err := upsertClient(clientEntry{Name: clientName, Target: hc.Rendezvous, Method: "relay", Hostname: boxHostname}); err == nil {
 		fmt.Printf("   ✓ Saved connection \"%s\" (manage with `auxly host clients`)\n", clientName)
 	}
+
+	// 3. Wire the box's agent to this machine's memory (explicit params — no offer
+	//    dependency; the relay endpoint is localhost:<port> on the box itself).
+	//    If this fails/stalls, the connection is already recorded above — surface a
+	//    warning and let the user retry, rather than discarding the whole provision.
+	target := fmt.Sprintf("%s@localhost:%d", hostUser, hc.ReversePort)
+	fmt.Println("🔗 Wiring the box's agent to this machine's memory...")
+	wireArgs := []string{"auxly", "connect", "use", name, "--method", "rendezvous", "--host", target, "--host-bin", macBin}
+	if out, werr := runSSH(relay, wireArgs...); werr != nil {
+		fmt.Printf("   ⚠ remote wiring failed: %v\n   %s\n", werr, firstLine(out))
+		fmt.Printf("   The connection %q is saved — re-run wiring with [r] reconnect on the box row, or `/auxly-remote-connect` on the box.\n", clientName)
+		return nil // connection recorded; wiring is retryable
+	}
+	fmt.Println("   ✓ MCP launcher + skills wired on the box")
 	fmt.Println("👉 RESTART the agent on the box to load its memory link.")
 	return nil
 }
@@ -556,7 +562,7 @@ var hostOfferCmd = &cobra.Command{
 
 var hostProvisionCmd = &cobra.Command{
 	Use:          "provision",
-	Short:        "Install auxly on the relay box and wire its agent to this Mac's memory",
+	Short:        "Install auxly on the relay box and wire its agent to this machine's memory",
 	SilenceUsage: true,
 	RunE:         runHostProvision,
 }
@@ -568,7 +574,7 @@ func init() {
 	hostSetupCmd.Flags().StringVar(&hostUserFlag, "host-user", "", "local login the remote agent authenticates as (default: current user)")
 	hostSetupCmd.Flags().BoolVarP(&hostAssumeYes, "yes", "y", false, "don't prompt before installing the keep-alive service")
 	hostSetupCmd.Flags().BoolVar(&hostSetupBatch, "batch", false, "non-interactive (TUI): never prompt; if the relay key isn't set up, emit AUXLY_KEY_REQUIRED and stop")
-	hostSetupCmd.Flags().BoolVar(&hostProvision, "provision", false, "also install auxly on the relay box and wire its agent to this Mac's memory")
+	hostSetupCmd.Flags().BoolVar(&hostProvision, "provision", false, "also install auxly on the relay box and wire its agent to this machine's memory")
 	hostSetupCmd.Flags().StringVar(&hostClientName, "name", "", "friendly name for the provisioned box (defaults to its host)")
 	hostProvisionCmd.Flags().StringVar(&hostClientName, "name", "", "friendly name for this connection (defaults to the box's host)")
 
@@ -696,11 +702,19 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := installKeepAlive(); err != nil {
+	if loaded, _ := keepAliveStatus(); loaded {
+		// Supervisor already running — it hot-reloads host.yaml within a few
+		// seconds and dials the new relay WITHOUT restarting the existing tunnels,
+		// so the other boxes' live sessions stay up. No reinstall (which would
+		// bounce every tunnel) needed.
+		recordHostProvision(hc, "relay added (supervisor hot-reloaded)")
+		fmt.Println("   ✓ Relay added — existing box tunnels stay live (hot-reloaded)")
+	} else if err := installKeepAlive(); err != nil {
 		return err
+	} else {
+		recordHostProvision(hc, "host tunnel keep-alive installed")
+		fmt.Println("   ✓ Keep-alive tunnel service installed and started")
 	}
-	recordHostProvision(hc, "host tunnel keep-alive installed")
-	fmt.Println("   ✓ Keep-alive tunnel service installed and started")
 
 	// Give the tunnel a moment, then report whether the relay sees the port.
 	time.Sleep(2 * time.Second)
@@ -714,11 +728,11 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 		fmt.Println("   ✓ Published connect offer to the relay (remote box can use `auxly connect auto`)")
 	}
 
-	// Full Mac-driven provisioning of the relay box: install auxly there, authorize
+	// Full machine-driven provisioning of the relay box: install auxly there, authorize
 	// its key here, and wire its agent — so nothing has to be run on the box.
 	doProvision := hostProvision
 	if !doProvision && !hostSetupBatch {
-		fmt.Printf("\nAlso set up the relay box (%s) to USE this Mac's memory now — install auxly there and wire its agent? [Y/n]: ", hc.Rendezvous)
+		fmt.Printf("\nAlso set up the relay box (%s) to USE this machine's memory now — install auxly there and wire its agent? [Y/n]: ", hc.Rendezvous)
 		ans := ""
 		if reader.Scan() {
 			ans = strings.ToLower(strings.TrimSpace(reader.Text()))
@@ -786,34 +800,114 @@ func runHostTunnel(cmd *cobra.Command, args []string) error {
 	if !ok || len(relays) == 0 {
 		return fmt.Errorf("no host config — run `auxly host setup` first")
 	}
-	// Supervise one reverse tunnel per relay, each with its own restart loop, so a
-	// flap (or a box going offline) on one tunnel never drops the others. This
-	// process is owned by the per-OS keep-alive (launchd/systemd/Task Scheduler)
-	// and blocks forever once at least one tunnel is supervised.
-	started := 0
-	for _, hc := range relays {
-		if verr := validateRendezvous(hc); verr != nil {
-			fmt.Fprintf(os.Stderr, "skipping invalid relay %q: %v\n", hc.Rendezvous, verr)
-			continue
+	// Supervise one reverse tunnel per relay AND hot-reload from host.yaml, so
+	// adding or removing a box never restarts the other boxes' tunnels. Blocks
+	// forever; the per-OS keep-alive (launchd/systemd/Task Scheduler) owns us.
+	superviseRelays()
+	return nil
+}
+
+// relayReconcileInterval is how often the supervisor re-reads host.yaml to pick
+// up added/removed relays without restarting the running tunnels.
+const relayReconcileInterval = 5 * time.Second
+
+// relayKey uniquely identifies a relay tunnel so the reconcile loop can tell
+// which tunnels to keep, start, or stop across config reloads. Any param change
+// (rendezvous, ports) yields a new key, so the old tunnel is replaced cleanly.
+func relayKey(hc hostConfig) string {
+	return fmt.Sprintf("%s|%d|%d|%d", hc.Rendezvous, hc.RendezvousPort, hc.ReversePort, hc.localPort())
+}
+
+// reconcileRelays computes which relay keys to start and which to stop given the
+// currently-active set and the desired set. Pure — unit-testable.
+func reconcileRelays(active, want map[string]bool) (start, stop []string) {
+	for key := range want {
+		if !active[key] {
+			start = append(start, key)
 		}
-		go superviseTunnel(hc)
-		started++
 	}
-	if started == 0 {
-		return fmt.Errorf("no valid relay to tunnel — run `auxly host setup` first")
+	for key := range active {
+		if !want[key] {
+			stop = append(stop, key)
+		}
 	}
-	select {} // block forever; the keep-alive service owns our lifecycle
+	return start, stop
+}
+
+// superviseRelays runs each configured relay's reverse tunnel and HOT-RELOADS:
+// it re-reads host.yaml on an interval and reconciles the running tunnels —
+// starting goroutines for newly-added relays and cancelling ONLY the removed
+// ones. Existing, unchanged tunnels are never disturbed, so connecting or
+// removing one box never drops the other boxes' live sessions. Blocks forever.
+func superviseRelays() {
+	active := map[string]context.CancelFunc{} // relayKey → cancel its tunnel
+	defer func() {
+		for _, cancel := range active {
+			cancel()
+		}
+	}()
+
+	reconcile := func() {
+		relays, ok, err := loadHostConfigs()
+		if err != nil {
+			return // transient read error — keep current tunnels, retry next tick
+		}
+		want := map[string]hostConfig{}
+		if ok {
+			for _, hc := range relays {
+				if validateRendezvous(hc) != nil {
+					continue
+				}
+				want[relayKey(hc)] = hc
+			}
+		}
+		activeKeys := make(map[string]bool, len(active))
+		for k := range active {
+			activeKeys[k] = true
+		}
+		wantKeys := make(map[string]bool, len(want))
+		for k := range want {
+			wantKeys[k] = true
+		}
+		start, stop := reconcileRelays(activeKeys, wantKeys)
+		for _, key := range stop {
+			active[key]() // cancel — drops only this relay's tunnel
+			delete(active, key)
+		}
+		for _, key := range start {
+			ctx, cancel := context.WithCancel(context.Background())
+			active[key] = cancel
+			go superviseTunnel(ctx, want[key])
+		}
+	}
+
+	reconcile() // start the initial set immediately
+	ticker := time.NewTicker(relayReconcileInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		reconcile()
+	}
 }
 
 // superviseTunnel runs one relay's reverse tunnel, restarting it with a short
-// backoff whenever it exits, forever. Each relay gets its own goroutine so the
-// tunnels are fully independent.
-func superviseTunnel(hc hostConfig) {
+// backoff whenever it exits — until its context is cancelled (the relay was
+// removed). Each relay runs in its own goroutine so the tunnels are independent.
+func superviseTunnel(ctx context.Context, hc hostConfig) {
 	for {
-		c := exec.Command("ssh", tunnelArgs(hc)...)
+		if ctx.Err() != nil {
+			return
+		}
+		c := exec.CommandContext(ctx, "ssh", tunnelArgs(hc)...)
 		c.Stdout, c.Stderr = os.Stdout, os.Stderr
-		_ = c.Run() // returns when the tunnel drops; loop reconnects
-		time.Sleep(5 * time.Second)
+		_ = c.Run() // returns when the tunnel drops OR the context is cancelled
+		if ctx.Err() != nil {
+			return // relay removed — stop quietly, leaving sibling tunnels alone
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second): // brief backoff, then reconnect
+		}
 	}
 }
 

@@ -82,7 +82,7 @@ const (
 
 type sshModel struct {
 	remotes []remoteEntry
-	clients []clientRow // remote boxes wired to use THIS Mac (host side) — managed list
+	clients []clientRow // remote boxes wired to use THIS machine (host side) — managed list
 	host    hostInfo    // this machine's relay-host config (host.yaml)
 	hostOK  bool        // true when this machine is set up as a relay host
 	cursor  int
@@ -139,7 +139,7 @@ type sshModel struct {
 
 	// Post-connect share step (relay flow). When pendingShare is set, a successful
 	// add opens the per-file sharing modal for the newly provisioned inbound client
-	// as the FINAL wizard step — relay makes THIS Mac the host, so choosing what the
+	// as the FINAL wizard step — relay makes THIS machine the host, so choosing what the
 	// box may read/write is the natural last move. preShareNames snapshots the client
 	// names that existed before the run so the new one is found by diff; pendingShareNm
 	// is the friendly name the user typed (a fallback match for a re-add).
@@ -257,7 +257,7 @@ type hostInfo struct {
 	RelayCount     int    `yaml:"-"` // number of relays served (1 unless multi-relay)
 }
 
-// clientRow mirrors an entry in ~/.auxly/clients.yaml — a remote box this Mac
+// clientRow mirrors an entry in ~/.auxly/clients.yaml — a remote box this machine
 // (as a host) has wired to use its memory. These are the managed connections.
 type clientRow struct {
 	Name     string `yaml:"name"`
@@ -334,10 +334,11 @@ func readHostInfo() (hostInfo, bool) {
 // selectable when this machine is configured as a host (the section is hidden
 // otherwise), so this is 0 unless hostOK.
 func (m sshModel) clientCount() int {
-	if m.hostOK {
-		return len(m.clients)
-	}
-	return 0
+	// Count configured clients regardless of host state. When the host tunnel is
+	// down they're unreachable, but they're still saved in clients.yaml and MUST
+	// stay selectable so the user can see and remove them (otherwise a "deleted"
+	// box silently lingers, reappearing the moment the host comes back up).
+	return len(m.clients)
 }
 
 // cursorOnClient returns the connected box under the cursor, when the cursor is
@@ -403,7 +404,7 @@ func runSub(sub string, args ...string) tea.Cmd {
 
 // runHost SUSPENDS the TUI to run an interactive `auxly host …` (e.g. `host
 // setup`, which prompts for the relay). This is the relay-tunnel escape hatch
-// when the host can't dial back to a NAT'd Mac.
+// when the host can't dial back to a NAT'd host.
 func runHost(args ...string) tea.Cmd {
 	c := exec.Command(exePath(), append([]string{"host"}, args...)...)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
@@ -850,7 +851,7 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 		if m.twoWayFailed && m.twoWayHost != "" {
 			switch msg.String() {
 			case "h", "H":
-				// Relay tunnel — the real fix for a NAT'd Mac. Suspends the TUI to
+				// Relay tunnel — the real fix for a NAT'd host. Suspends the TUI to
 				// run the interactive `auxly host setup` (asks for the relay).
 				m.twoWayFailed = false
 				return m, runHost("setup")
@@ -1003,9 +1004,9 @@ func (m sshModel) handleFormKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 	case tea.KeyRunes:
 		s := string(msg.Runes)
 		if m.formStep == formStepMethod {
-			// Method is the first, most important choice. 1 = relay (this Mac is the
+			// Method is the first, most important choice. 1 = relay (this machine is the
 			// host, served to a NAT'd/shared box) — the primary flow, shown first; the
-			// rest reach an external host this Mac consumes.
+			// rest reach an external host this machine consumes.
 			switch s {
 			case "1":
 				m.formMethod = "relay"
@@ -1069,7 +1070,7 @@ func (m sshModel) advanceForm() (sshModel, tea.Cmd) {
 		}
 		m.formStep = formStepName
 	case formStepName:
-		// Relay makes THIS Mac the host serving the box, so the next step is choosing
+		// Relay makes THIS machine the host serving the box, so the next step is choosing
 		// what the box may access. Consumer methods only read the remote's memory —
 		// there's nothing to share — so they submit straight away.
 		if m.formMethod == "relay" {
@@ -1092,13 +1093,13 @@ func (m sshModel) submitForm() (sshModel, tea.Cmd) {
 		m.formStep = formStepHost
 		return m, nil
 	}
-	// Relay method: configure THIS Mac as a memory host reachable through a public
+	// Relay method: configure THIS machine as a memory host reachable through a public
 	// rendezvous. Runs `auxly host setup` captured in-pane; the result pane shows
 	// the `auxly connect use --jump …` command to paste on the remote box.
 	if m.formMethod == "relay" {
 		m.editingHost = false
 		// --provision drives the FULL remote setup from here: install auxly on the
-		// box, authorize its key on this Mac, and wire its agent — nothing to run
+		// box, authorize its key on this machine, and wire its agent — nothing to run
 		// on the box.
 		args := []string{"setup", "--rendezvous", host, "--yes", "--batch", "--provision"}
 		// Stash the interactive (non-batch) variant so that if the relay key
@@ -1673,7 +1674,17 @@ func (m sshModel) View() string {
 		}
 		lines = append(lines, "  "+dim.Render("Boxes below use your memory through it.  Down it with ")+accent.Render("auxly host down"))
 		lines = append(lines, "")
+	}
+
+	// ── Boxes connected to this machine (clients.yaml) ───────────────
+	// Rendered whenever clients are configured, even if the host tunnel is
+	// currently down — so a "deleted" box never silently lingers unseen, and
+	// stays selectable for removal.
+	if m.hostOK || len(m.clients) > 0 {
 		lines = append(lines, cyan.Render("CONNECTED BOXES")+dim.Render("   (using your memory)"))
+		if !m.hostOK && len(m.clients) > 0 {
+			lines = append(lines, "  "+lipgloss.NewStyle().Foreground(ColorWarning).Render("⚠ host tunnel down")+dim.Render(" — these boxes can't reach your memory until you run ")+accent.Render("auxly host setup"))
+		}
 		lines = append(lines, "")
 		if len(m.clients) == 0 {
 			lines = append(lines, "  "+dim.Render("None yet — press ")+accent.Render("c")+dim.Render(" and pick 'relay' to connect a box."))
@@ -1681,6 +1692,7 @@ func (m sshModel) View() string {
 			// A box is "live" when one of its agents currently holds an SSH-remote
 			// session through this host (ground truth from the session registry).
 			green := lipgloss.NewStyle().Foreground(ColorSuccess)
+			ok := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess) // write-access permission style
 			liveBox := map[string]bool{}
 			type liveRemote struct{ host, provider string }
 			var lives []liveRemote
@@ -1928,7 +1940,7 @@ func (m sshModel) View() string {
 		lines = append(lines, "")
 		switch {
 		case m.twoWayFailed && m.twoWayHost != "":
-			lines = append(lines, accent.Render("[h]")+dim.Render(" set up the relay tunnel on this Mac (recommended for a NAT'd host)"))
+			lines = append(lines, accent.Render("[h]")+dim.Render(" set up the relay tunnel on this machine (recommended for a NAT'd host)"))
 			lines = append(lines, accent.Render("[m]")+dim.Render(" try a different connection method   ·   any other key: close"))
 		case m.progressNeeded && len(m.pendingKeyArgs) > 0:
 			pwLabel := " enter SSH password here   "
@@ -1969,7 +1981,7 @@ func (m sshModel) View() string {
 
 		// ── Step 1 · Method (the key decision, shown first) ──────────────
 		methodOpts := []struct{ key, val, desc string }{
-			{"1", "relay", "Serve THIS Mac to a NAT'd / shared box"},
+			{"1", "relay", "Serve THIS machine to a NAT'd / shared box"},
 			{"2", "lan", "Same network — same Wi-Fi / router / subnet"},
 			{"3", "vpn", "Over a VPN you run (Tailscale, WireGuard…)"},
 			{"4", "bastion", "Through a jump host / bastion gateway"},
@@ -2003,7 +2015,7 @@ func (m sshModel) View() string {
 		isRelay := m.formMethod == "relay"
 		hostTitle, hostHintTxt := "Host address", "[user@]host[:port] — the machine to reach"
 		if isRelay {
-			hostTitle, hostHintTxt = "Relay server", "[user@]host[:port] — a public box this Mac dials out to"
+			hostTitle, hostHintTxt = "Relay server", "[user@]host[:port] — a public box this machine dials out to"
 		}
 		switch {
 		case m.formStep == formStepHost:
@@ -2114,7 +2126,7 @@ func (m sshModel) View() string {
 		// ── What the relay flow will do (set expectations) ───────────────
 		if isRelay && m.formStep != formStepShare {
 			lines = append(lines, "")
-			lines = append(lines, dim.Render("  → Opens a reverse tunnel from this Mac, then installs auxly on the"))
+			lines = append(lines, dim.Render("  → Opens a reverse tunnel from this machine, then installs auxly on the"))
 			lines = append(lines, dim.Render("    relay box and wires its agent to your memory. Nothing to run there."))
 			lines = append(lines, dim.Render("  → Next: pick which memory files it may read or read+write, then connect."))
 		}

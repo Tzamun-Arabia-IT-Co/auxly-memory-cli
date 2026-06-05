@@ -142,7 +142,22 @@ func findRemote(name string) (remoteProfile, bool) {
 	return remoteProfile{}, false
 }
 
-// upsertRemote adds or replaces a profile (matched by name) and saves.
+// sameRemote reports whether two profiles refer to the same remote: either the
+// same name, or the same connection identity (user@host:port + method). The
+// latter is what stops a second row being created for a host that already
+// exists under a different name — re-adding the same IP+method updates it in
+// place instead of duplicating.
+func sameRemote(a, b remoteProfile) bool {
+	if a.Name == b.Name {
+		return true
+	}
+	return a.Host == b.Host && a.Method == b.Method && a.User == b.User && a.Port == b.Port
+}
+
+// upsertRemote adds or replaces a profile and saves. A match is by name OR by
+// connection identity (host+method+user+port), so the same target is never
+// duplicated under a different name. Any pre-existing duplicates that match are
+// collapsed into the single updated entry, preserving first-seen position.
 func upsertRemote(p remoteProfile) error {
 	cfg, err := loadRemotes()
 	if err != nil {
@@ -151,12 +166,14 @@ func upsertRemote(p remoteProfile) error {
 	replaced := false
 	out := make([]remoteProfile, 0, len(cfg.Remotes)+1)
 	for _, existing := range cfg.Remotes {
-		if existing.Name == p.Name {
-			out = append(out, p)
-			replaced = true
-		} else {
-			out = append(out, existing)
+		if sameRemote(existing, p) {
+			if !replaced {
+				out = append(out, p) // update in place at the first match
+				replaced = true
+			}
+			continue // drop any further duplicates
 		}
+		out = append(out, existing)
 	}
 	if !replaced {
 		out = append(out, p)
@@ -239,6 +256,51 @@ func runSSH(p remoteProfile, remoteCmd ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultSSHTimeout)
 	defer cancel()
 	return runSSHCtx(ctx, p, remoteCmd...)
+}
+
+// Host-reachability probe retry policy. When a box is freshly added, the host's
+// keep-alive supervisor dials the box's reverse tunnel a few seconds later (it
+// reconciles host.yaml on an interval), so the box's FIRST `--version` probe
+// through localhost:<port> can land before the port is listening. Retrying across
+// the startup window turns that race into a non-event instead of a skipped wire.
+const (
+	hostProbeAttempts = 6
+	hostProbeBackoff  = 2 * time.Second
+	// hostProbeTimeout caps EACH attempt so a probe that stalls (e.g. a relay
+	// tunnel still coming up, or a slow non-interactive SSH context) fails fast and
+	// the loop moves on, instead of stacking full-length runSSH timeouts. Worst
+	// case ≈ attempts×timeout + backoffs, then callers wire anyway.
+	hostProbeTimeout = 6 * time.Second
+)
+
+// retryProbe calls probe up to attempts times, sleeping backoff between tries,
+// returning nil on the first success or the last error after exhausting attempts.
+// Pure driver (probe injected via closure) so the retry policy is unit-testable
+// without real SSH; pass backoff 0 in tests.
+func retryProbe(probe func() error, attempts int, backoff time.Duration) error {
+	var lastErr error
+	for i := 1; i <= attempts; i++ {
+		if err := probe(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if i < attempts {
+			time.Sleep(backoff)
+		}
+	}
+	return lastErr
+}
+
+// probeHostReachable confirms the host answers `<hostbin> --version` over the
+// profile's SSH, retrying across the tunnel-startup window (see hostProbeAttempts).
+func probeHostReachable(p remoteProfile) error {
+	return retryProbe(func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), hostProbeTimeout)
+		defer cancel()
+		_, err := runSSHCtx(ctx, p, hostAuxlyBin(p), "--version")
+		return err
+	}, hostProbeAttempts, hostProbeBackoff)
 }
 
 // localHostname returns this machine's hostname (best effort).
@@ -500,9 +562,9 @@ func hostCanReachBack(p remoteProfile, addrs []string) (string, bool) {
 }
 
 func printTwoWayFailureGuidance(p remoteProfile, addrs []string) {
-	fmt.Printf("   ✗ %s can't reach this Mac back over '%s' (NAT) — no direct return path.\n", p.Host, p.Method)
-	fmt.Println("     This Mac is your memory HOST. The fix is a relay tunnel, not another method:")
-	fmt.Println("     → Run `auxly host setup` on THIS Mac — it dials out to a public relay you")
+	fmt.Printf("   ✗ %s can't reach this machine back over '%s' (NAT) — no direct return path.\n", p.Host, p.Method)
+	fmt.Println("     This machine is your memory HOST. The fix is a relay tunnel, not another method:")
+	fmt.Println("     → Run `auxly host setup` on THIS machine — it dials out to a public relay you")
 	fmt.Println("       control, then prints the `auxly connect use --jump …` command for the host.")
 	fmt.Println("     (Another method only helps if it gives a real return path, e.g. same-LAN/Tailscale.)")
 }
@@ -593,7 +655,18 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 		provider = defaultProviderID
 	}
 
-	sshArgs := []string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-C"}
+	sshArgs := []string{
+		"-T",
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=10",
+		// Keepalives so an idle or briefly-flaky link doesn't silently die — the
+		// memory session (and the box's "connected" status) stays up as long as the
+		// agent runs. ~3×30s of unanswered probes before ssh declares it dead.
+		"-o", "ServerAliveInterval=30",
+		"-o", "ServerAliveCountMax=3",
+		"-o", "TCPKeepAlive=yes",
+		"-C",
+	}
 	// Through a relay/tunnel the endpoint is localhost:<reverse-port>, whose host
 	// key is first-seen. BatchMode would otherwise hard-fail on an unknown key, so
 	// accept it on first contact (reachability is already gated by relay+key auth).
@@ -620,15 +693,52 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 		sshArgs = append(sshArgs, "--path", p.MemPath)
 	}
 
-	launch := exec.Command("ssh", sshArgs...)
-	launch.Stdin = os.Stdin
-	launch.Stdout = os.Stdout
-	launch.Stderr = os.Stderr
-	if err := launch.Run(); err != nil {
-		// Only emit to stderr on launch failure; happy path stays silent.
-		return fmt.Errorf("ssh launcher to %s failed: %w", p.Host, err)
+	// Resilient launch: when the ssh transport itself fails (exit 255 — the relay
+	// tunnel isn't up yet at agent launch, or a transient blip), the remote
+	// mcp-server never started and no stdin was consumed, so it's safe to retry
+	// while the tunnel comes up. Once the remote command has actually run, we do
+	// NOT retry: a mid-session drop is stateful (the MCP `initialize` handshake
+	// would be lost), so we surface it and let the client respawn connect-mcp,
+	// which re-establishes and re-handshakes cleanly.
+	const (
+		maxLauncherAttempts = 3
+		launcherBackoff     = time.Second
+	)
+	for attempt := 1; ; attempt++ {
+		launch := exec.Command("ssh", sshArgs...)
+		launch.Stdin = os.Stdin
+		launch.Stdout = os.Stdout
+		launch.Stderr = os.Stderr
+		err := launch.Run()
+		if err == nil {
+			return nil // clean exit — the client closed the stream
+		}
+		code, isExit := sshExitCode(err)
+		if shouldRetryLauncher(code, isExit, attempt, maxLauncherAttempts) {
+			time.Sleep(launcherBackoff) // transport failure → tunnel may be coming up
+			continue
+		}
+		return fmt.Errorf("ssh launcher to %s failed (attempt %d): %w", p.Host, attempt, err)
 	}
-	return nil
+}
+
+// sshExitCode extracts the ssh process exit code from a launch error. isExit is
+// false when the error isn't a normal process exit (e.g. ssh failed to start).
+func sshExitCode(err error) (code int, isExit bool) {
+	var ee *exec.ExitError
+	if err != nil && errors.As(err, &ee) {
+		return ee.ExitCode(), true
+	}
+	return 0, false
+}
+
+// shouldRetryLauncher reports whether a connect-mcp ssh failure is safe to retry:
+// only an ssh transport failure (exit 255, before the remote mcp-server ran) and
+// only while attempts remain. A non-255 exit means the remote command actually
+// executed — stdin may have been consumed and the session was live — so retrying
+// would corrupt the stateful MCP stream. Pure — unit-testable with plain ints.
+func shouldRetryLauncher(exitCode int, isExit bool, attempt, maxAttempts int) bool {
+	return isExit && exitCode == 255 && attempt < maxAttempts
 }
 
 // ---------------------------------------------------------------------------
@@ -1059,13 +1169,22 @@ func runConnectUse(cmd *cobra.Command, args []string) error {
 	fmt.Printf("🔗 Configuring THIS machine to use %s's memory...\n", connTarget(p))
 	// Confirm the outbound direction works (this machine → host), using the host's
 	// absolute auxly path when known (a bare `auxly` may not be on the host's
-	// minimal non-interactive SSH PATH).
-	if _, err := runSSH(p, hostAuxlyBin(p), "--version"); err != nil {
-		return fmt.Errorf("can't reach %s from here (`%s --version` failed): %w", p.Host, hostAuxlyBin(p), err)
+	// minimal non-interactive SSH PATH). Retry across the tunnel-startup window —
+	// and crucially, wire the agent EVEN IF the probe never succeeds: the launcher,
+	// skills, and statusline are local config writes that take effect at runtime
+	// under the agent's full environment, so a transient probe miss must never leave
+	// the box half-configured (the silent half-wire bug).
+	if err := probeHostReachable(p); err != nil {
+		fmt.Printf("   ⚠ Couldn't confirm the host is reachable yet (%v)\n", err)
+		fmt.Println("   Wiring the agent anyway — the launcher connects at runtime once the tunnel is up.")
+	} else {
+		fmt.Println("   ✓ Reached the host (this direction works)")
 	}
-	fmt.Println("   ✓ Reached the host (this direction works)")
 	injectRemoteConfigs(p.Name)
 	installAuxlySkills(remoteBanner())
+	if wired := statusline.AutoInstallMissing(); len(wired) > 0 {
+		fmt.Printf("   ✓ Installed the Auxly statusline for: %s\n", strings.Join(wired, ", "))
+	}
 	fmt.Println()
 	fmt.Printf("🎉 This machine now uses %s's memory.\n", connTarget(p))
 	fmt.Println("   • connect-mcp launcher injected into your IDEs/agents")
@@ -1243,13 +1362,17 @@ func runConnectAuto(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("ssh key not yet authorized on the host")
 	}
 
-	if _, err := runSSH(p, hostAuxlyBin(p), "--version"); err != nil {
-		return fmt.Errorf("reached the host but `%s --version` failed (is auxly installed there?): %w", hostAuxlyBin(p), err)
+	// Retry across the tunnel-startup window; wire even if it never answers (the
+	// launcher/skills/statusline are local writes that work at runtime under the
+	// agent's env). A transient probe miss must never skip wiring.
+	if err := probeHostReachable(p); err != nil {
+		fmt.Printf("   ⚠ Couldn't confirm %s is reachable yet (%v)\n", offer.Name, err)
+		fmt.Println("   Wiring the agent anyway — it connects at runtime once the tunnel is up.")
 	}
 	if err := upsertRemote(p); err != nil {
 		return err
 	}
-	fmt.Printf("   ✓ Reached %s and saved the profile\n", offer.Name)
+	fmt.Printf("   ✓ Saved the profile for %s\n", offer.Name)
 
 	injectRemoteConfigs(p.Name)
 	installAuxlySkills(remoteBanner())

@@ -1,17 +1,19 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
 // ---------------------------------------------------------------------------
-// Clients registry — the remote boxes THIS Mac (as a host) has wired to use its
+// Clients registry — the remote boxes THIS machine (as a host) has wired to use its
 // memory. Lets the user see + manage (disconnect / reconnect / rename / remove)
 // every connection from one place. Stored at ~/.auxly/clients.yaml.
 // ---------------------------------------------------------------------------
@@ -102,17 +104,29 @@ func saveClients(cs []clientEntry) error {
 	return os.WriteFile(path, data, 0644)
 }
 
+// sameClient reports whether two entries refer to the same box: either the same
+// name, or the same SSH target + method. Matching on target stops a second row
+// being created when the same box is re-provisioned under a different name.
+func sameClient(a, b clientEntry) bool {
+	if a.Name == b.Name {
+		return true
+	}
+	return a.Target == b.Target && a.Method == b.Method
+}
+
 func upsertClient(c clientEntry) error {
 	cs, _ := loadClients()
 	out := make([]clientEntry, 0, len(cs)+1)
 	replaced := false
 	for _, e := range cs {
-		if e.Name == c.Name {
-			out = append(out, c)
-			replaced = true
-		} else {
-			out = append(out, e)
+		if sameClient(e, c) {
+			if !replaced {
+				out = append(out, c) // update in place at the first match
+				replaced = true
+			}
+			continue // drop any further duplicates of the same box
 		}
+		out = append(out, e)
 	}
 	if !replaced {
 		out = append(out, c)
@@ -156,14 +170,14 @@ func clientProfile(c clientEntry) (remoteProfile, error) {
 
 var hostClientsCmd = &cobra.Command{
 	Use:          "clients",
-	Short:        "List the remote boxes using this Mac's memory",
+	Short:        "List the remote boxes using this machine's memory",
 	SilenceUsage: true,
 	RunE:         runHostClients,
 }
 
 var hostDisconnectCmd = &cobra.Command{
 	Use:          "disconnect <name>",
-	Short:        "Remove this Mac's memory wiring from a connected box (leave no trace)",
+	Short:        "Remove this machine's memory wiring from a connected box (leave no trace)",
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runHostDisconnect,
@@ -171,7 +185,7 @@ var hostDisconnectCmd = &cobra.Command{
 
 var hostReconnectCmd = &cobra.Command{
 	Use:          "reconnect <name>",
-	Short:        "Re-wire a box to this Mac's memory",
+	Short:        "Re-wire a box to this machine's memory",
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runHostReconnect,
@@ -194,7 +208,7 @@ func runHostClients(cmd *cobra.Command, args []string) error {
 		fmt.Println("No connected boxes yet. Set one up with `auxly host provision`.")
 		return nil
 	}
-	fmt.Println("Remote boxes using this Mac's memory:")
+	fmt.Println("Remote boxes using this machine's memory:")
 	for _, c := range cs {
 		fmt.Printf("  • %-20s %s [%s]\n", c.Name, c.Target, c.Method)
 	}
@@ -236,38 +250,47 @@ func runHostReconnect(cmd *cobra.Command, args []string) error {
 		fmt.Printf("   ⚠ remote reconnect failed: %v\n   %s\n", err, firstLine(out))
 		return err
 	}
-	fmt.Printf("   ✓ Re-wired %s to this Mac's memory\n", c.Name)
+	fmt.Printf("   ✓ Re-wired %s to this machine's memory\n", c.Name)
 	fmt.Println("   👉 Restart the agent on that box to load the link.")
 	return nil
 }
+
+// forgetDisconnectTimeout bounds the best-effort remote disconnect so a slow or
+// unreachable box can never delay (or, when interrupted, prevent) the local
+// removal that already happened above.
+const forgetDisconnectTimeout = 15 * time.Second
 
 func runHostForget(cmd *cobra.Command, args []string) error {
 	c, ok := findClient(args[0])
 	if !ok {
 		return fmt.Errorf("no connection named %q", args[0])
 	}
-	// Best-effort disconnect first so we don't leave the box wired.
-	if p, err := clientProfile(c); err == nil {
-		if _, derr := runSSH(p, "auxly", "connect", "disconnect", offerName(), "--purge"); derr == nil {
-			fmt.Printf("   ✓ Disconnected %s\n", c.Name)
-		} else {
-			fmt.Printf("   ⚠ Could not reach %s to disconnect (removing locally anyway)\n", c.Name)
-		}
-	}
+	// Persist the local removal FIRST so the delete always sticks — even if the
+	// box is slow or unreachable. Everything below is best-effort cleanup; a hang
+	// there must never leave a "removed" box still in clients.yaml.
 	if err := removeClientEntry(c.Name); err != nil {
 		return err
 	}
-	// Drop this box's reverse tunnel too (its relay rendezvous == the box target),
-	// then refresh the keep-alive so the supervisor stops tunneling to it. The
-	// sibling boxes' tunnels are unaffected.
+	// Drop this box's reverse tunnel too (its relay rendezvous == the box target).
+	// When other relays remain, do NOT reinstall the keep-alive — the running
+	// supervisor hot-reloads host.yaml and cancels only this relay's tunnel, so
+	// the sibling boxes' live sessions are never disturbed. Only tear the service
+	// down when the last relay is gone.
 	if remaining, rerr := removeHostConfig(c.Target); rerr == nil {
-		if remaining > 0 {
-			if err := installKeepAlive(); err != nil {
-				fmt.Printf("   ⚠ Couldn't refresh the tunnel supervisor: %v\n", err)
-			}
-		} else {
+		if remaining == 0 {
 			_ = uninstallKeepAlive()
 		}
+	}
+	// Best-effort: tell the box to disconnect so we don't leave it wired. Bounded
+	// by a short timeout — the local removal is already saved either way.
+	if p, err := clientProfile(c); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), forgetDisconnectTimeout)
+		if _, derr := runSSHCtx(ctx, p, "auxly", "connect", "disconnect", offerName(), "--purge"); derr == nil {
+			fmt.Printf("   ✓ Disconnected %s\n", c.Name)
+		} else {
+			fmt.Printf("   ⚠ Could not reach %s to disconnect (already removed locally)\n", c.Name)
+		}
+		cancel()
 	}
 	fmt.Printf("🗑️  Removed %q from the connections list.\n", c.Name)
 	return nil
