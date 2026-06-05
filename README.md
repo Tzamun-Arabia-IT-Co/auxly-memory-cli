@@ -25,6 +25,19 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
+## 🆕 What's New in Version 1.0.12
+
+**Fixed Windows install & configuration — Auxly now works on Windows in both directions,** validated end to end against a real Windows 11 host:
+
+- **🪟 Windows as a remote box.** `auxly connect` to a Windows machine now works. Auxly auto-detects the host OS over SSH and provisions through **PowerShell** instead of POSIX `sh` — the old `'sh' is not recognized` failure (a Windows host's default SSH shell is `cmd.exe`) is gone. A clean Windows host is **auto-installed** over SSH (`irm https://auxly.io/cli.ps1 | iex`), verified by wiping and reinstalling auxly on a real box.
+- **🧠 Windows as a memory host.** A Windows machine can serve its own memory vault to your other agents — a consumer connects and launches `auxly mcp-server` on the Windows host over SSH (verified with a live MCP `initialize` handshake). Keep-alive runs via Windows Task Scheduler.
+- **🗂️ Cross-platform agent detection & config.** Claude, Cursor, Copilot, Gemini and other agent configs now resolve under `%APPDATA%` / `%LOCALAPPDATA%` on Windows (and `~/.config` on Linux), not just macOS paths.
+- **♻️ Self-healing OS detection.** The first successful connect records the host OS so later steps use the correct shell; Windows admin key installs use `administrators_authorized_keys` with the ownership/ACL Windows OpenSSH requires.
+
+See the [CHANGELOG](CHANGELOG.md#1012---2026-06-05) for the full list.
+
+---
+
 ## Contents
 
 - [Why Auxly](#why-auxly)
