@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.14] - 2026-06-05
+
+**Windows correctness sweep.** A full audit of the connect/host paths for
+remaining POSIX-only assumptions found two that broke on Windows targets.
+
+### Fixed
+
+- **SSH key-auth / reachability checks no longer false-negative on Windows.**
+  Five sites probed connectivity with `runSSH(p, "true")`, but `true` doesn't
+  exist in Windows `cmd.exe`, so the check failed even when key auth worked —
+  causing redundant key-install attempts and a misleading "passwordless SSH
+  isn't set up" message in `auxly host setup`. Replaced with a shared
+  `sshKeyAuthOK` helper that runs `exit 0` (a no-op that returns 0 on both POSIX
+  shells and `cmd.exe`).
+- **The statusline `--wrap` feature works on Windows.** It re-ran the user's
+  previous statusline command with `sh -c`; on Windows there is no `sh`, so the
+  wrapped command now runs via `cmd /c` on Windows (`sh -c` elsewhere).
+
 ## [1.0.13] - 2026-06-05
 
 **Windows host/relay provisioning.** v1.0.12 fixed connecting *to* a Windows box

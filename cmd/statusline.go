@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
@@ -178,7 +179,12 @@ func runStatusline(cmd *cobra.Command, args []string) error {
 	// config — not runtime or network input — so `sh -c` is the correct mechanism.
 	if statuslineWrap {
 		if orig := statusline.OriginalCommand(provider); orig != "" {
-			oc := exec.Command("sh", "-c", orig) //nolint:gosec // user's own statusline command, see note
+			var oc *exec.Cmd
+			if runtime.GOOS == "windows" {
+				oc = exec.Command("cmd", "/c", orig) //nolint:gosec // user's own statusline command, see note
+			} else {
+				oc = exec.Command("sh", "-c", orig) //nolint:gosec // user's own statusline command, see note
+			}
 			oc.Stdin = bytes.NewReader(raw)
 			oc.Stderr = os.Stderr
 			if out, err := oc.Output(); err == nil {

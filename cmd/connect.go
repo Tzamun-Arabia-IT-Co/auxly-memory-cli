@@ -215,6 +215,15 @@ func sshConnArgs(p remoteProfile) []string {
 	return args
 }
 
+// sshKeyAuthOK reports whether non-interactive (key-based) SSH to the target
+// succeeds. It runs `exit 0`, a no-op that returns 0 on BOTH POSIX shells and
+// Windows cmd.exe — unlike `true`, which is POSIX-only and makes cmd.exe error,
+// false-negating key-auth on a Windows host.
+func sshKeyAuthOK(p remoteProfile) bool {
+	_, err := runSSH(p, "exit", "0")
+	return err == nil
+}
+
 // runSSH runs a remote command non-interactively and returns trimmed stdout.
 func runSSH(p remoteProfile, remoteCmd ...string) (string, error) {
 	if err := validateForExec(p); err != nil {
@@ -727,8 +736,7 @@ func normalizeOS(s string) string {
 
 // keyAuthWorks reports whether key-based SSH auth to the host already succeeds.
 func keyAuthWorks(p remoteProfile) bool {
-	_, err := runSSH(p, "true")
-	return err == nil
+	return sshKeyAuthOK(p)
 }
 
 var connectAddCmd = &cobra.Command{
@@ -837,7 +845,7 @@ func runConnectAdd(cmd *cobra.Command, args []string) error {
 // form already confirmed intent); the SSH password during key install is read by
 // ssh from /dev/tty, so it works under tea.ExecProcess.
 func bootstrapKeyAuth(p remoteProfile) error {
-	if _, err := runSSH(p, "true"); err == nil {
+	if sshKeyAuthOK(p) {
 		return nil // key auth already works
 	}
 	home, err := os.UserHomeDir()
@@ -1218,7 +1226,7 @@ func runConnectAuto(cmd *cobra.Command, args []string) error {
 	fmt.Printf("🔗 Connecting this machine to %s's memory (via the relay tunnel)...\n", offer.Name)
 
 	// Reachability + key check — never prompt. If auth fails, guide and stop.
-	if _, err := runSSH(p, "true"); err != nil {
+	if !sshKeyAuthOK(p) {
 		pub, perr := localPubKey()
 		if perr != nil {
 			return fmt.Errorf("can't reach the host and couldn't read this box's public key: %w", perr)
@@ -1699,7 +1707,7 @@ func suggestTailscalePeers() {
 // ensureKeyAuth checks key-based auth and offers to generate + install a key.
 func ensureKeyAuth(reader *bufio.Scanner, p remoteProfile) error {
 	// If BatchMode auth already works, nothing to do.
-	if _, err := runSSH(p, "true"); err == nil {
+	if sshKeyAuthOK(p) {
 		fmt.Println("   ✓ Key-based SSH auth already works")
 		return nil
 	}
