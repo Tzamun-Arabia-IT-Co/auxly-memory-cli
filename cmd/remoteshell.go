@@ -116,6 +116,32 @@ func detectRemoteOS(p remoteProfile) (remoteOS, string, error) {
 	return osUnknown, "", fmt.Errorf("windows probe failed after %v: %w", err, winErr)
 }
 
+// remoteShellArgv returns the remote-command argv to append after an ssh target,
+// choosing the shell by OS family: unix -> ["sh","-c",<quoted posix>],
+// windows -> ["powershell","-NoProfile","-NonInteractive","-EncodedCommand",<b64>].
+// Returns an error for a windows target with no powershell rendering.
+func remoteShellArgv(fam remoteOS, posix, powershell string) ([]string, error) {
+	switch fam {
+	case osWindows:
+		if powershell == "" {
+			return nil, fmt.Errorf("no PowerShell rendering provided for windows target")
+		}
+		return []string{
+			"powershell",
+			"-NoProfile",
+			"-NonInteractive",
+			"-EncodedCommand",
+			psEncode(winPSPreamble + powershell),
+		}, nil
+
+	case osUnix, osUnknown:
+		return []string{"sh", "-c", shellQuote(posix)}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported remote OS family: %d", fam)
+	}
+}
+
 // runRemoteScript runs the same logical script on a Unix or Windows SSH target.
 //
 // For Unix targets, the POSIX script is passed as one already-quoted argv element
@@ -126,28 +152,19 @@ func detectRemoteOS(p remoteProfile) (remoteOS, string, error) {
 // For Windows targets, the PowerShell script is UTF-16LE base64 encoded for
 // -EncodedCommand, which avoids cmd.exe-over-ssh quoting issues.
 func runRemoteScript(p remoteProfile, fam remoteOS, posix, powershell string) (string, error) {
-	switch fam {
-	case osWindows:
-		if powershell == "" {
-			return "", fmt.Errorf("no PowerShell rendering provided for windows target")
-		}
+	argv, err := remoteShellArgv(fam, posix, powershell)
+	if err != nil {
+		return "", err
+	}
 
-		out, err := runSSH(p, "powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncode(winPSPreamble+powershell))
-		if err != nil {
+	out, err := runSSH(p, argv...)
+	if err != nil {
+		if fam == osWindows {
 			return "", fmt.Errorf("run windows remote script: %w", err)
 		}
-		return out, nil
-
-	case osUnix, osUnknown:
-		out, err := runSSH(p, "sh", "-c", shellQuote(posix))
-		if err != nil {
-			return "", fmt.Errorf("run unix remote script: %w", err)
-		}
-		return out, nil
-
-	default:
-		return "", fmt.Errorf("unsupported remote OS family: %d", fam)
+		return "", fmt.Errorf("run unix remote script: %w", err)
 	}
+	return out, nil
 }
 
 // psEncode returns the UTF-16LE base64 form required by powershell -EncodedCommand.

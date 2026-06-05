@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
@@ -64,25 +65,71 @@ func writeRelayOffer(hc hostConfig) error {
 		return fmt.Errorf("failed to marshal offer: %w", err)
 	}
 
-	user, host, _, perr := parseHostSpec(hc.Rendezvous)
+	user, host, parsedPort, perr := parseHostSpec(hc.Rendezvous)
 	if perr != nil {
 		return perr
 	}
+	port := parsedPort
+	if hc.RendezvousPort != 0 {
+		port = hc.RendezvousPort
+	}
+
 	target := host
 	if user != "" {
 		target = user + "@" + host
 	}
+	relay := remoteProfile{Name: "relay-" + host, Method: "public", User: user, Host: host, Port: port}
+
+	fam, _, derr := detectRemoteOS(relay)
+	if derr != nil {
+		return fmt.Errorf("detect relay OS: %w", derr)
+	}
+
 	args := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new"}
-	if hc.RendezvousPort != 0 && hc.RendezvousPort != defaultSSHPort {
-		args = append(args, "-p", strconv.Itoa(hc.RendezvousPort))
+	if port != 0 && port != defaultSSHPort {
+		args = append(args, "-p", strconv.Itoa(port))
 	}
-	script := "mkdir -p ~/.auxly/offers && cat > ~/.auxly/offers/" + offer.Name + ".yaml"
-	args = append(args, "--", target, "sh", "-c", shellQuote(script))
-	c := exec.Command("ssh", args...)
-	c.Stdin = bytes.NewReader(data)
-	if out, err := c.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to publish offer to relay: %w: %s", err, strings.TrimSpace(string(out)))
+
+	switch fam {
+	case osWindows:
+		encoded := base64.StdEncoding.EncodeToString(data)
+		ps := strings.Join([]string{
+			"$d=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(" + psQuote(encoded) + "))",
+			"$dir=\"$env:USERPROFILE\\.auxly\\offers\"",
+			"New-Item -ItemType Directory -Force $dir | Out-Null",
+			"$path=Join-Path $dir " + psQuote(offer.Name+".yaml"),
+			"[IO.File]::WriteAllText($path, $d, (New-Object Text.UTF8Encoding $false))",
+		}, "; ")
+
+		argv, aerr := remoteShellArgv(osWindows, "", ps)
+		if aerr != nil {
+			return aerr
+		}
+		args = append(args, "--", target)
+		args = append(args, argv...)
+		c := exec.Command("ssh", args...)
+		if out, err := c.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to publish offer to relay: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+
+	case osUnix, osUnknown:
+		script := "mkdir -p ~/.auxly/offers && cat > ~/.auxly/offers/" + offer.Name + ".yaml"
+		argv, aerr := remoteShellArgv(osUnix, script, "")
+		if aerr != nil {
+			return aerr
+		}
+		args = append(args, "--", target)
+		args = append(args, argv...)
+		c := exec.Command("ssh", args...)
+		c.Stdin = bytes.NewReader(data)
+		if out, err := c.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to publish offer to relay: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+
+	default:
+		return fmt.Errorf("unsupported remote OS family: %d", fam)
 	}
+
 	return nil
 }
 
@@ -287,9 +334,16 @@ func provisionConsumer(hc hostConfig) error {
 	}
 	name := offerName()
 
-	// 1. Install / update auxly on the box.
+	// 1. Install / update auxly on the box (OS-aware: POSIX curl|sh or PowerShell irm|iex).
 	fmt.Println("📦 Installing/updating auxly on the remote box...")
-	if out, ierr := runSSH(relay, "sh", "-c", shellQuote("curl -fsSL "+update.BaseURL()+"/cli | sh")); ierr != nil {
+	relayOS, _, derr := detectRemoteOS(relay)
+	if derr != nil {
+		fmt.Printf("   ⚠ remote OS detection failed: %v\n", derr)
+		return derr
+	}
+	installPosix := "curl -fsSL " + update.BaseURL() + "/cli | sh"
+	installPS := winInstallCmd(update.BaseURL() + "/cli.ps1")
+	if out, ierr := runRemoteScript(relay, relayOS, installPosix, installPS); ierr != nil {
 		fmt.Printf("   ⚠ remote install failed: %v\n   %s\n", ierr, firstLine(out))
 		return ierr
 	}
@@ -339,8 +393,25 @@ func provisionConsumer(hc hostConfig) error {
 // one if absent) and appends it to THIS machine's ~/.ssh/authorized_keys so the
 // box can reach back over the tunnel without a password.
 func authorizeRemoteKeyLocally(p remoteProfile) error {
-	script := "test -f ~/.ssh/id_ed25519 || (mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 >/dev/null 2>&1); cat ~/.ssh/id_ed25519.pub"
-	pub, err := runSSH(p, "sh", "-c", shellQuote(script))
+	posix := "test -f ~/.ssh/id_ed25519 || (mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519 >/dev/null 2>&1); cat ~/.ssh/id_ed25519.pub"
+	powershell := strings.Join([]string{
+		"$dir=Join-Path $env:USERPROFILE '.ssh'",
+		"$key=Join-Path $dir 'id_ed25519'",
+		"$pub=$key+'.pub'",
+		"if(-not(Test-Path -LiteralPath $key)){",
+		"New-Item -ItemType Directory -Force -Path $dir | Out-Null",
+		"& ssh-keygen -t ed25519 -N '\"\"' -f $key *> $null",
+		"if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}",
+		"}",
+		"Get-Content -LiteralPath $pub -Raw",
+	}, "; ")
+
+	fam, _, derr := detectRemoteOS(p)
+	if derr != nil {
+		return fmt.Errorf("detect remote OS: %w", derr)
+	}
+
+	pub, err := runRemoteScript(p, fam, posix, powershell)
 	if err != nil {
 		return err
 	}
@@ -799,20 +870,51 @@ func reportTunnelLive(hc hostConfig) {
 	if err := validateRendezvous(hc); err != nil {
 		return
 	}
+	rUser, rHost, rPort, rErr := parseHostSpec(hc.Rendezvous)
+	if rErr != nil {
+		fmt.Printf("   Tunnel       : ? (couldn't reach the relay to check)\n")
+		return
+	}
+	if hc.RendezvousPort != 0 {
+		rPort = hc.RendezvousPort
+	}
+	rTarget := rHost
+	if rUser != "" {
+		rTarget = rUser + "@" + rHost
+	}
+	relayProf := remoteProfile{Name: "relay-" + rHost, Method: "public", User: rUser, Host: rHost, Port: rPort}
+	fam, _, osErr := detectRemoteOS(relayProf)
+	if osErr != nil {
+		fmt.Printf("   Tunnel       : ? (couldn't reach the relay to check)\n")
+		return
+	}
+
+	// Check for a listener on the reverse port: ss/netstat on POSIX, Get-NetTCPConnection on Windows.
+	probe := fmt.Sprintf(
+		"(command -v ss >/dev/null 2>&1 && ss -ltn || netstat -ltn 2>/dev/null) | grep -q ':%d ' && echo UP || echo DOWN",
+		hc.ReversePort,
+	)
+	probePS := fmt.Sprintf(
+		"if(Get-NetTCPConnection -State Listen -LocalPort %d -ErrorAction SilentlyContinue){'UP'}else{'DOWN'}",
+		hc.ReversePort,
+	)
+	argv, aerr := remoteShellArgv(fam, probe, probePS)
+	if aerr != nil {
+		fmt.Printf("   Tunnel       : ? (couldn't reach the relay to check)\n")
+		return
+	}
+
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=8",
 		"-o", "StrictHostKeyChecking=accept-new",
 	}
-	if hc.RendezvousPort != 0 && hc.RendezvousPort != defaultSSHPort {
-		args = append(args, "-p", strconv.Itoa(hc.RendezvousPort))
+	if rPort != 0 && rPort != defaultSSHPort {
+		args = append(args, "-p", strconv.Itoa(rPort))
 	}
-	// Check for a listener on the reverse port using ss, falling back to netstat.
-	probe := fmt.Sprintf(
-		"(command -v ss >/dev/null 2>&1 && ss -ltn || netstat -ltn 2>/dev/null) | grep -q ':%d ' && echo UP || echo DOWN",
-		hc.ReversePort,
-	)
-	args = append(args, "--", hc.Rendezvous, "sh", "-c", shellQuote(probe))
+	args = append(args, "--", rTarget)
+	args = append(args, argv...)
+
 	out, err := exec.Command("ssh", args...).CombinedOutput()
 	state := strings.TrimSpace(string(out))
 	switch {

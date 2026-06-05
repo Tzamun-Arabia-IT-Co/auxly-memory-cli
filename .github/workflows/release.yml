@@ -11,6 +11,11 @@ permissions:
 
 jobs:
   goreleaser:
+    # Only release from the public repo (it holds the Homebrew tap token). The
+    # private mirror shares this workflow but lacks that secret, so guard it out —
+    # otherwise a tag landing on the private repo triggers a spurious "release
+    # failed" run at the cask-publish step.
+    if: github.repository == 'Tzamun-Arabia-IT-Co/auxly-memory-cli'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
