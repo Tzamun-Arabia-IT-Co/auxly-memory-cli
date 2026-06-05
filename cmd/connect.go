@@ -161,6 +161,22 @@ func upsertRemote(p remoteProfile) error {
 	return saveRemotes(remotesConfig{Remotes: out})
 }
 
+// persistDetectedOS records an auto-detected OS back onto a SAVED profile so later
+// operations that cannot probe the host (e.g. installing the SSH key over a
+// password session) know which shell family to use. It is a best-effort no-op for
+// transient/unsaved profiles, or when the profile already declares an OS.
+func persistDetectedOS(p remoteProfile, osName string) {
+	if osName == "" || strings.TrimSpace(p.OS) != "" {
+		return
+	}
+	saved, ok := findRemote(p.Name)
+	if !ok || strings.TrimSpace(saved.OS) != "" {
+		return
+	}
+	saved.OS = osName
+	_ = upsertRemote(saved) // best-effort: on failure we simply re-detect next time
+}
+
 // ---------------------------------------------------------------------------
 // SSH helpers
 // ---------------------------------------------------------------------------
@@ -342,6 +358,7 @@ func runDoctor(p remoteProfile) error {
 	switch fam {
 	case osWindows:
 		fmt.Printf("   ✓ Host reachable (Windows: %s)\n", detail)
+		persistDetectedOS(p, "windows")
 		if out, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
 			fmt.Println("   ✓ auxly present on host (Windows)")
 			ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
@@ -373,6 +390,11 @@ func runDoctor(p remoteProfile) error {
 
 	case osUnix:
 		fmt.Printf("   ✓ Host reachable (uname: %s)\n", detail)
+		if strings.Contains(strings.ToLower(detail), "darwin") {
+			persistDetectedOS(p, "darwin")
+		} else {
+			persistDetectedOS(p, "linux")
+		}
 		if out, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
 			fmt.Println("   ✓ auxly present on host")
 			ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
