@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.13] - 2026-06-05
+
+**Windows host/relay provisioning.** v1.0.12 fixed connecting *to* a Windows box
+(`auxly connect`); this fixes the **other** direction — a memory **host**
+provisioning a Windows box / publishing to a Windows relay through the
+`auxly host` path, which still ran raw POSIX `sh -c` and failed with
+`'sh' is not recognized`. All host-side provisioning is now OS-aware, validated
+live against a real Windows 11 / PowerShell 5.1 host.
+
+### Fixed
+
+- **Host-side provisioning speaks PowerShell to Windows targets.** Four `host.go`
+  sites now detect the target OS and route through the remote-shell layer instead
+  of assuming POSIX:
+  - `provisionConsumer` install — `irm <base>/cli.ps1 | iex` (TLS 1.2) on Windows
+    instead of `curl … | sh`.
+  - `authorizeRemoteKeyLocally` — generates the box's ed25519 key via PowerShell.
+    Uses `ssh-keygen -N '""'` for the empty passphrase (the `[string]::Empty`
+    splat is silently dropped on PowerShell 5.1 and would hang on a passphrase
+    prompt).
+  - `writeRelayOffer` — writes the offer to a Windows relay by base64-embedding
+    the YAML and `[IO.File]::WriteAllText(…, UTF8Encoding $false)` (avoids the
+    BOM that `Set-Content -Encoding utf8` adds on PS 5.1 and that would corrupt
+    the YAML).
+  - `reportTunnelLive` — checks the reverse-tunnel port with `Get-NetTCPConnection`
+    on Windows instead of `ss`/`netstat`.
+- A shared `remoteShellArgv` helper now backs both `runRemoteScript` and the
+  host.go sites that build their own `ssh` invocations, so per-OS argv
+  construction has one source of truth. POSIX targets are byte-for-byte unchanged.
+
+### CI
+
+- The `release` workflow now only runs in the public repo
+  (`github.repository == …/auxly-memory-cli`), so a tag on the private mirror no
+  longer triggers a spurious "release failed" run (it lacks the Homebrew tap token).
+
 ## [1.0.12] - 2026-06-05
 
 **Windows support.** Connecting to a Windows machine as a remote — and running a
