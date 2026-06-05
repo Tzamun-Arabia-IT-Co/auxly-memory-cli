@@ -1,10 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf16"
 )
 
@@ -142,6 +146,31 @@ func remoteShellArgv(fam remoteOS, posix, powershell string) ([]string, error) {
 	}
 }
 
+// runSSHCtx runs a remote command non-interactively and returns trimmed stdout.
+// If ctx is canceled or reaches its deadline, exec.CommandContext kills the local
+// ssh process, which drops the SSH connection and lets the remote sshd reap the
+// remote command tree.
+func runSSHCtx(ctx context.Context, p remoteProfile, remoteCmd ...string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateForExec(p); err != nil {
+		return "", err
+	}
+
+	args := append(sshConnArgs(p), remoteCmd...)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	out, err := cmd.CombinedOutput()
+	trimmed := strings.TrimSpace(string(out))
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return trimmed, fmt.Errorf("ssh %s: %w", strings.Join(remoteCmd, " "), ctxErr)
+		}
+		return trimmed, fmt.Errorf("ssh %s: %w", strings.Join(remoteCmd, " "), err)
+	}
+	return trimmed, nil
+}
+
 // runRemoteScript runs the same logical script on a Unix or Windows SSH target.
 //
 // For Unix targets, the POSIX script is passed as one already-quoted argv element
@@ -163,6 +192,36 @@ func runRemoteScript(p remoteProfile, fam remoteOS, posix, powershell string) (s
 			return "", fmt.Errorf("run windows remote script: %w", err)
 		}
 		return "", fmt.Errorf("run unix remote script: %w", err)
+	}
+	return out, nil
+}
+
+// runRemoteScriptTimeout runs the same logical script as runRemoteScript, but
+// bounds the SSH session with a timeout. Deadline errors wrap
+// context.DeadlineExceeded so callers can verify out-of-band instead of treating
+// the timeout as a hard install failure (some Windows installs complete on the
+// box but leave the SSH session lingering).
+func runRemoteScriptTimeout(p remoteProfile, fam remoteOS, posix, powershell string, d time.Duration) (string, error) {
+	argv, err := remoteShellArgv(fam, posix, powershell)
+	if err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+
+	out, err := runSSHCtx(ctx, p, argv...)
+	if err != nil {
+		if fam == osWindows {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return out, fmt.Errorf("run windows remote script timed out after %s: %w", d, err)
+			}
+			return out, fmt.Errorf("run windows remote script: %w", err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return out, fmt.Errorf("run unix remote script timed out after %s: %w", d, err)
+		}
+		return out, fmt.Errorf("run unix remote script: %w", err)
 	}
 	return out, nil
 }

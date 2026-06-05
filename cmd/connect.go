@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
@@ -224,18 +227,18 @@ func sshKeyAuthOK(p remoteProfile) bool {
 	return err == nil
 }
 
-// runSSH runs a remote command non-interactively and returns trimmed stdout.
+// defaultSSHTimeout bounds every non-interactive remote command so a remote that
+// hangs (e.g. a Windows install/wire that leaves the SSH session lingering) can
+// never block the CLI forever. All runSSH calls are short commands (probes,
+// install, wire, hostname); 2 minutes is well above any legitimate runtime.
+const defaultSSHTimeout = 120 * time.Second
+
+// runSSH runs a remote command non-interactively and returns trimmed stdout,
+// bounded by defaultSSHTimeout. For an explicit deadline, use runSSHCtx.
 func runSSH(p remoteProfile, remoteCmd ...string) (string, error) {
-	if err := validateForExec(p); err != nil {
-		return "", err
-	}
-	args := append(sshConnArgs(p), remoteCmd...)
-	cmd := exec.Command("ssh", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return strings.TrimSpace(string(out)), fmt.Errorf("ssh %s: %w", strings.Join(remoteCmd, " "), err)
-	}
-	return strings.TrimSpace(string(out)), nil
+	ctx, cancel := context.WithTimeout(context.Background(), defaultSSHTimeout)
+	defer cancel()
+	return runSSHCtx(ctx, p, remoteCmd...)
 }
 
 // localHostname returns this machine's hostname (best effort).
@@ -377,7 +380,9 @@ func runDoctor(p remoteProfile) error {
 		// can't run — but runRemoteScript routes through powershell -EncodedCommand,
 		// which CAN install silently.
 		fmt.Println("   ⬇ auxly not found on Windows host — installing via PowerShell...")
-		if _, instErr := runRemoteScript(p, osWindows, "", winInstallCmd(remoteInstallPS)); instErr != nil {
+		// The installer over SSH can complete on the box yet leave the PowerShell
+		// session lingering, so bound it and let the version re-probe below decide.
+		if _, instErr := runRemoteScriptTimeout(p, osWindows, "", winInstallCmd(remoteInstallPS), 90*time.Second); instErr != nil && !errors.Is(instErr, context.DeadlineExceeded) {
 			fmt.Printf("     • Auto-install failed. On the host, in PowerShell, run:  irm %s | iex\n", remoteInstallPS)
 			return fmt.Errorf("failed to install auxly on Windows host %s: %w", p.Host, instErr)
 		}
