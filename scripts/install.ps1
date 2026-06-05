@@ -30,16 +30,25 @@ $dest = Join-Path $installDir $Binary
 
 Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
 
-# --- Add to per-user PATH -----------------------------------------------------
+# --- Add to per-user PATH (persisted, for new terminals) ----------------------
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath -notlike "*$installDir*") {
   [Environment]::SetEnvironmentVariable('Path', "$userPath;$installDir", 'User')
-  Write-Host "Added $installDir to your PATH (restart your terminal to pick it up)."
+  Write-Host "Added $installDir to your PATH."
+}
+
+# Also update THIS session's PATH so `auxly` works immediately — the persisted
+# PATH above only reaches NEW terminals, but `irm | iex` runs in your current
+# session, so we make it usable right now without a restart.
+if (($env:Path -split ';') -notcontains $installDir) {
+  $env:Path = "$env:Path;$installDir"
 }
 
 Write-Host ""
 Write-Host "auxly installed: $dest"
 & $dest --version
+Write-Host ""
+Write-Host "Ready now in this terminal — run 'auxly' to get started. New terminals work too."
 
 # --- Optional self-provisioning (env-driven, since `irm | iex` can't pass args) ---
 # Set AUXLY_SETUP=1 for local MCP+skills, AUXLY_CONNECT=1 to wire to an advertised host:
