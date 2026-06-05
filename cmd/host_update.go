@@ -122,9 +122,11 @@ func runHostUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	if hostUpdateAll {
+		// --force with --all also updates LIVE boxes (ending their session); without
+		// it, live boxes are skipped as usual. This is what the dashboard's [f] runs.
 		updated, skipped := 0, 0
 		for _, c := range clients {
-			done := updateOneClient(c, latest, live, false)
+			done := updateOneClient(c, latest, live, hostUpdateForce)
 			if done {
 				updated++
 			} else {

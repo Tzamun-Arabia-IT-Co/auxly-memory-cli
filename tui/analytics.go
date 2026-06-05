@@ -265,7 +265,7 @@ func renderBarSection(heading string, items []kvCount, width, total, topN int) s
 		if barLen < 1 && it.count > 0 {
 			barLen = 1
 		}
-		bar := lipgloss.NewStyle().Foreground(palette[i%len(palette)]).Render(strings.Repeat("█", barLen))
+		bar := renderMeter(barLen, maxBar, palette[i%len(palette)])
 
 		pct := ""
 		if total > 0 {

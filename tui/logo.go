@@ -10,20 +10,37 @@ import (
 )
 
 // bannerLabels builds the three styled text lines shared by the banner
-// (title+version, subtitle, attribution), with OSC-8 hyperlinks for terminals
-// that support them.
+// (title+version, subtitle, attribution). The product name ("Auxly-Memory CLI") and the
+// company name ("Tzamun Arabia IT Co") are themselves the clickable links: each carries an
+// OSC-8 hyperlink AND is underlined, so it reads as a link and clicks through to the site.
 func bannerLabels() (title, version, subtitle, developedBy string) {
-	auxlyLink := "\x1b]8;;https://auxly.io/unified-memory\x1b\\Auxly-Memory CLI\x1b]8;;\x1b\\"
-	title = lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Render(auxlyLink)
+	// The product + company names ARE the hyperlinks. Two rules make the link actually
+	// click through:
+	//   1. Style the PLAIN label first, THEN wrap OSC-8 from the OUTSIDE. Passing an
+	//      already-OSC-8 string back through lipgloss shreds the escape (leaks the URL).
+	//   2. Do NOT use Underline — lipgloss renders an underlined string CHARACTER BY
+	//      CHARACTER, emitting a `\x1b[0m` reset between every letter. Those interior
+	//      resets fragment the OSC-8 hyperlink span, so terminals (Warp especially) show
+	//      the styling but drop the click. Bold + accent colour stays one contiguous span
+	//      inside a single clean hyperlink region — and IS the visible link cue.
+	title = osc8("https://auxly.io/unified-memory",
+		lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Render("Auxly-Memory CLI"))
 
 	subtitle = lipgloss.NewStyle().Foreground(ColorDim).Render("Unified Memory for AI Agents")
 
-	tzamunLink := "\x1b]8;;https://tzamun.sa\x1b\\Tzamun Arabia IT Co\x1b]8;;\x1b\\"
-	developedBy = lipgloss.NewStyle().Foreground(ColorDim).Italic(true).
-		Render(fmt.Sprintf("Developed by %s 🇸🇦", tzamunLink))
+	dimItalic := lipgloss.NewStyle().Foreground(ColorDim).Italic(true)
+	tzamun := osc8("https://tzamun.sa",
+		lipgloss.NewStyle().Foreground(ColorPrimary).Italic(true).Render("Tzamun Arabia IT Co"))
+	developedBy = dimItalic.Render("Developed by ") + tzamun + dimItalic.Render(" 🇸🇦")
 
 	version = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render("v" + update.Current)
 	return title, version, subtitle, developedBy
+}
+
+// osc8 wraps already-styled text in an OSC-8 terminal hyperlink. Wrap from the OUTSIDE —
+// the styled text must not be passed back through lipgloss, or the escape gets mangled.
+func osc8(url, text string) string {
+	return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
 }
 
 // renderBanner draws the full ASCII-art Auxly logo with the title labels beside

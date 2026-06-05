@@ -329,7 +329,7 @@ The TUI has ten tabs:
 |---|-----|--------------|
 | 1 | **Dashboard** | Today's writes, pending approvals, and a live grid of your connected agents |
 | 2 | **Activity** | Live audit feed, color-coded by provider, local vs. SSH-remote |
-| 3 | **Files** | Browse, view, edit, and download your memory files |
+| 3 | **Files** | Browse, view, edit, and download your memory files — press **`e`** to export the whole vault to `~/Downloads` (also `auxly export`) |
 | 4 | **Approvals** | Review pending diffs — approve or reject |
 | 5 | **Memory Org** | On-demand memory organization with a preview-and-confirm review (see below) |
 | 6 | **Analytics** | Writes per agent + (opt-in) live usage meters |
@@ -413,7 +413,7 @@ The wizard's steps are **method → host → name → permissions → connect**.
 
 Connecting to a host whose auxly is **older** than yours? Add **`--update-remote`** (or set `"updateRemotesOnConnect": true`) and `connect` bumps it **in place over the same SSH** and ensures its statusline — driven from your already-updated side, so it works even when the remote is too old to self-update. A host serving a **live session is skipped** (it updates on its next idle connect), so a running relay is never interrupted.
 
-**Managing your boxes from the host.** The **Remote** tab shows each connected box's **memory permission** (`read-only` / `read+write` / `read+write·Nf`) and flags any box running an older auxly with a `⬆ 1.0.9→1.0.10` badge. Press **`u`** on a box to update it over SSH, or **`B`** on the **Dashboard** to update *every* outdated box at once (live boxes are skipped). The same is scriptable: `auxly host versions` and `auxly host update <name>|--all`. To grant write access to your fleet without per-box setup, enable **`"defaultRemoteWrite": true`** — known boxes (in `clients.yaml`) then default to read+write, while unknown remotes stay read-only and explicit per-file grants still win.
+**Managing your boxes from the host.** The **Remote** tab shows each connected box's **memory permission** (`read-only` / `read+write` / `read+write·Nf`) and flags any box running an older auxly with a `⬆ 1.0.10→1.0.11` badge. Press **`u`** on a box to update it over SSH, or **`B`** on the **Dashboard** to update *every* outdated box at once (live boxes are skipped). When the outdated boxes are all busy, **`f`** force-updates them too (ending their live session). The same is scriptable: `auxly host versions` and `auxly host update <name>|--all [--force]`. To grant write access to your fleet without per-box setup, enable **`"defaultRemoteWrite": true`** — known boxes (in `clients.yaml`) then default to read+write, while unknown remotes stay read-only and explicit per-file grants still win.
 
 **Push your statusline to the fleet.** When you update a box (or sync from **Settings → Customizations**, press `s`), its statusline is installed in the **same wrap-vs-replace mode** you use locally. If you run **Live Usage**, the box's **plan-usage line is primed during the sync** (via the box's own `statusline --refresh-usage`) so it renders on the next draw — even on a box too old to persist the opt-in. The sync manager offers a master **auto-sync** toggle, **per-box** include/exclude, and **sync-now** (all boxes or one at a time).
 

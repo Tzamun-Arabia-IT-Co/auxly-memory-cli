@@ -56,7 +56,7 @@ func TestRenderUsagePerProvider(t *testing.T) {
 		{ProviderAntigravity, []string{"Antigravity", "all"}, []string{"Claude", "Cursor", "plan", "5h"}},
 	}
 	for _, c := range cases {
-		got := renderUsage(c.provider)
+		got := renderUsage(c.provider, 0)
 		for _, w := range c.want {
 			if !strings.Contains(got, w) {
 				t.Errorf("%s usage missing %q in %q", c.provider, w, got)
@@ -70,15 +70,15 @@ func TestRenderUsagePerProvider(t *testing.T) {
 	}
 }
 
-// TestRenderCursorSessionLine checks the line-2 quirks: Cursor's param_summary drives
-// the 🧠 tag (not thinking keywords) and output tokens render.
+// TestRenderCursorSessionLine checks the line-1 session quirks: Cursor's param_summary
+// drives the 🧠 tag (not thinking keywords) and output tokens render.
 func TestRenderCursorSessionLine(t *testing.T) {
 	var in Input
 	in.Model.DisplayName = "Composer"
 	in.Model.ParamSummary = "(fast)"
 	out := 12345
 	in.ContextWindow.TotalOutputTokens = &out
-	line := renderSession(in, nil, ProviderCursor)
+	line := renderWhere(in, nil, ProviderCursor, 0)
 	if !strings.Contains(line, "fast") {
 		t.Errorf("cursor session should show the param tag: %q", line)
 	}
@@ -89,14 +89,14 @@ func TestRenderCursorSessionLine(t *testing.T) {
 
 func TestDefaultModelLabelPerProvider(t *testing.T) {
 	var in Input // no model name at all
-	if got := renderWhere(in, ProviderCursor); !strings.Contains(got, "Auto") {
+	if got := renderWhere(in, nil, ProviderCursor, 0); !strings.Contains(got, "Auto") {
 		t.Errorf("cursor default model should be Auto: %q", got)
 	}
-	if got := renderWhere(in, ProviderAntigravity); !strings.Contains(got, "Gemini") {
+	if got := renderWhere(in, nil, ProviderAntigravity, 0); !strings.Contains(got, "Gemini") {
 		t.Errorf("antigravity default model should be Gemini: %q", got)
 	}
 	in.Model.Name = "gemini-2.5-flash" // model.name fallback (Gemini/Antigravity)
-	if got := renderWhere(in, ProviderAntigravity); !strings.Contains(got, "gemini-2.5-flash") {
+	if got := renderWhere(in, nil, ProviderAntigravity, 0); !strings.Contains(got, "gemini-2.5-flash") {
 		t.Errorf("model.name should be used when display_name is empty: %q", got)
 	}
 }

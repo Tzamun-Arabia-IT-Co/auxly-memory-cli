@@ -49,6 +49,7 @@ type dashboardModel struct {
 	boxUpdateNote    string
 	lastRefresh      time.Time
 	blinkCycle       int
+	loadFrame        int // free-running (uncapped) frame for the update-banner marquees
 	animationStarted bool
 	mcpError         string
 	reloaded         bool
@@ -328,6 +329,7 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		return m, usageFetchCmd(m.usageMgr)
 	case animationTickMsg:
 		m.blinkCycle = (m.blinkCycle + 1) % 24
+		m.loadFrame++ // uncapped, so the update marquees sweep smoothly without a wrap jerk
 		return m, animationTickCmd()
 	case dashboardUpdateDoneMsg:
 		m.updating = false
@@ -561,11 +563,19 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			}
 		case "B":
 			// One-key update of all outdated, idle connected boxes (#3). Live boxes
-			// are skipped by the host-side command.
+			// are skipped by the host-side command — use [f] to force those too.
 			if m.boxesOutdated > 0 && !m.boxesUpdating {
 				m.boxesUpdating = true
 				m.boxUpdateNote = "updating connected boxes…"
-				return m, updateAllBoxesCmd()
+				return m, updateAllBoxesCmd(false)
+			}
+		case "f":
+			// Force-update every outdated box INCLUDING live ones (ends their session).
+			// The escape hatch when all outdated boxes are busy and [B] would skip them.
+			if m.boxesOutdated > 0 && !m.boxesUpdating {
+				m.boxesUpdating = true
+				m.boxUpdateNote = "force-updating connected boxes…"
+				return m, updateAllBoxesCmd(true)
 			}
 		}
 	}
@@ -849,7 +859,6 @@ func (m dashboardModel) renderComposition(maxRows int) string {
 
 	const barW = 10
 	dim := lipgloss.NewStyle().Foreground(ColorDim)
-	track := lipgloss.NewStyle().Foreground(lipgloss.Color("237")) // a visible-but-quiet bar track
 	hidden := 0
 	if maxRows > 0 && len(stats) > maxRows {
 		hidden = len(stats) - maxRows
@@ -865,8 +874,7 @@ func (m dashboardModel) renderComposition(maxRows int) string {
 				filled = 1
 			}
 		}
-		bar := lipgloss.NewStyle().Foreground(ColorPrimary).Render(strings.Repeat("█", filled)) +
-			track.Render(strings.Repeat("░", barW-filled))
+		bar := renderMeter(filled, barW, ColorPrimary)
 		label := c.label
 		if c.private {
 			label += " 🔒"
@@ -1052,8 +1060,8 @@ func humanizeAgo(d time.Duration) string {
 func (m dashboardModel) renderUpdateBanner() string {
 	switch {
 	case m.updating:
-		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).
-			Render("  ⏳ Updating auxly…")
+		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("  ⏳ Updating auxly  ") +
+			RenderIndeterminateBar(m.loadFrame, 18, ColorWarning)
 	case m.updateResult != "":
 		color := ColorSuccess
 		if strings.HasPrefix(m.updateResult, "✗") {
@@ -1074,17 +1082,21 @@ func (m dashboardModel) renderUpdateBanner() string {
 func (m dashboardModel) renderBoxUpdateBanner() string {
 	switch {
 	case m.boxesUpdating:
-		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).
-			Render("  ⏳ Updating connected boxes…")
+		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).Render("  ⏳ Updating connected boxes  ") +
+			RenderIndeterminateBar(m.loadFrame, 18, ColorWarning)
 	case m.boxesOutdated > 0:
 		plural := "box needs"
 		if m.boxesOutdated > 1 {
 			plural = "boxes need"
 		}
 		return lipgloss.NewStyle().Foreground(ColorWarning).Bold(true).
-			Render(fmt.Sprintf("  ⬆ %d connected %s an update — press [B] to update all (live boxes skipped)", m.boxesOutdated, plural))
+			Render(fmt.Sprintf("  ⬆ %d connected %s an update — [B] update idle · [f] force all (ends live sessions)", m.boxesOutdated, plural))
 	case m.boxUpdateNote != "":
-		return lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true).Render("  " + m.boxUpdateNote)
+		color := ColorSuccess
+		if strings.HasPrefix(m.boxUpdateNote, "✗") {
+			color = ColorDanger
+		}
+		return lipgloss.NewStyle().Foreground(color).Bold(true).Render("  " + m.boxUpdateNote)
 	}
 	return ""
 }
@@ -1167,17 +1179,11 @@ func usageBar(pct float64, width int, brand string) string {
 		pct = 100
 	}
 	filled := int(pct/100*float64(width) + 0.5)
-	if filled > width {
-		filled = width
-	}
 	accent, ok := brandAccent[brand]
 	if !ok {
 		accent = "#84DCFB"
 	}
-	barStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(accent))
-	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-	return barStyle.Render(strings.Repeat("▰", filled)) +
-		dimStyle.Render(strings.Repeat("▱", width-filled))
+	return renderMeter(filled, width, lipgloss.Color(accent))
 }
 
 // renderUsageTab writes the "Usage" popup tab for one provider: its plan, each

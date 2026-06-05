@@ -497,26 +497,77 @@ func (m sshModel) beginPTY(title, password, sub string, args ...string) (sshMode
 }
 
 // milestonePct maps a streamed line to a coarse completion percentage so the bar
-// advances through the recognisable doctor/setup stages.
+// advances through the recognisable stages of whichever flow is running — the
+// connect/setup doctor AND the host-side box actions (update / reconnect / forget /
+// provision). The caller only ever raises the bar, so order matters solely when one
+// line could match two cases; the later-stage markers are listed first.
 func milestonePct(line string) int {
 	l := strings.ToLower(line)
 	switch {
 	case strings.Contains(l, "configured") || strings.Contains(l, "injected") || strings.Contains(l, "restart your") || strings.Contains(l, "onboard"):
 		return 95
+	// host-action completion markers (update / reconnect / disconnect / forget / wire)
+	case strings.Contains(l, "statusline applied") || strings.Contains(l, "statusline ensured") ||
+		strings.Contains(l, "restart the agent") || strings.Contains(l, "restart that box"):
+		return 95
+	case strings.Contains(l, "updated to") || strings.Contains(l, "saved connection") ||
+		strings.Contains(l, "disconnected") || strings.Contains(l, "reconnected") ||
+		strings.Contains(l, "re-wired") || strings.Contains(l, "rewired") || strings.Contains(l, "wired to") ||
+		strings.Contains(l, "removed"):
+		return 90
 	case strings.Contains(l, "saved remote profile"):
 		return 85
+	case strings.Contains(l, "wiring") || strings.Contains(l, "authorized"):
+		return 80
 	case strings.Contains(l, "auxly present on host") || strings.Contains(l, "auxly installed"):
 		return 75
-	case strings.Contains(l, "installing"):
+	// in-flight markers — "Updating X (a → b)…", "Installing auxly…", reconnect/forget starts
+	case strings.Contains(l, "installing") || strings.Contains(l, "updating"):
 		return 55
 	case strings.Contains(l, "host reachable"):
 		return 45
+	case strings.Contains(l, "disconnecting") || strings.Contains(l, "reconnecting") || strings.Contains(l, "removing"):
+		return 35
 	case strings.Contains(l, "local ssh client"):
 		return 25
 	case strings.Contains(l, "doctor"):
 		return 10
 	}
 	return 0
+}
+
+// progressCreepCeiling is how far the bar may auto-advance between observed milestones.
+// It stays below 100 so the bar never claims "done" before the terminal event; a real
+// milestone line can still snap it past this, and done fills it to 100.
+const progressCreepCeiling = 97
+
+// creepRampTop is where the fast initial ramp ends and the slow crawl begins.
+const creepRampTop = 80
+
+// creepProgress nudges the bar forward one spinner tick (frame is the spinner counter).
+// It has two phases so the bar both gets going quickly AND keeps the number visibly
+// inching through a long opaque wait instead of slamming to the ceiling and sitting:
+//   - below creepRampTop: a brisk ramp so the bar gets moving right away;
+//   - up to the ceiling: a slow frame-throttled crawl (~one cell every few ticks).
+//
+// Real milestone lines still snap it forward; only the done event fills it to 100.
+func creepProgress(pct, frame int) int {
+	if pct >= progressCreepCeiling {
+		return pct
+	}
+	if pct < creepRampTop {
+		step := (creepRampTop + 5 - pct) / 8
+		if step < 1 {
+			step = 1
+		}
+		return pct + step
+	}
+	// Slow crawl: advance one cell every 6th tick (~0.7s at the 120ms spinner cadence),
+	// so the number keeps creeping up during a minute-long model run.
+	if frame%6 == 0 {
+		return pct + 1
+	}
+	return pct
 }
 
 func spinnerFrame(i int) string {
@@ -534,8 +585,7 @@ func progressBar(pct, width int) string {
 	if pct > 100 {
 		pct = 100
 	}
-	filled := pct * width / 100
-	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	return renderMeter(pct*width/100, width, ColorPrimary)
 }
 
 func mcpConfigJSON(name string) string {
@@ -643,6 +693,11 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 	case sshSpinTickMsg:
 		if m.mode == sshModeProgress {
 			m.spin++
+			// Creep the bar forward each tick so it shows continuous motion through
+			// phases the TUI can't observe — e.g. a box's `connect auto` runs entirely
+			// server-side over SSH, its output captured not streamed. Milestone lines
+			// still snap it forward; only the done event fills it to 100%.
+			m.progressPct = creepProgress(m.progressPct, m.spin)
 			return m, spinTick()
 		}
 		return m, nil
@@ -1803,7 +1858,7 @@ func (m sshModel) View() string {
 	case sshModeProgress:
 		spin := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render(spinnerFrame(m.spin))
 		lines = append(lines, spin+"  "+cyan.Render(m.progressTitle))
-		bar := lipgloss.NewStyle().Foreground(ColorPrimary).Render(progressBar(m.progressPct, 30))
+		bar := renderLoadingBar(m.progressPct, 30, m.spin, ColorPrimary) // glint shows live activity at the ceiling
 		lines = append(lines, "  "+bar+dim.Render(fmt.Sprintf("  %3d%%", m.progressPct)))
 		lines = append(lines, "")
 		tail := m.progressOut

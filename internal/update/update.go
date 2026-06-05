@@ -141,6 +141,20 @@ func Available() (string, bool) {
 	return "", false
 }
 
+// Cached reports the cached latest version and whether it is newer than the running
+// build, performing NO network call — safe for hot paths like the statusline that must
+// never block or hit the network. It intentionally ignores cache freshness: a slightly
+// stale "update available" hint is acceptable and self-heals the next time a networked
+// path (CLI startup / TUI) refreshes the cache via Available(). Returns ("", false) when
+// there is no cache or no newer version.
+func Cached() (latest string, newer bool) {
+	latest, _ = readCache()
+	if latest == "" || !IsNewer(latest, Current) {
+		return "", false
+	}
+	return latest, true
+}
+
 type cacheFile struct {
 	CheckedAt time.Time `json:"checked_at"`
 	Latest    string    `json:"latest"`

@@ -120,23 +120,114 @@ func RenderTimelineNode(timeStr, icon, body string, isSelected bool) string {
 	return styledLine
 }
 
-// RenderProgressBar builds a solid, high-fidelity loading/progress bar.
-func RenderProgressBar(current, total int, width int, barColor lipgloss.Color) string {
-	if total <= 0 {
-		dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-		return dimStyle.Render(strings.Repeat("-", width))
+// barGlyphFilled / barGlyphEmpty are the single shared glyphs for EVERY bar in the TUI
+// (progress, usage, charts, memory-composition) so they all share one look: filled ▰
+// cells in a semantic colour, the remainder ▱ dimmed. Change these in one place and
+// every bar follows.
+const (
+	barGlyphFilled = "▰"
+	barGlyphEmpty  = "▱"
+)
+
+// renderMeter is the canonical Auxly bar: `filled` ▰ cells in fillColor followed by the
+// remaining ▱ cells dimmed, `width` cells total. The single source of truth for bar
+// styling — every bar renderer routes through it so they are visually identical.
+func renderMeter(filled, width int, fillColor lipgloss.Color) string {
+	if width < 0 {
+		width = 0
 	}
-	pct := (current * width) / total
-	if pct > width {
-		pct = width
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > width {
+		filled = width
+	}
+	fill := lipgloss.NewStyle().Foreground(fillColor)
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	return fill.Render(strings.Repeat(barGlyphFilled, filled)) +
+		dim.Render(strings.Repeat(barGlyphEmpty, width-filled))
+}
+
+// renderLoadingBar is the canonical IN-FLIGHT loading bar: a determinate ▰/▱ meter whose
+// filled region carries a moving bright "glint" so it keeps showing LIVE activity even
+// while the fill holds near the creep ceiling during a long opaque wait (the model
+// round-trip in Memory Org, a box's server-side `connect auto`). frame is any
+// ever-incrementing counter (a spinner tick); pct is 0–100.
+func renderLoadingBar(pct, width, frame int, fillColor lipgloss.Color) string {
+	if width < 1 {
+		width = 1
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	filled := pct * width / 100
+	fill := lipgloss.NewStyle().Foreground(fillColor)
+	glint := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+
+	head := loadingGlintHead(filled, frame)
+	var b strings.Builder
+	for i := 0; i < filled; i++ {
+		// A 2-cell bright "comet" (head + the cell behind it) reads as motion better than
+		// a lone dot; both still render the shared ▰ glyph, only brighter.
+		if i == head || i == head-1 {
+			b.WriteString(glint.Render(barGlyphFilled))
+		} else {
+			b.WriteString(fill.Render(barGlyphFilled))
+		}
+	}
+	b.WriteString(dim.Render(strings.Repeat(barGlyphEmpty, width-filled)))
+	return b.String()
+}
+
+// loadingGlintHead is the position of the moving glint within a `filled`-cell run for a
+// given frame — it sweeps the filled region and repeats, so the bar keeps showing live
+// activity even while the fill amount holds. Returns -1 when there is nothing filled.
+func loadingGlintHead(filled, frame int) int {
+	if filled <= 0 {
+		return -1
+	}
+	return ((frame % filled) + filled) % filled
+}
+
+// RenderProgressBar builds a determinate ▰/▱ progress bar (the shared Auxly style).
+func RenderProgressBar(current, total int, width int, barColor lipgloss.Color) string {
+	filled := 0
+	if total > 0 {
+		filled = current * width / total
+	}
+	return renderMeter(filled, width, barColor)
+}
+
+// RenderIndeterminateBar renders an animated marquee for work that has no measurable
+// sub-progress (an atomic step). A filled ▰ segment sweeps back and forth across a dim
+// ▱ track, driven by an ever-incrementing frame counter, so the step reads as "working"
+// instead of a determinate bar frozen at 0%.
+func RenderIndeterminateBar(frame, width int, barColor lipgloss.Color) string {
+	if width < 4 {
+		width = 4
+	}
+	seg := width / 4
+	if seg < 2 {
+		seg = 2
+	}
+	span := width - seg // travel distance of the segment across the track
+	if span < 1 {
+		span = 1
+	}
+	// Triangle wave 0→span→0 so the block sweeps right, then back left.
+	p := ((frame % (2 * span)) + 2*span) % (2 * span)
+	if p > span {
+		p = 2*span - p
 	}
 	barStyle := lipgloss.NewStyle().Foreground(barColor)
 	dimStyle := lipgloss.NewStyle().Foreground(ColorDim)
-
-	filled := strings.Repeat("=", pct)
-	empty := strings.Repeat("-", width-pct)
-
-	return barStyle.Render(filled) + dimStyle.Render(empty)
+	return dimStyle.Render(strings.Repeat(barGlyphEmpty, p)) +
+		barStyle.Render(strings.Repeat(barGlyphFilled, seg)) +
+		dimStyle.Render(strings.Repeat(barGlyphEmpty, width-seg-p))
 }
 
 // padLine pads a string to a specific visible terminal width, accounting for ANSI escapes and emojis.

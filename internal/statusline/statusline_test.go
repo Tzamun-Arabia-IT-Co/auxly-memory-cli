@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestThresholdBarAndColors(t *testing.T) {
@@ -31,6 +32,115 @@ func TestThresholdBarAndColors(t *testing.T) {
 	if b := thresholdBar(-1); !strings.HasPrefix(b, cDim) || strings.Contains(b, "▰") {
 		t.Errorf("unknown pct should be an empty dim bar, got %q", b)
 	}
+}
+
+func TestGitStatsSegment(t *testing.T) {
+	// Not a repo (no commit) → empty.
+	if s := gitStatsSegment(gitStats{}); s != "" {
+		t.Errorf("no commit should yield empty segment, got %q", s)
+	}
+	// Clean tree → only the commit hash, no dirty counts.
+	clean := stripANSIcodes(gitStatsSegment(gitStats{commit: "a1b2c3d"}))
+	if !strings.Contains(clean, "a1b2c3d") {
+		t.Errorf("clean segment should show the commit hash, got %q", clean)
+	}
+	if strings.ContainsAny(clean, "+-"+glyphFile) {
+		t.Errorf("clean tree should show no dirty counts, got %q", clean)
+	}
+	// Dirty tree → files changed + added/removed + commit, all present and ordered.
+	dirty := stripANSIcodes(gitStatsSegment(gitStats{commit: "deadbee", changed: 23, added: 1067, removed: 55}))
+	for _, want := range []string{glyphFile + " 23", "+1067", "-55", "deadbee"} {
+		if !strings.Contains(dirty, want) {
+			t.Errorf("dirty segment missing %q, got %q", want, dirty)
+		}
+	}
+	// A removal-free change must not render a "-0".
+	noDel := stripANSIcodes(gitStatsSegment(gitStats{commit: "abc1234", changed: 1, added: 5}))
+	if strings.Contains(noDel, "-0") {
+		t.Errorf("zero removals should be omitted, got %q", noDel)
+	}
+	// Ahead/behind upstream + commit age all render; zero ahead/behind are omitted.
+	full := stripANSIcodes(gitStatsSegment(gitStats{commit: "abc1234", commitAge: "2h", ahead: 2, behind: 1, changed: 3, added: 9}))
+	for _, want := range []string{"↑2", "↓1", "· 2h"} {
+		if !strings.Contains(full, want) {
+			t.Errorf("full segment missing %q, got %q", want, full)
+		}
+	}
+	noSync := stripANSIcodes(gitStatsSegment(gitStats{commit: "abc1234"}))
+	if strings.ContainsAny(noSync, "↑↓") {
+		t.Errorf("in-sync repo should show no ↑/↓, got %q", noSync)
+	}
+	if strings.Contains(noSync, "·") {
+		t.Errorf("missing commit age should omit the '·' separator, got %q", noSync)
+	}
+}
+
+func TestShortAgo(t *testing.T) {
+	if shortAgo(0) != "" || shortAgo(-5) != "" {
+		t.Error("non-positive timestamp should be empty")
+	}
+	now := time.Now()
+	cases := []struct {
+		ago  time.Duration
+		want string
+	}{
+		{30 * time.Second, "now"},
+		{5 * time.Minute, "5m"},
+		{2 * time.Hour, "2h"},
+		{3 * 24 * time.Hour, "3d"},
+		{3 * 7 * 24 * time.Hour, "3w"},
+	}
+	for _, c := range cases {
+		if got := shortAgo(now.Add(-c.ago).Unix()); got != c.want {
+			t.Errorf("shortAgo(%s ago) = %q, want %q", c.ago, got, c.want)
+		}
+	}
+}
+
+func TestCountAddedLines(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := []struct {
+		name, content string
+		want          int
+	}{
+		{"trailing.txt", "a\nb\nc\n", 3}, // 3 newline-terminated lines
+		{"notrail.txt", "a\nb\nc", 3},    // final line has no newline → still counted
+		{"empty.txt", "", 0},             // empty file → 0
+		{"oneline.txt", "solo", 1},       // single line, no newline
+		{"binary.bin", "a\x00b\nc\n", 0}, // NUL in first chunk → binary → 0 like git
+	}
+	for _, c := range cases {
+		p := write(c.name, c.content)
+		if got := countAddedLines(p); got != c.want {
+			t.Errorf("countAddedLines(%q) = %d, want %d", c.name, got, c.want)
+		}
+	}
+	// Missing file → 0, never panics.
+	if got := countAddedLines(filepath.Join(dir, "nope")); got != 0 {
+		t.Errorf("missing file should count 0, got %d", got)
+	}
+}
+
+// stripANSIcodes removes SGR escape sequences so a test can assert on visible text.
+func stripANSIcodes(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b {
+			for i < len(s) && s[i] != 'm' {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 func TestFmtTokensAndCtx(t *testing.T) {

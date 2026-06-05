@@ -521,7 +521,7 @@ func (m model) renderFooter() string {
 			footerText = "j/k: Navigate feed • Enter: View details • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 		}
 	case screenBrowser:
-		footerText = "j/k: Navigate files • Enter: View file • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		footerText = "j/k: Navigate files • Enter: View file • e: Export all • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenViewer:
 		if m.viewer.editing {
 			footerText = "Ctrl+S: Save • Esc: Cancel edit (discard changes)"

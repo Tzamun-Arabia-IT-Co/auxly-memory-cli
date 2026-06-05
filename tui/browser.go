@@ -2,7 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,6 +17,30 @@ type browserModel struct {
 	store  *memory.Store
 	files  []memory.FileInfo
 	cursor int
+	status string // transient feedback (e.g. the export result path)
+}
+
+// browserExportMsg carries the outcome of an "export all" run back into Update.
+type browserExportMsg struct {
+	dir   string
+	count int
+	err   error
+}
+
+// exportAllCmd writes every memory file to a timestamped folder in ~/Downloads, each
+// tagged with its name + the export time. Runs off the UI thread (file I/O).
+func exportAllCmd(store *memory.Store) tea.Cmd {
+	return func() tea.Msg {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return browserExportMsg{err: err}
+		}
+		res, err := store.Export(filepath.Join(home, "Downloads"), time.Now())
+		if err != nil {
+			return browserExportMsg{err: err}
+		}
+		return browserExportMsg{dir: res.Dir, count: len(res.Files)}
+	}
 }
 
 type browserRefreshMsg struct {
@@ -21,6 +49,16 @@ type browserRefreshMsg struct {
 
 func newBrowserModel(store *memory.Store) browserModel {
 	return browserModel{store: store}
+}
+
+// shortHome rewrites a path under the home directory to a ~/… form for compact display.
+func shortHome(p string) string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if rel, err := filepath.Rel(home, p); err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.Join("~", rel)
+		}
+	}
+	return p
 }
 
 func (m browserModel) Refresh() tea.Cmd {
@@ -67,6 +105,13 @@ func (m browserModel) Update(msg tea.Msg) (browserModel, tea.Cmd) {
 		if m.cursor >= len(m.files) {
 			m.cursor = 0
 		}
+	case browserExportMsg:
+		if msg.err != nil {
+			m.status = "✗ Export failed: " + msg.err.Error()
+		} else {
+			m.status = fmt.Sprintf("✓ Exported %d file(s) → %s", msg.count, shortHome(msg.dir))
+		}
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "j", "down":
@@ -76,6 +121,12 @@ func (m browserModel) Update(msg tea.Msg) (browserModel, tea.Cmd) {
 		case "k", "up":
 			if m.cursor > 0 {
 				m.cursor--
+			}
+		case "e", "E":
+			// Export every memory file to a timestamped folder in ~/Downloads.
+			if len(m.files) > 0 {
+				m.status = "Exporting…"
+				return m, exportAllCmd(m.store)
 			}
 		case "enter":
 			if m.cursor < len(m.files) {
@@ -126,5 +177,16 @@ func (m browserModel) View() string {
 		content += line + "\n"
 	}
 
-	return fmt.Sprintf("%s\n\n%s\n%s\n%s", title, header, sep, content)
+	accent := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	hint := "  " + accent.Render("[e]") + dim.Render(" export all to ~/Downloads (tagged with name + timestamp)")
+	out := fmt.Sprintf("%s\n\n%s\n%s\n%s\n%s", title, header, sep, content, hint)
+	if m.status != "" {
+		color := ColorSuccess
+		if strings.HasPrefix(m.status, "✗") {
+			color = ColorDanger
+		}
+		out += "\n  " + lipgloss.NewStyle().Foreground(color).Render(m.status)
+	}
+	return out
 }

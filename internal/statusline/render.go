@@ -10,15 +10,18 @@ package statusline
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage"
 )
 
@@ -36,6 +39,11 @@ const (
 )
 
 const barWidth = 10
+
+// glyphFile marks the changed-files count on line 1 — the 📝 emoji, a recognizable
+// "edited files" cue that renders in every terminal's output font (unlike Nerd Font /
+// Private-Use glyphs, which Warp's output font does not bundle).
+const glyphFile = "📝"
 
 // Provider identifies which agent's statusline we are rendering. It selects the
 // usage snapshot (line 4) and the per-agent quirks on lines 1–2 (Cursor sends
@@ -104,21 +112,36 @@ func Render(in Input, full bool, provider string) string {
 	if provider == "" {
 		provider = ProviderClaude
 	}
-	// Read the transcript tail ONCE — line 2 (thinking + tokens) and line 3
+	// Read the transcript tail ONCE — line 1 (thinking + tokens) and line 3
 	// (activity) both derive from it, and it runs on every statusline refresh.
 	var tx []string
 	if in.TranscriptPath != "" {
 		tx = tailLines(in.TranscriptPath, 512*1024)
 	}
+	// Terminal width drives responsive layout: each line drops its lowest-priority
+	// segments (then hard-truncates as a last resort) to fit on ONE row instead of
+	// wrapping. 0 = unknown → render unconstrained, exactly as before.
+	width := termWidth()
+
 	var lines []string
 	if full {
-		lines = append(lines, renderWhere(in, provider), renderSession(in, tx, provider))
+		// Line 1 = agent + context; line 2 = git (omitted outside a repo).
+		lines = append(lines, renderWhere(in, tx, provider, width))
+		if g := renderGit(in, width); g != "" {
+			lines = append(lines, g)
+		}
 	}
-	if mem := renderMemory(in, tx); mem != "" {
+	if mem := renderMemory(in, tx, width); mem != "" {
 		lines = append(lines, mem)
 	}
-	if usageLine := renderUsage(provider); usageLine != "" {
+	if usageLine := renderUsage(provider, width); usageLine != "" {
 		lines = append(lines, usageLine)
+	}
+	// Final guarantee: no line ever exceeds the terminal width (no-op when it fits or
+	// width is unknown). Segment-dropping above keeps this from cutting mid-content on
+	// the rich lines; for the shorter lines it's a clean safety net.
+	for i := range lines {
+		lines[i] = truncateVisible(lines[i], width)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -164,8 +187,11 @@ func workdir(in Input) string {
 	return wd
 }
 
-// renderWhere = line 1: 📁 folder · 🌿 branch · [wt] · 🤖 model · 🔖 version · extras.
-func renderWhere(in Input, provider string) string {
+// renderWhere = line 1 (agent + context): 📁 folder · [wt] · 🤖 model · ⚡ effort ·
+// 🧠 thinking · 🪙 in/window out:N · 📊 context bar · 🔖 version · extras. Git context
+// lives on its own line (renderGit / line 2). The 🧠 tag is the thinking level for
+// Claude/Antigravity; for Cursor it reflects param_summary / max_mode.
+func renderWhere(in Input, tx []string, provider string, width int) string {
 	dir := workdir(in)
 	folder := filepath.Base(dir)
 	if folder == "" || folder == "." {
@@ -178,48 +204,60 @@ func renderWhere(in Input, provider string) string {
 	if model == "" {
 		model = defaultModelLabel(provider)
 	}
-	out := "📁 " + folder
-	if br := gitBranch(dir); br != "" {
-		out += "  🌿 " + br
-	}
+
+	// Segments in display order; prio governs what survives when the row is too narrow
+	// (lower prio dropped first). Folder is pinned; model/context are the next to keep.
+	segs := []lineSeg{{text: "📁 " + folder, prio: prioPinned}}
 	if in.Worktree.Name != "" {
-		out += "  [wt:" + in.Worktree.Name + "]"
+		segs = append(segs, lineSeg{text: "[wt:" + in.Worktree.Name + "]", prio: 75})
 	}
-	out += "  🤖 " + model
+	segs = append(segs, lineSeg{text: "🤖 " + model, prio: 90})
+	if in.Effort.Level != "" {
+		segs = append(segs, lineSeg{text: "⚡ " + in.Effort.Level, prio: 60})
+	}
+	segs = append(segs, lineSeg{text: "🧠 " + sessionModeTag(in, tx, provider), prio: 55})
+
+	// Context: 🪙 input/window (+ out:N output tokens when reported) and the 📊 used bar.
+	tokens, ctxSize, usedPct := contextStats(in, tx)
+	tok := "🪙 " + fmtTokens(tokens) + "/" + fmtCtx(ctxSize)
+	if in.ContextWindow.TotalOutputTokens != nil && *in.ContextWindow.TotalOutputTokens > 0 {
+		tok += " out:" + fmtTokens(*in.ContextWindow.TotalOutputTokens)
+	}
+	segs = append(segs, lineSeg{text: tok, prio: 50})
+	bar := "📊 " + cDim + strings.Repeat("▱", barWidth) + cReset + " -"
+	if usedPct >= 0 {
+		bar = fmt.Sprintf("📊 %s %s%d%%%s", thresholdBar(usedPct), pctColor(usedPct), usedPct, cReset)
+	}
+	segs = append(segs, lineSeg{text: bar, prio: 80})
 	if in.Version != "" {
-		out += "  🔖 v" + in.Version
+		segs = append(segs, lineSeg{text: "🔖 v" + in.Version, prio: 40})
 	}
 	if in.Autorun {
-		out += "  ⚡ autorun"
+		segs = append(segs, lineSeg{text: "⚡ autorun", prio: 30})
 	}
 	if in.Vim.Mode != "" {
-		out += "  ⌨ " + in.Vim.Mode
+		segs = append(segs, lineSeg{text: "⌨ " + in.Vim.Mode, prio: 30})
 	}
-	return out
+	return joinFit(segs, "  ", width)
 }
 
-// renderSession = line 2: 🧠 mode · ⚡ effort · 🪙 tokens/window · 📊 context bar.
-// The 🧠 tag is the thinking level for Claude/Antigravity; for Cursor (no thinking
-// keywords) it reflects param_summary / max_mode instead.
-func renderSession(in Input, tx []string, provider string) string {
-	tokens, ctxSize, usedPct := contextStats(in, tx)
-	out := "🧠 " + sessionModeTag(in, tx, provider)
-	if in.Effort.Level != "" {
-		out += "  ⚡ " + in.Effort.Level
+// renderGit = line 2 (git only): 🌿 branch · ↑ahead ↓behind · 📝 changed +added/-removed ·
+// ⌥ commit · age. Returns "" when the working dir is not a git repo so the line is omitted.
+// On a narrow terminal the stats drop first and the branch is kept.
+func renderGit(in Input, width int) string {
+	dir := workdir(in)
+	br := gitBranch(dir)
+	if br == "" {
+		return ""
 	}
-	out += "  🪙 " + fmtTokens(tokens) + "/" + fmtCtx(ctxSize)
-	if in.ContextWindow.TotalOutputTokens != nil && *in.ContextWindow.TotalOutputTokens > 0 {
-		out += " out:" + fmtTokens(*in.ContextWindow.TotalOutputTokens)
+	segs := []lineSeg{{text: "🌿 " + br, prio: prioPinned}}
+	if stats := strings.TrimSpace(gitStatsSegment(gitWorkdirStats(dir))); stats != "" {
+		segs = append(segs, lineSeg{text: stats, prio: 50})
 	}
-	if usedPct >= 0 {
-		out += fmt.Sprintf("  📊 %s %s%d%%%s", thresholdBar(usedPct), pctColor(usedPct), usedPct, cReset)
-	} else {
-		out += "  📊 " + cDim + strings.Repeat("▱", barWidth) + cReset + " -"
-	}
-	return out
+	return joinFit(segs, "  ", width)
 }
 
-// sessionModeTag returns the line-2 🧠 tag: Cursor reports param_summary/max_mode;
+// sessionModeTag returns the 🧠 thinking tag: Cursor reports param_summary/max_mode;
 // every other provider uses the transcript-derived thinking level.
 func sessionModeTag(in Input, tx []string, provider string) string {
 	if provider == ProviderCursor {
@@ -234,9 +272,10 @@ func sessionModeTag(in Input, tx []string, provider string) string {
 	return thinkingMode(in, tx)
 }
 
-// renderMemory = line 3: 💾 Auxly · link dot · role · last op · pending. Ported from
-// cc-auxly-status.py — role detection, transcript activity, audit fallback.
-func renderMemory(in Input, tx []string) string {
+// renderMemory = line 3: 💾 Auxly vX.Y.Z [⬆ newer] · link dot · role · last op · pending.
+// Ported from cc-auxly-status.py — role detection, transcript activity, audit fallback —
+// and extended with Auxly's OWN version plus a cache-only update hint (no network call).
+func renderMemory(in Input, tx []string, width int) string {
 	auxDir := auxlyDir()
 	if fi, err := os.Stat(auxDir); err != nil || !fi.IsDir() {
 		return ""
@@ -254,16 +293,32 @@ func renderMemory(in Input, tx []string) string {
 	if !connected {
 		dot = "🔴"
 	}
-	out := "💾 Auxly · " + dot + " " + role + act
-	if n := pendingCount(); n > 0 {
-		out += fmt.Sprintf(" · 📥 %d pending", n)
+
+	// Brand + Auxly's own version, plus an "⬆ newer" hint when the cached update check
+	// (network-free) says a newer release exists. Pinned: the identity of this line.
+	brand := "💾 Auxly " + cDim + "v" + update.Current + cReset
+	if latest, newer := update.Cached(); newer {
+		brand += " " + cAmber + "⬆ " + latest + cReset
 	}
-	return out
+	segs := []lineSeg{
+		{text: brand, prio: prioPinned},
+		{text: dot + " " + role, prio: 80},
+	}
+	if a := strings.TrimPrefix(strings.TrimSpace(act), "· "); a != "" {
+		// act carries a leading " · "; it becomes its own segment (drops first when narrow).
+		segs = append(segs, lineSeg{text: a, prio: 50})
+	}
+	if n := pendingCount(); n > 0 {
+		segs = append(segs, lineSeg{text: fmt.Sprintf("📥 %d pending", n), prio: 60})
+	}
+	return joinFit(segs, " · ", width)
 }
 
 // renderUsage = line 4: 🔋 Claude · ⏳ 5h bar · 📅 wk bar · freshness. Ported from
-// cc-usage-line.py — reads the cached snapshot only, never the network.
-func renderUsage(provider string) string {
+// cc-usage-line.py — reads the cached snapshot only, never the network. On a narrow
+// terminal the freshness stamp drops first, then trailing windows, keeping the brand
+// anchor and the first (session) window.
+func renderUsage(provider string, width int) string {
 	rep, ok := loadUsageReport(provider)
 	if !ok || rep.Err != "" || len(rep.Windows) == 0 {
 		return ""
@@ -279,8 +334,9 @@ func renderUsage(provider string) string {
 	}
 	sep := " " + cDim + "·" + cReset + " "
 
-	var parts []string
-	for _, w := range rep.Windows {
+	name := strings.Title(provider) //nolint:staticcheck // ASCII provider id, Title is fine
+	segs := []lineSeg{{text: cAccent + "🔋 " + name + cReset, prio: prioPinned}}
+	for i, w := range rep.Windows {
 		label := labels[strings.ToLower(strings.TrimSpace(w.Label))]
 		if label == "" {
 			label = strings.ToLower(w.Label)
@@ -295,9 +351,10 @@ func renderUsage(provider string) string {
 				seg += " " + cDim + "resets " + r + cReset
 			}
 		}
-		parts = append(parts, seg)
+		// Earlier windows (session first) outrank later ones when space is tight.
+		segs = append(segs, lineSeg{text: seg, prio: 70 - i})
 	}
-	if len(parts) == 0 {
+	if len(segs) == 1 { // brand only, no windows
 		return ""
 	}
 
@@ -308,8 +365,8 @@ func renderUsage(provider string) string {
 	if rep.RateLimited {
 		stamp = cWarn + "⧗ rate-limited" + cReset
 	}
-	name := strings.Title(provider) //nolint:staticcheck // ASCII provider id, Title is fine
-	return cAccent + "🔋 " + name + cReset + sep + strings.Join(parts, sep) + sep + stamp
+	segs = append(segs, lineSeg{text: stamp, prio: 20}) // freshness drops first
+	return joinFit(segs, sep, width)
 }
 
 // --- bars & colors ----------------------------------------------------------
@@ -490,6 +547,190 @@ func gitBranch(dir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// gitStats is the working-tree summary surfaced on line 1: the short HEAD hash and its age,
+// the ahead/behind position vs upstream, the count of changed files, and the +added /
+// -removed line totals of uncommitted work.
+type gitStats struct {
+	commit    string // short HEAD hash ("" when not a repo / no commits yet)
+	commitAge string // relative age of HEAD ("2h", "3d", "" when unknown)
+	ahead     int    // local commits not on upstream (unpushed)
+	behind    int    // upstream commits not on HEAD (unpulled)
+	changed   int    // changed + untracked files (porcelain rows)
+	added     int    // lines added vs HEAD (numstat)
+	removed   int    // lines removed vs HEAD (numstat)
+}
+
+// gitWorkdirStats gathers the line-1 git summary under ONE shared hard deadline so the
+// git invocations together can never freeze the terminal. Each step degrades
+// independently: a failure leaves its field zero rather than aborting the whole segment.
+func gitWorkdirStats(dir string) gitStats {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	var st gitStats
+	// One call yields the short hash AND the committer time (for the relative age).
+	if out, err := exec.CommandContext(ctx, "git", "-C", dir, "log", "-1", "--format=%h\t%ct").Output(); err == nil {
+		parts := strings.SplitN(strings.TrimSpace(string(out)), "\t", 2)
+		st.commit = parts[0]
+		if len(parts) == 2 {
+			if sec, perr := strconv.ParseInt(parts[1], 10, 64); perr == nil {
+				st.commitAge = shortAgo(sec)
+			}
+		}
+	}
+	// Ahead/behind vs the tracked upstream. `--left-right @{u}...HEAD` prints
+	// "<behind>\t<ahead>"; the command errors (skipped) when there is no upstream.
+	if out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-list", "--left-right", "--count", "@{u}...HEAD").Output(); err == nil {
+		if f := strings.Fields(strings.TrimSpace(string(out))); len(f) == 2 {
+			st.behind, _ = strconv.Atoi(f[0])
+			st.ahead, _ = strconv.Atoi(f[1])
+		}
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain").Output(); err == nil {
+		for _, ln := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+			if strings.TrimSpace(ln) != "" {
+				st.changed++
+			}
+		}
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", dir, "diff", "--numstat", "HEAD").Output(); err == nil {
+		for _, ln := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+			f := strings.Fields(ln)
+			if len(f) < 2 {
+				continue
+			}
+			// numstat uses "-" for binary files; Atoi fails and we simply skip those.
+			if a, err := strconv.Atoi(f[0]); err == nil {
+				st.added += a
+			}
+			if d, err := strconv.Atoi(f[1]); err == nil {
+				st.removed += d
+			}
+		}
+	}
+	// `git diff HEAD` only sees TRACKED changes — every line of a brand-new untracked file
+	// is an addition that git ignores until it's staged. Count those too so the +added total
+	// matches what shells/Warp report (which include untracked content).
+	st.added += untrackedAddedLines(ctx, dir)
+	return st
+}
+
+// untrackedAddedLines totals the line counts of untracked, non-ignored files (each is all
+// additions). Bounded so it can't dominate the statusline budget: it caps the number of
+// files scanned and the bytes read per file, and skips binaries (NUL-bearing) like git does.
+func untrackedAddedLines(ctx context.Context, dir string) int {
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "ls-files", "--others", "--exclude-standard").Output()
+	if err != nil {
+		return 0
+	}
+	const maxFiles = 2000
+	total, scanned := 0, 0
+	for _, rel := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if rel == "" {
+			continue
+		}
+		if scanned++; scanned > maxFiles {
+			break
+		}
+		total += countAddedLines(filepath.Join(dir, rel))
+	}
+	return total
+}
+
+// countAddedLines counts the lines in a file the way `git diff` would for a new file: one
+// per newline, plus one for a final non-empty line with no trailing newline. Reads at most
+// maxFileBytes and returns 0 for binary files (a NUL in the first chunk).
+func countAddedLines(path string) int {
+	const maxFileBytes = 4 << 20 // 4 MiB safety cap per file
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	buf := make([]byte, 64*1024)
+	var (
+		count int
+		read  int64
+		last  byte
+		first = true
+	)
+	for read < maxFileBytes {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			if first {
+				first = false
+				if bytes.IndexByte(chunk, 0) >= 0 { // binary — git counts 0
+					return 0
+				}
+			}
+			count += bytes.Count(chunk, []byte{'\n'})
+			last = chunk[n-1]
+			read += int64(n)
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	if last != 0 && last != '\n' {
+		count++ // final line with no trailing newline
+	}
+	return count
+}
+
+// gitStatsSegment formats the line-1 git summary: "  3 +1067 -55  ⌥ a1b2c3d". The
+// dirty counts appear only when there are uncommitted changes; the commit hash appears
+// whenever HEAD exists. Returns "" when dir is not a git repo.
+func gitStatsSegment(st gitStats) string {
+	if st.commit == "" {
+		return ""
+	}
+	var b strings.Builder
+	// Ahead/behind upstream (unpushed ↑ / unpulled ↓), right after the branch.
+	if st.ahead > 0 {
+		fmt.Fprintf(&b, " %s↑%d%s", cDim, st.ahead, cReset)
+	}
+	if st.behind > 0 {
+		fmt.Fprintf(&b, " %s↓%d%s", cDim, st.behind, cReset)
+	}
+	if st.changed > 0 {
+		fmt.Fprintf(&b, " %s%s %d%s", cDim, glyphFile, st.changed, cReset)
+		if st.added > 0 {
+			fmt.Fprintf(&b, " %s+%d%s", cGreen, st.added, cReset)
+		}
+		if st.removed > 0 {
+			fmt.Fprintf(&b, " %s-%d%s", cRed, st.removed, cReset)
+		}
+	}
+	// Last commit: hash · relative age.
+	fmt.Fprintf(&b, "  %s⌥ %s", cDim, st.commit)
+	if st.commitAge != "" {
+		fmt.Fprintf(&b, " · %s", st.commitAge)
+	}
+	b.WriteString(cReset)
+	return b.String()
+}
+
+// shortAgo renders a compact relative age from a unix timestamp: "now", "5m", "2h", "3d",
+// "4w". Returns "" for a non-positive timestamp.
+func shortAgo(sec int64) string {
+	if sec <= 0 {
+		return ""
+	}
+	d := time.Since(time.Unix(sec, 0))
+	switch {
+	case d < time.Minute:
+		return "now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	default:
+		return fmt.Sprintf("%dw", int(d.Hours()/(24*7)))
+	}
 }
 
 // tailLines reads the last n bytes of a file and returns its lines.
