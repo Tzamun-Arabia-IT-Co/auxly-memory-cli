@@ -25,14 +25,31 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.0.13
+## 🆕 What's New in Version 1.0.15
 
-**Full Windows support — both connection directions now work,** validated end to end against a real Windows 11 host:
+**Full Windows support — validated end to end on a real Windows 11 host.** Connect *to* a Windows box, run a Windows box as a memory host, and connect a Windows box to your fleet.
 
-- **🪟 Windows as a remote box.** `auxly connect` to a Windows machine works. Auxly auto-detects the host OS over SSH and provisions through **PowerShell** instead of POSIX `sh` — the old `'sh' is not recognized` failure (a Windows host's default SSH shell is `cmd.exe`) is gone. A clean Windows host is **auto-installed** over SSH (`irm https://auxly.io/cli.ps1 | iex`).
-- **🛰️ Windows in the host / relay flow (new in 1.0.13).** A memory **host** can now provision a Windows box (or publish to a Windows relay) through the `auxly host` path — install, SSH-key generation, relay offer, and tunnel checks are all PowerShell-aware on Windows (previously this path still ran POSIX `sh` and failed).
-- **🧠 Windows as a memory host.** A Windows machine can serve its own memory vault to your other agents — a consumer launches `auxly mcp-server` on the Windows host over SSH (verified with a live MCP `initialize` handshake). Keep-alive runs via Windows Task Scheduler.
-- **🗂️ Cross-platform agent detection & config.** Claude, Cursor, Copilot, Gemini and other agent configs resolve under `%APPDATA%` / `%LOCALAPPDATA%` on Windows (and `~/.config` on Linux), not just macOS paths.
+### 🪟 Connecting a Windows box (recommended path)
+
+The reliable way to connect a Windows machine to a memory host:
+
+1. **On the host** (your Mac/Linux machine) — publish its memory and open the relay tunnel:
+   ```bash
+   auxly host setup --rendezvous <user@windows-box>
+   ```
+2. **On the Windows box** — install auxly and connect it (in PowerShell):
+   ```powershell
+   irm https://auxly.io/cli.ps1 | iex
+   auxly connect auto          # or run the /auxly-remote-connect skill in your agent
+   ```
+   Running the connect **on the box** is the most reliable path — auxly runs locally there, so there's no SSH session that can stall.
+
+> **Note on `auxly host setup --provision`:** the one-shot variant, where the host pushes install **and** wiring to the box over SSH, can intermittently stall on Windows due to a Windows OpenSSH session-lifetime quirk. As of **1.0.15** every over-SSH command is bounded by a timeout, so it **fails-fast instead of hanging** — but the on-box connect above is the recommended path.
+
+### Other Windows capabilities (all working)
+- **Connect *to* a Windows box** (`auxly connect`) — auto-detects OS, provisions via **PowerShell** instead of POSIX `sh` (the old `'sh' is not recognized` failure is gone), auto-installs a clean host.
+- **🧠 Windows as a memory host** — serves its vault via `auxly mcp-server` over SSH; keep-alive via Windows Task Scheduler.
+- **🗂️ Cross-platform agent config** — Claude, Cursor, Copilot, Gemini configs resolve under `%APPDATA%` / `%LOCALAPPDATA%` on Windows (and `~/.config` on Linux).
 
 See the [CHANGELOG](CHANGELOG.md) for the full list.
 

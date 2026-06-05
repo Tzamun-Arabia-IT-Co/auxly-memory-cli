@@ -3,7 +3,9 @@ package cmd
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -343,11 +345,25 @@ func provisionConsumer(hc hostConfig) error {
 	}
 	installPosix := "curl -fsSL " + update.BaseURL() + "/cli | sh"
 	installPS := winInstallCmd(update.BaseURL() + "/cli.ps1")
-	if out, ierr := runRemoteScript(relay, relayOS, installPosix, installPS); ierr != nil {
-		fmt.Printf("   ⚠ remote install failed: %v\n   %s\n", ierr, firstLine(out))
-		return ierr
+	installOut, installErr := runRemoteScriptTimeout(relay, relayOS, installPosix, installPS, 90*time.Second)
+
+	// The installer can complete on the box yet leave the SSH session lingering
+	// (a known Windows irm|iex-over-SSH quirk), so verify out-of-band rather than
+	// trusting the install call's clean exit.
+	verifyOut, verifyErr := runSSH(relay, hostAuxlyBin(relay), "--version")
+	if verifyErr == nil && strings.TrimSpace(verifyOut) != "" {
+		fmt.Println("   ✓ auxly installed on the box")
+		if installErr != nil && !errors.Is(installErr, context.DeadlineExceeded) {
+			fmt.Printf("   (note: install call returned %v, but auxly verified OK)\n", installErr)
+		}
+	} else {
+		if installErr != nil {
+			fmt.Printf("   ⚠ remote install failed or timed out: %v\n   %s\n", installErr, firstLine(installOut))
+			return fmt.Errorf("remote install did not verify: install: %w; verify %s --version: %v", installErr, hostAuxlyBin(relay), verifyErr)
+		}
+		fmt.Printf("   ⚠ remote install did not verify: %v\n   %s\n", verifyErr, firstLine(verifyOut))
+		return fmt.Errorf("remote install did not verify with %s --version: %w", hostAuxlyBin(relay), verifyErr)
 	}
-	fmt.Println("   ✓ auxly installed on the box")
 
 	// 2. Authorize the box's key on THIS Mac so the runtime tunnel auth works.
 	if kerr := authorizeRemoteKeyLocally(relay); kerr != nil {

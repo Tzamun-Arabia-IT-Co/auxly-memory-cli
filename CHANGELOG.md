@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.15] - 2026-06-05
+
+**Windows remote-command robustness.** Bounds every over-SSH command so a remote
+that leaves its SSH session lingering can never hang the CLI. Surfaced while
+validating `auxly host setup --provision` against a real Windows box.
+
+### Fixed
+
+- **Remote `auxly` commands can no longer hang forever.** Installing/wiring a
+  Windows box over SSH (`irm | iex`, `auxly connect use`, …) can complete on the
+  box yet leave the PowerShell/SSH session open (a Windows OpenSSH
+  session-lifetime quirk), which previously blocked the host CLI indefinitely.
+  Now:
+  - `runSSH` runs every remote command under a default 120s deadline
+    (`exec.CommandContext`), so it fails-fast instead of hanging.
+  - The Windows **install** step (`provisionConsumer` and `runDoctor`) is bounded
+    by `runRemoteScriptTimeout` and then **verified out-of-band** (`auxly
+    --version` on the box): a lingering-but-successful install resolves to success
+    rather than a hang or false failure.
+
+### Changed
+
+- **Recommended Windows connect path is now the on-box pull** (host publishes its
+  offer + tunnel; the box runs `auxly connect auto` / the `/auxly-remote-connect`
+  skill locally). Documented in the README. The one-shot `host setup --provision`
+  push-over-SSH remains available but can intermittently stall on Windows; it now
+  degrades gracefully (bounded) instead of hanging.
+
 ## [1.0.14] - 2026-06-05
 
 **Windows correctness sweep.** A full audit of the connect/host paths for
