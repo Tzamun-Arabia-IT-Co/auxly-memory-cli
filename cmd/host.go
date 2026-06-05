@@ -652,7 +652,7 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 		// Captured (non-PTY) run from the TUI: a password prompt would hang. If key
 		// auth isn't already set up, stop with a token the TUI keys off to guide a
 		// one-time terminal run, rather than blocking.
-		if _, err := runSSH(relayProfile, "true"); err != nil {
+		if !sshKeyAuthOK(relayProfile) {
 			fmt.Printf("⚠️  Passwordless SSH to the relay %s isn't set up yet.\n", relayTarget)
 			fmt.Println("   Run `auxly host setup` once in a terminal to install the key (it'll ask for the relay password).")
 			fmt.Println("AUXLY_KEY_REQUIRED")
