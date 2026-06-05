@@ -333,55 +333,70 @@ func runDoctor(p remoteProfile) error {
 	}
 	fmt.Println("   ✓ Local SSH client present")
 
-	targetOS := strings.ToLower(strings.TrimSpace(p.OS))
+	fam, detail, derr := detectRemoteOS(p)
+	if derr != nil {
+		printConnectionFailureGuidance(p, derr)
+		return fmt.Errorf("could not reach %s over SSH: %w", p.Host, derr)
+	}
 
-	// Windows host: there is no `uname`, and a `curl | sh` silent install can't
-	// run in the host's cmd.exe/PowerShell shell. So we probe auxly directly and,
-	// if it's not available, guide the user with the PowerShell one-liner.
-	if targetOS == "windows" {
+	switch fam {
+	case osWindows:
+		fmt.Printf("   ✓ Host reachable (Windows: %s)\n", detail)
 		if out, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
 			fmt.Println("   ✓ auxly present on host (Windows)")
 			ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
 			return nil
 		}
-		fmt.Printf("   ⚠ auxly is not reachable on the Windows host %s.\n", p.Host)
-		fmt.Println("     • If SSH itself failed: enable the OpenSSH Server optional feature on the host")
-		fmt.Println("       (Settings → Apps → Optional Features).")
-		fmt.Printf("     • Then install auxly ON THE HOST in PowerShell:  irm %s | iex\n", remoteInstallPS)
-		return fmt.Errorf("auxly not available on Windows host %s; enable sshd if needed, run `irm %s | iex` on the host, then retry", p.Host, remoteInstallPS)
-	}
-
-	// Unix host (linux/darwin — or unspecified, which we treat as unix and confirm
-	// via uname). Probe reachability + arch with uname.
-	uname, unameErr := runSSH(p, "uname", "-sm")
-	if unameErr != nil {
-		printConnectionFailureGuidance(p, unameErr)
-		return fmt.Errorf("could not reach %s over SSH: %w", p.Host, unameErr)
-	}
-	fmt.Printf("   ✓ Host reachable (uname: %s)\n", uname)
-
-	// auxly already present?
-	if out, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
-		fmt.Println("   ✓ auxly present on host")
+		// The Windows box's default ssh shell is cmd.exe, so a unix `curl | sh`
+		// can't run — but runRemoteScript routes through powershell -EncodedCommand,
+		// which CAN install silently.
+		fmt.Println("   ⬇ auxly not found on Windows host — installing via PowerShell...")
+		if _, instErr := runRemoteScript(p, osWindows, "", winInstallCmd(remoteInstallPS)); instErr != nil {
+			fmt.Printf("     • Auto-install failed. On the host, in PowerShell, run:  irm %s | iex\n", remoteInstallPS)
+			return fmt.Errorf("failed to install auxly on Windows host %s: %w", p.Host, instErr)
+		}
+		// Re-probe in a fresh ssh session. A new session re-reads PATH from the
+		// registry; if it's not live yet, fall back to the conventional install path.
+		out, verErr := runSSH(p, "auxly", "--version")
+		if verErr != nil {
+			if out2, e2 := runRemoteScript(p, osWindows, "", `& "$env:LOCALAPPDATA\Programs\auxly\auxly.exe" --version`); e2 == nil {
+				out, verErr = strings.TrimSpace(out2), nil
+			}
+		}
+		if verErr != nil {
+			return fmt.Errorf("auxly still missing on Windows host %s after install (open a new shell to refresh PATH, then retry): %w", p.Host, verErr)
+		}
+		fmt.Println("   ✓ auxly installed on Windows host")
+		recordProvision(p)
 		ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
 		return nil
-	}
 
-	// Silent install on the (confirmed) unix host.
-	fmt.Println("   ⬇ auxly not found on host — installing silently...")
-	if _, instErr := runSSH(p, "sh", "-c", "'curl -fsSL "+remoteInstallURL+" | sh'"); instErr != nil {
-		return fmt.Errorf("failed to install auxly on host %s: %w", p.Host, instErr)
+	case osUnix:
+		fmt.Printf("   ✓ Host reachable (uname: %s)\n", detail)
+		if out, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
+			fmt.Println("   ✓ auxly present on host")
+			ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
+			return nil
+		}
+		fmt.Println("   ⬇ auxly not found on host — installing silently...")
+		if _, instErr := runRemoteScript(p, osUnix, "curl -fsSL "+remoteInstallURL+" | sh", ""); instErr != nil {
+			return fmt.Errorf("failed to install auxly on host %s: %w", p.Host, instErr)
+		}
+		out, verErr := runSSH(p, "auxly", "--version")
+		if verErr != nil {
+			return fmt.Errorf("auxly still missing on host %s after install attempt: %w", p.Host, verErr)
+		}
+		fmt.Println("   ✓ auxly installed on host")
+		recordProvision(p)
+		// A fresh silent install already lands the latest binary, so the version check
+		// is a no-op here — but still wire the remote statusline when opted in.
+		ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
+		return nil
+
+	default: // osUnknown — detectRemoteOS sets derr in this case, so this is a safety net
+		printConnectionFailureGuidance(p, fmt.Errorf("unrecognized remote OS"))
+		return fmt.Errorf("could not determine OS of host %s over SSH", p.Host)
 	}
-	out, verErr := runSSH(p, "auxly", "--version")
-	if verErr != nil {
-		return fmt.Errorf("auxly still missing on host %s after install attempt: %w", p.Host, verErr)
-	}
-	fmt.Println("   ✓ auxly installed on host")
-	recordProvision(p)
-	// A fresh silent install already lands the latest binary, so the version check
-	// is a no-op here — but still wire the remote statusline when opted in.
-	ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
-	return nil
 }
 
 // checkTwoWay verifies the HOST can reach THIS machine back over SSH. When this
@@ -434,10 +449,14 @@ func localCandidateAddrs() []string {
 // hostCanReachBack probes, FROM the host, whether it can open a TCP connection to
 // any of our candidate addresses on port 22. Returns the first reachable one.
 func hostCanReachBack(p remoteProfile, addrs []string) (string, bool) {
+	fam, _, err := detectRemoteOS(p)
+	if err != nil {
+		fam = osUnix // best-effort: assume unix if detection is inconclusive
+	}
 	for _, a := range addrs {
-		// Prefer nc; fall back to bash's /dev/tcp. addrs are our own numeric IPs.
-		script := fmt.Sprintf("nc -z -w3 %s 22 >/dev/null 2>&1 || timeout 3 bash -c 'echo > /dev/tcp/%s/22' >/dev/null 2>&1", a, a)
-		if _, err := runSSH(p, "sh", "-c", "'"+script+"'"); err == nil {
+		posix := fmt.Sprintf("nc -z -w3 %s 22 >/dev/null 2>&1 || timeout 3 bash -c 'echo > /dev/tcp/%s/22' >/dev/null 2>&1", a, a)
+		powershell := fmt.Sprintf("if((Test-NetConnection -ComputerName %s -Port 22 -WarningAction SilentlyContinue).TcpTestSucceeded){exit 0}else{exit 1}", a)
+		if _, err := runRemoteScript(p, fam, posix, powershell); err == nil {
 			return a, true
 		}
 	}
@@ -1731,9 +1750,34 @@ func installPubKey(p remoteProfile, pubPath string) error {
 		return fmt.Errorf("failed to read public key %s: %w", pubPath, err)
 	}
 	fmt.Println("   📤 Installing public key over SSH (you may be prompted for a password)...")
-	remoteScript := "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo " +
-		shellQuote(strings.TrimSpace(string(pub))) +
-		" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+	pubKey := strings.TrimSpace(string(pub))
+	fam := classifyOS(p.OS)
+	if fam == osUnknown && strings.TrimSpace(p.OS) == "" {
+		fmt.Println("   ⚠ Host OS not specified in the profile — assuming a POSIX host for key install. If this is Windows, re-run the wizard and select Windows.")
+	}
+
+	// remoteArgs is the per-OS remote command appended after "-- target".
+	var remoteArgs []string
+	if fam == osWindows {
+		// On Windows the authorized_keys location differs for admins. Detect admin
+		// at runtime and write to the correct file with the correct ACL.
+		ps := `$ErrorActionPreference='Stop'; ` +
+			`$key=` + psQuote(pubKey) + `; ` +
+			`$admin=([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); ` +
+			`if($admin){ $f="$env:ProgramData\ssh\administrators_authorized_keys"; ` +
+			`New-Item -ItemType File -Force -Path $f | Out-Null; ` +
+			`Add-Content -Path $f -Value $key; ` +
+			`takeown /F $f /A | Out-Null; ` +
+			`icacls $f /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null } ` +
+			`else { $d="$env:USERPROFILE\.ssh"; New-Item -ItemType Directory -Force -Path $d | Out-Null; ` +
+			`Add-Content -Path "$d\authorized_keys" -Value $key }`
+		remoteArgs = []string{"powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncode(ps)}
+	} else {
+		remoteScript := "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo " +
+			shellQuote(pubKey) +
+			" >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+		remoteArgs = []string{"sh", "-c", shellQuote(remoteScript)}
+	}
 
 	args := []string{"-o", "StrictHostKeyChecking=accept-new"}
 	if p.Jump != "" {
@@ -1744,7 +1788,8 @@ func installPubKey(p remoteProfile, pubPath string) error {
 	}
 	// "--" terminates ssh option processing before the target. ssh-copy-id (the
 	// preferred path above) has no "--" support, so it relies on validateForExec.
-	args = append(args, "--", target, "sh", "-c", shellQuote(remoteScript))
+	args = append(args, "--", target)
+	args = append(args, remoteArgs...)
 	pkCmd := exec.Command("ssh", args...)
 	pkCmd.Stdin = os.Stdin
 	pkCmd.Stdout = os.Stdout

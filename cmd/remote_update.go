@@ -49,7 +49,13 @@ func remoteUpdateOptIn() bool {
 // "not live". The result is the live-box guard — we never replace a binary out
 // from under an active session.
 func remoteHasLiveSession(p remoteProfile) bool {
-	out, err := runSSH(p, "sh", "-c", "'pgrep -f \"auxly mcp-server\" >/dev/null 2>&1 && echo LIVE || true'")
+	fam, _, err := detectRemoteOS(p)
+	if err != nil {
+		return false
+	}
+	posix := `pgrep -f "auxly mcp-server" >/dev/null 2>&1 && echo LIVE || true`
+	powershell := `if(Get-CimInstance Win32_Process -Filter "name='auxly.exe'" | Where-Object {$_.CommandLine -like '*mcp-server*'}){'LIVE'}`
+	out, err := runRemoteScript(p, fam, posix, powershell)
 	if err != nil {
 		return false
 	}
@@ -59,7 +65,13 @@ func remoteHasLiveSession(p remoteProfile) bool {
 // updateRemoteAuxly bumps auxly on the remote in place via the public installer,
 // over the same SSH transport the doctor already uses.
 func updateRemoteAuxly(p remoteProfile) error {
-	_, err := runSSH(p, "sh", "-c", "'curl -fsSL "+remoteInstallURL+" | sh'")
+	fam, _, err := detectRemoteOS(p)
+	if err != nil {
+		return err
+	}
+	posix := "curl -fsSL " + remoteInstallURL + " | sh"
+	powershell := winInstallCmd(remoteInstallPS)
+	_, err = runRemoteScript(p, fam, posix, powershell)
 	return err
 }
 
