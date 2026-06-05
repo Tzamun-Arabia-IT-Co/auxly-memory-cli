@@ -119,6 +119,7 @@ type organizeModel struct {
 	estTokens        int // approx tokens the vault will send (shown pre-run)
 	estFiles         int // organizable files that will be sent
 	spin             int
+	runProgress      int                // creeping % for the loading bar on the running screen
 	runProvider      string             // provider label shown on the running screen
 	runModel         string             // model label shown on the running screen
 	runCancel        context.CancelFunc // cancels the in-flight agent/API run (esc on the running screen)
@@ -492,6 +493,9 @@ func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
 	case orgSpinTickMsg:
 		if m.mode == orgRunning {
 			m.spin++
+			// Same creeping loading bar as the Remote tab: the agent run is a black box,
+			// so the bar advances toward the ceiling (then crawls) to show motion.
+			m.runProgress = creepProgress(m.runProgress, m.spin)
 			return m, orgSpinTick()
 		}
 		return m, nil
@@ -844,6 +848,9 @@ func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 func (m organizeModel) startRun() (organizeModel, tea.Cmd) {
 	m.mode = orgRunning
 	m.spin = 0
+	// Gathering files + launching the provider complete synchronously at the start of
+	// the run, so seed the bar partway in; it then creeps during the opaque model wait.
+	m.runProgress = 20
 	m.status = ""
 	m.errMsg = ""
 	m.runProvider = m.currentProvider().label
@@ -1286,6 +1293,11 @@ func (m organizeModel) runningView() string {
 	var b strings.Builder
 	b.WriteString(StyleTitle.Render("Memory Organization — Organizing"))
 	b.WriteString("\n\n")
+	// Shared loading bar (same ▰/▱ creeping meter as the Remote tab) with a moving glint,
+	// so even while the fill holds near the ceiling during the long model wait it keeps
+	// showing live activity.
+	b.WriteString("  " + renderLoadingBar(m.runProgress, 30, m.spin, ColorPrimary) +
+		orgDimStyle.Render(fmt.Sprintf("  %3d%%", m.runProgress)) + "\n\n")
 	for _, s := range steps {
 		switch s.state {
 		case 0:

@@ -928,7 +928,10 @@ func (m wizardModel) View() string {
 			bold.Render("Creating unified memory..."),
 		))
 
-		pBar := RenderProgressBar(len(m.migrationLog), 15, 40, ColorSuccess)
+		// Migration is a single atomic command (the log lands all at once on
+		// completion, which immediately advances the step), so there is no sub-progress
+		// to measure — an indeterminate marquee shows activity instead of a frozen 0%.
+		pBar := RenderIndeterminateBar(m.spinFrame, 40, ColorSuccess)
 		b.WriteString("  " + pBar + "\n\n")
 
 		for _, name := range m.migrationLog {
@@ -980,7 +983,16 @@ func (m wizardModel) View() string {
 		descText := "Running '/auxly-init' on installed CLI agents to synchronize memory vault..."
 		b.WriteString("  " + dim.Render(descText) + "\n\n")
 
-		pBar := RenderProgressBar(m.spinFrame%20, 20, 40, ColorPrimary)
+		// Real onboarding progress: each agent starts "pending" and resolves to
+		// success/auth_needed/manual. Fill the bar by how many have resolved, so it
+		// reflects actual completion instead of an endlessly looping animation.
+		onboardDone := 0
+		for _, s := range m.onboardStatuses {
+			if s.status != "pending" {
+				onboardDone++
+			}
+		}
+		pBar := RenderProgressBar(onboardDone, len(m.onboardStatuses), 40, ColorPrimary)
 		b.WriteString("  " + pBar + "\n\n")
 
 		if len(m.onboardStatuses) > 0 {

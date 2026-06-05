@@ -7,6 +7,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.11] - 2026-06-05
+
+Polish release: a vault **export** to ~/Downloads, a dashboard **force-update** for
+busy boxes, a tool-wide pass on **progress bars** — one shared `▰/▱` style, honest
+motion, and live activity during long opaque waits — and a richer **statusline** that
+now carries git working-tree state.
+
+### Added
+
+- **The statusline shows Auxly's own version and an update hint.** Line 3 now leads with
+  `💾 Auxly v1.0.11`, and when a newer release is available it appends an amber `⬆ <version>`
+  (e.g. `💾 Auxly v1.0.11 ⬆ 1.0.12`). The check is **network-free** — it reads only the cached
+  update result the CLI/TUI already refresh (`~/.auxly/.update-check.json`) via the new
+  `update.Cached()` accessor, never fetching at render time — and the brand+version segment
+  is pinned so it survives even on a narrow terminal. (Note: line 1's `🔖 v…` is the *agent's*
+  version, e.g. Claude Code's; this is Auxly's own.)
+- **The statusline is now responsive — it fits the terminal width instead of wrapping.**
+  Each of the four lines is built from prioritized segments; when the terminal is too narrow
+  for a line, its lowest-priority segments are dropped (then a clean ellipsis truncation as a
+  last resort) so every line stays on a single row. Line 1 sheds `🪙 tokens` / `🔖 version`
+  before `📊 context` / `🤖 model` (folder is pinned); line 4 drops the freshness stamp and
+  trailing usage windows before the `🔋` brand and the session window. Width comes from
+  `$COLUMNS` then a non-blocking `/dev/tty` ioctl; when it can't be determined, lines render
+  unconstrained exactly as before. Width is measured ANSI- and emoji-aware (go-runewidth),
+  so colour codes and wide glyphs are counted correctly.
+- **The statusline now has dedicated lines per concern.** Line 1 = agent + context (folder ·
+  model · effort · thinking · `🪙` tokens/window `out:N` · `📊` context bar · version);
+  line 2 = git only (branch · ahead/behind · changed `+`/`-` · commit · age); line 3 = Auxly
+  memory; line 4 = plan usage. Git context moved off line 1 onto its own line, and the
+  session/context details merged up onto line 1. (`out:N` is the assistant's **output**
+  tokens, shown only when the agent reports them.)
+- **The git line shows rich working-tree state.** Next to the branch it surfaces:
+  **ahead/behind** vs upstream (`↑2 ↓1` unpushed/unpulled, shown only when nonzero), the
+  count of **changed files** (`📝 N`), the **`+added` / `-removed`** line totals of
+  uncommitted work (green / red), and the short **HEAD hash with its relative age**
+  (`⌥ bc5b1ae · 5h`) — e.g. `🌿 dev ↑2 📝 26 +1289 -55  ⌥ bc5b1ae · 5h`.
+  The line totals include **untracked new files** (every line of a brand-new file is an
+  addition), so the numbers match what your shell/Warp git segment reports rather than
+  under-counting tracked-only changes. Everything degrades independently and all git reads
+  share one hard 500 ms deadline — untracked scanning is bounded (file count + per-file
+  bytes, binaries skipped) — so a slow/stuck or huge repo can never freeze the terminal.
+
+### Fixed
+
+- **The banner's “Auxly-Memory CLI” and “Tzamun Arabia IT Co” are clickable links again.**
+  Each name carries its OSC-8 terminal hyperlink and clicks through to its site. Two bugs
+  had to be fixed: (1) wrapping the string in OSC-8 *first* and then styling it shreds the
+  escape (leaks the raw URL as text) — so the plain label is styled first and the OSC-8
+  wraps it from the **outside**; (2) more subtly, `lipgloss.Underline` renders the text
+  **character by character** with a `\x1b[0m` reset between every letter, and those interior
+  resets fragment the OSC-8 hyperlink span — so terminals (Warp especially) showed the
+  underline but dropped the click. The link cue is now **bold + accent colour**, which keeps
+  the name one contiguous styled span inside a single clean hyperlink region.
+- **The box-update progress bar no longer sits at 0% the whole time.** The Remote-tab
+  progress bar advances by recognising milestone markers in the streamed output, but it
+  only knew the *connect/doctor* flow's markers — so a `host update` (or reconnect /
+  forget) run, whose lines are `Updating X (a → b)…` → `X updated to …` → `statusline
+  applied`, mapped to 0% until the final jump to 100%. Those host-action markers now
+  advance the bar (≈55% → 90% → 95% → done).
+- **The progress bar no longer freezes at one number then jumps to done.** Short SSH
+  actions like **reconnect** run their heavy phase (`connect auto`) entirely server-side
+  with output captured, not streamed — so the TUI is blind to it and the bar sat at 35%
+  until completion. The bar now **creeps forward continuously** between observed
+  milestones (decelerating toward 90%, only the done event reaches 100%), so it always
+  shows motion; the reconnect's completion line is also a recognised milestone now.
+
+### Changed
+
+- **Unified loading indicators across the tool.** Every in-flight operation now shows the
+  same `▰/▱` motion: **Memory Org's "Organizing" screen** gained the identical creeping
+  bar as the Remote tab; the dashboard's **self-update** and **update-all-boxes** banners
+  gained a sweeping marquee instead of a bare `⏳ …` line. Together with the earlier glyph
+  unification, every bar in the tool now shares one look and one motion model.
+- **Loading bars stay visibly alive during long opaque waits.** A creeping bar used to
+  rush to its ceiling and then sit frozen (e.g. the Memory Org model run holding at 90%
+  for a minute). Now (a) a moving **glint** sweeps the filled portion so the bar keeps
+  animating even while the fill holds, and (b) the creep is two-phase — a brisk ramp to
+  ~80% then a slow frame-throttled crawl toward 97% — so the number itself keeps inching
+  instead of slamming to the top.
+- **Onboarding wizard progress bars now reflect real state** (full audit of every bar in
+  the TUI). The first-run **migration** bar used a hard-coded denominator and the step
+  advanced the instant the (atomic) migration finished, so it was *always* drawn at 0% —
+  it's now an **animated marquee** that shows activity. The **onboarding** bar was a
+  meaningless looping animation (`spinFrame % 20`); it now fills by how many agents have
+  actually resolved (pending → success/auth/manual). All other bars (usage meters,
+  analytics charts, memory-composition, statusline threshold) were verified correct.
+- **Every bar in the TUI now shares one look** — the `▰`/`▱` half-block meter. The
+  connect/update progress bar and the "Memory by category" composition histogram used
+  solid `█`/`░` blocks; the analytics charts used bare `█` with no track. They all now
+  route through a single `renderMeter` primitive (filled `▰` in a semantic colour, the
+  remainder dimmed `▱`), matching the usage meters and the statusline threshold bar.
+  Change the glyphs in one place and every bar follows.
+
+### Added
+
+- **Export your whole memory vault to ~/Downloads.** New `auxly export [--dest <dir>]`
+  command and a **`[e]` action on the Files tab** copy every memory `.md` into a fresh
+  **timestamped folder** (`auxly-memory-export-<when>/`). Each file is **tagged with its
+  name and the export time** three ways — the folder name, the file name
+  (`projects__2026-06-05_021718.md`), and a header comment inside the file — and a
+  `MANIFEST.txt` records the set. Unreadable files are skipped rather than aborting the
+  export.
+- **Dashboard `[f]` force-update for all boxes.** The connected-box update prompt now
+  offers `[B]` (update idle boxes) and `[f]` (force all, including live ones — ends
+  their session). Previously the dashboard only had `[B]`, which silently skips live
+  boxes, so a fleet whose outdated boxes were all serving sessions could never be
+  updated from the dashboard. `auxly host update --all --force` now honors `--force`
+  for the whole sweep (it was ignored before — only the single-box path used it).
+
 ## [1.0.10] - 2026-06-04
 
 Fleet-management release: manage, update, and wire your remote boxes from the host;

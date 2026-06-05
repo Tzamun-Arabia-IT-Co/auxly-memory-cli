@@ -53,11 +53,17 @@ type boxesUpdatedMsg struct {
 }
 
 // updateAllBoxesCmd runs `auxly host update --all` off the UI thread: it bumps
-// every connected box that is outdated and idle, skipping live ones. Returns the
-// command's final summary line for a compact dashboard notice.
-func updateAllBoxesCmd() tea.Cmd {
+// every connected box that is outdated and idle, skipping live ones. When force is
+// set it adds --force, which also updates live boxes (ending their session) — the
+// dashboard's [f] when every outdated box is busy and [B] would otherwise skip them
+// all. Returns the command's final summary line for a compact dashboard notice.
+func updateAllBoxesCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
-		out, err := exec.Command(exePath(), "host", "update", "--all").CombinedOutput()
+		args := []string{"host", "update", "--all"}
+		if force {
+			args = append(args, "--force")
+		}
+		out, err := exec.Command(exePath(), args...).CombinedOutput()
 		return boxesUpdatedMsg{summary: lastNonEmptyLine(string(out)), err: err}
 	}
 }
