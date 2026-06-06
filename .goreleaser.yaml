@@ -58,7 +58,24 @@ archives:
     name_template: "auxly-{{ .Os }}-{{ .Arch }}"
 
 checksum:
-  name_template: "checksums.txt"
+  # Versioned so a verifying client fetches the manifest for the EXACT release it
+  # is downloading, and older releases keep their own manifest (H2/H3, see
+  # internal/update/verify.go).
+  name_template: "auxly-{{ .Version }}-checksums.txt"
+
+# H2/H3: sign the checksum manifest with minisign. The pinned public key lives in
+# internal/update/verify.go; the private key + passphrase are CI secrets
+# (MINISIGN_KEY → $MINISIGN_KEY_FILE, MINISIGN_PASSWORD). The .minisig is uploaded
+# next to the manifest and verified by the self-updater and installers before any
+# downloaded binary is trusted. minisign reads the passphrase from stdin in CI.
+signs:
+  - id: minisign
+    artifacts: checksum
+    signature: "${artifact}.minisig"
+    cmd: sh
+    args:
+      - "-c"
+      - 'printf "%s\n" "$MINISIGN_PASSWORD" | minisign -S -s "$MINISIGN_KEY_FILE" -m "${artifact}" -x "${signature}" -t "auxly {{ .Version }} (signed by Auxly release CI)"'
 
 # Homebrew cask — auto-pushed to the tap repo on every release. Users then run
 # `brew install Tzamun-Arabia-IT-Co/homebrew-tap/auxly`. (GoReleaser v2 deprecated

@@ -251,12 +251,23 @@ func SelfUpdate() (string, error) {
 		return "", fmt.Errorf("download failed: HTTP %d for %s", resp.StatusCode, url)
 	}
 
+	binBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read update: %w", err)
+	}
+
+	// H2/H3: verify the download against a minisign-signed checksum manifest before
+	// it ever touches disk as the live binary. Staged — see verifyDownloadedBinary.
+	if err := verifyDownloadedBinary(binBytes); err != nil {
+		return "", fmt.Errorf("update verification failed (refusing to install): %w", err)
+	}
+
 	tmp, err := os.CreateTemp(filepath.Dir(exe), ".auxly-update-*")
 	if err != nil {
 		return "", fmt.Errorf("could not create temp file next to %s (permissions?): %w", exe, err)
 	}
 	tmpPath := tmp.Name()
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	if _, err := tmp.Write(binBytes); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
 		return "", fmt.Errorf("failed to write update: %w", err)
