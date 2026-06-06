@@ -343,7 +343,7 @@ Pending writes show up as reviewable diffs in the dashboard's **Approvals** tab 
 | `/auxly-learn` `[folder] [topic]` | Reads the memory vault — optionally a single folder, optionally focused on a topic — and grounds the agent in it for the session. No args = learn everything. |
 | `/auxly-max` | Exhaustive self-harvest — scans the whole session and writes every fact up into the vault, one category at a time (private facts go to `personal.md`). Push-only. |
 | `/auxly-forget` `[query]` | Searches memory and cleanly prunes obsolete or outdated lines. |
-| `/auxly-pending` `[list\|approve\|reject]` | Manages the approval queue from inside the chat panel. |
+| `/auxly-pending` `[list]` | Lists the approval queue. Approving/rejecting is **human-only** — use the dashboard's **Approvals** tab or run `auxly approve <id>` / `auxly reject <id>` in your terminal (an agent can't approve its own writes). |
 | `/auxly-status` | Shows whether the agent is connected and the MCP link is live, plus diagnostics. |
 | `/auxly-bootstrap` | Generates a copyable onboarding block to paste into a tool that doesn't have Auxly installed (e.g. ChatGPT). |
 | `/auxly-remote-connect` | Detects and connects this machine to a remote Auxly memory host (or reports the active link). |

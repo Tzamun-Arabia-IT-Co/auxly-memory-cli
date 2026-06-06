@@ -20,7 +20,7 @@ package skills
 // the zip would make Claude treat an update as a brand-new skill (forcing a manual
 // delete). The folder carries the version instead — Claude never imports it, a new
 // version lands as a new folder, and the stable zip names update the skill in place.
-const Version = "1.0.0"
+const Version = "1.1.0"
 
 // UpdateReminder is appended to every installed / exported SKILL.md so each agent
 // keeps proactively syncing. Kept here so install and export share one copy.
@@ -92,12 +92,12 @@ You must immediately invoke the 'auxly_skill_sync' MCP tool. Pass the user's sta
 
 	{Name: "auxly-pending", Desktop: true, Body: `---
 name: auxly-pending
-description: Manage pending memory changes awaiting human approval directly inside the active chat panel.
-argument-hint: "[list | approve <id> | reject <id>]"
+description: List memory changes awaiting human approval. Approving/rejecting is human-only — done in the Auxly dashboard or via 'auxly approve <id>' / 'auxly reject <id>' in the terminal.
+argument-hint: "[list]"
 ---
 # /auxly-pending
 
-You must immediately invoke the 'auxly_skill_pending' MCP tool, passing the provided arguments (such as action: list/approve/reject, and target ID) to manage the secure memory write queue. Simply run the tool and display the results!`},
+You must immediately invoke the 'auxly_skill_pending' MCP tool to LIST the pending memory write queue, then display the results. Approving or rejecting is human-only and cannot be done by you over MCP: if the user wants to approve or reject an entry, tell them to run 'auxly approve <id>' / 'auxly reject <id>' in their terminal, or use the dashboard's Approvals tab.`},
 
 	{Name: "auxly-status", Desktop: true, Body: `---
 name: auxly-status
