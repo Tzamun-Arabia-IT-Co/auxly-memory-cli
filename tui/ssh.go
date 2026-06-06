@@ -1266,7 +1266,7 @@ func renameClient(old, newName string) {
 		}
 	}
 	if out, merr := yaml.Marshal(f); merr == nil {
-		_ = os.WriteFile(path, out, 0644)
+		_ = os.WriteFile(path, out, 0600)
 	}
 }
 
@@ -1576,7 +1576,7 @@ func saveClientSharing(c clientRow, shared, writes []string) {
 	if merr != nil {
 		return
 	}
-	_ = os.WriteFile(path, out, 0644)
+	_ = os.WriteFile(path, out, 0600)
 }
 
 // mappingValue returns the value node for key within a mapping node, or nil.

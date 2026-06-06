@@ -134,6 +134,9 @@ func (l *Logger) LogWithSource(agentID, provider, action, file, diff, reason, tr
 		return nil, fmt.Errorf("failed to open .audit.log: %w", err)
 	}
 	defer f.Close()
+	// Enforce 0600 even if the log was previously created world-readable (O_CREATE
+	// does not tighten an existing file's mode). The audit log holds full diffs.
+	_ = f.Chmod(0o600)
 
 	if _, err := f.Write(append(jsonLine, '\n')); err != nil {
 		return nil, fmt.Errorf("failed to write to .audit.log: %w", err)

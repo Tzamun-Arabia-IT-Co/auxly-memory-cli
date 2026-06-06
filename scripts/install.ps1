@@ -9,8 +9,20 @@ $ErrorActionPreference = 'Stop'
 
 $BaseUrl = if ($env:AUXLY_INSTALL_BASE) { $env:AUXLY_INSTALL_BASE } else { 'https://auxly.io' }
 # M4: never let an inherited/poisoned AUXLY_INSTALL_BASE downgrade the download to
-# http. Accept https, or http on localhost (dev), or an explicit insecure opt-in.
-if ($BaseUrl -notmatch '^(https://|http://localhost|http://127\.0\.0\.1)' -and $env:AUXLY_INSECURE_INSTALL -ne '1') {
+# http. Accept https, or http on an EXACT loopback host (dev), or explicit opt-in.
+# The hostname is parsed (not prefix-matched) so http://localhost.evil.example is
+# rejected.
+$secureBase = $false
+if ($env:AUXLY_INSECURE_INSTALL -eq '1') {
+    $secureBase = $true
+} else {
+    try {
+        $u = [Uri]$BaseUrl
+        if ($u.Scheme -eq 'https') { $secureBase = $true }
+        elseif ($u.Scheme -eq 'http' -and @('localhost','127.0.0.1','::1') -contains $u.Host) { $secureBase = $true }
+    } catch { $secureBase = $false }
+}
+if (-not $secureBase) {
     Write-Warning "Refusing insecure AUXLY_INSTALL_BASE ($BaseUrl); using https://auxly.io"
     $BaseUrl = 'https://auxly.io'
 }

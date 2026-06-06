@@ -16,7 +16,7 @@ func SeedDefaultFiles(root string) ([]string, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
-	_ = os.MkdirAll(filepath.Join(root, ".pending"), 0o755)
+	_ = os.MkdirAll(filepath.Join(root, ".pending"), 0o700)
 
 	entries, err := templates.FS.ReadDir(".")
 	if err != nil {

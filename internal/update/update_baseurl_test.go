@@ -23,6 +23,16 @@ func TestBaseURL_AllowsLocalhostHTTPForDev(t *testing.T) {
 	}
 }
 
+func TestBaseURL_RejectsLocalhostLookalikeHost(t *testing.T) {
+	// http://localhost.evil.example must NOT pass as "localhost" (prefix bypass).
+	for _, evil := range []string{"http://localhost.evil.example", "http://127.0.0.1.evil.example/dl"} {
+		t.Setenv("AUXLY_INSTALL_BASE", evil)
+		if got := BaseURL(); got != "https://auxly.io" {
+			t.Fatalf("lookalike host %q must be rejected, got %q", evil, got)
+		}
+	}
+}
+
 func TestBaseURL_InsecureOptInAllowsHTTP(t *testing.T) {
 	t.Setenv("AUXLY_INSTALL_BASE", "http://192.168.1.50:9000")
 	t.Setenv("AUXLY_INSECURE_INSTALL", "1")

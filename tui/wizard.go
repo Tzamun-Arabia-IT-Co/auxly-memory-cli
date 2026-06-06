@@ -722,7 +722,7 @@ func (m wizardModel) runMigration() tea.Cmd {
 		if err := os.MkdirAll(memPath, 0755); err != nil {
 			return migrationDoneMsg{count: 0, log: []string{"✗ " + err.Error()}}
 		}
-		os.MkdirAll(filepath.Join(memPath, ".pending"), 0755)
+		os.MkdirAll(filepath.Join(memPath, ".pending"), 0700)
 
 		entries, err := templates.FS.ReadDir(".")
 		if err != nil {
@@ -751,7 +751,7 @@ func (m wizardModel) runMigration() tea.Cmd {
 
 		auditPath := filepath.Join(memPath, ".audit.log")
 		if _, err := os.Stat(auditPath); os.IsNotExist(err) {
-			os.WriteFile(auditPath, []byte{}, 0644)
+			os.WriteFile(auditPath, []byte{}, 0600)
 			count++
 			log = append(log, ".audit.log")
 		}

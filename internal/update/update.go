@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,17 +52,21 @@ func BaseURL() string {
 }
 
 func isSecureInstallBase(v string) bool {
-	low := strings.ToLower(v)
-	switch {
-	case strings.HasPrefix(low, "https://"):
+	if os.Getenv("AUXLY_INSECURE_INSTALL") == "1" {
 		return true
-	case os.Getenv("AUXLY_INSECURE_INSTALL") == "1":
-		return true
-	case strings.HasPrefix(low, "http://localhost"), strings.HasPrefix(low, "http://127.0.0.1"):
-		return true
-	default:
+	}
+	u, err := url.Parse(v)
+	if err != nil {
 		return false
 	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return true
+	}
+	// Plain http is allowed ONLY for an exact loopback host (local dev). Compare the
+	// parsed hostname exactly — a prefix check would let http://localhost.evil.tld
+	// through.
+	host := strings.ToLower(u.Hostname())
+	return strings.EqualFold(u.Scheme, "http") && (host == "localhost" || host == "127.0.0.1" || host == "::1")
 }
 
 // Latest fetches the newest published version string from {base}/version.

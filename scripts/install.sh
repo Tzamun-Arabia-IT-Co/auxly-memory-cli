@@ -10,8 +10,12 @@ set -eu
 BASE_URL="${AUXLY_INSTALL_BASE:-https://auxly.io}"
 # M4: never let an inherited/poisoned AUXLY_INSTALL_BASE downgrade the download to
 # http. Accept https, or http on localhost (dev), or an explicit insecure opt-in.
+# Patterns are delimiter-anchored so http://localhost.evil.example does NOT match
+# (only exact loopback host, optionally with :port or /path).
 case "$BASE_URL" in
-  https://*|http://localhost*|http://127.0.0.1*) : ;;
+  https://*) : ;;
+  http://localhost|http://localhost:*|http://localhost/*) : ;;
+  http://127.0.0.1|http://127.0.0.1:*|http://127.0.0.1/*) : ;;
   *)
     if [ "${AUXLY_INSECURE_INSTALL:-}" != "1" ]; then
       echo "Refusing insecure AUXLY_INSTALL_BASE ($BASE_URL); using https://auxly.io" >&2
