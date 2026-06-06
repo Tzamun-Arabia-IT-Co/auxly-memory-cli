@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
@@ -463,7 +464,15 @@ func validateForExec(p remoteProfile) error {
 		// ControlMaster/ControlPath/ControlPersist and ProxyJump are generated in
 		// sshConnArgs and never routed through here, so blocking them in user args
 		// is regression-safe (M3).
-		low := strings.ToLower(strings.ReplaceAll(a, " ", ""))
+		// Strip ALL whitespace (not just ASCII space) before matching: ssh accepts
+		// a tab/space between `-o` and its keyword (`-o\tInclude=…`), so a space-only
+		// strip would let `-o<TAB>Include` slip past the adjacency checks below.
+		low := strings.ToLower(strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
+				return -1
+			}
+			return r
+		}, a))
 		// Command-executing options, or options that hijack the multiplex control
 		// socket (Control*). These have no legitimate path-component use, so a plain
 		// substring match is safe.
