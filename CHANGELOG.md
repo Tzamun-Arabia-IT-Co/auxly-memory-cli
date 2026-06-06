@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.17] - 2026-06-06
+
+**Reliable remote provisioning — no more `MaxStartups` floods.** Connecting/provisioning a
+box opened ~10 separate SSH connections in a rapid burst (OS probe ×4, key check, install,
+verify, hostname, wire). On a box with a low sshd `MaxStartups` cap (Windows default `10`)
+that burst was throttled and reset mid-handshake (`kex_exchange_identification: Connection
+reset by peer`), leaving the connect half-saved and auxly not installed. Now those commands
+**reuse a single SSH connection**.
+
+### Fixed
+
+- **`sshConnArgs` enables SSH `ControlMaster` + `ControlPersist` multiplexing** (off-Windows
+  clients) so every short remote command during a connect/provision shares one underlying
+  connection — collapsing the pre-auth handshake burst that tripped `MaxStartups`. The control
+  socket lives at `~/.ssh/auxly-cm/%C` (per-target, auto-expiring after 30s idle).
+  `ControlMaster` is unsupported on a Windows *client*, so it's skipped there — and the only
+  Windows-as-client case (a box dialing its host) makes a single connection anyway, so it
+  loses nothing. Tests: `TestSSHConnArgsMultiplexing`, `TestSSHControlPathStable`.
+
 ## [1.0.16] - 2026-06-06
 
 **Deterministic remote auto-wiring + Remote-tab management hardening.** Adding a box
