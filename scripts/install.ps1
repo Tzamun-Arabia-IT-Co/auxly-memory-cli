@@ -57,9 +57,17 @@ Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
 
 # --- Verify against the signed checksum manifest (H3, staged) ------------------
 # Pinned minisign public key (matches internal/update/verify.go). Not a secret.
-# STAGED: a release with no published manifest installs unverified (keeps the
-# existing distribution working); once present, a checksum mismatch — or a failed
-# signature when minisign is installed — aborts the install.
+# STAGED ROLLOUT: a release published before signing existed has NO manifest — the
+# manifest fetch fails, verification is skipped, and the binary installs unverified
+# so the existing distribution keeps working. Once a manifest IS present (signing is
+# live), verification is MANDATORY and fails CLOSED.
+#
+# IMPORTANT: only the *manifest fetch* is wrapped in a try/catch (that's the legit
+# "no manifest yet" staged case). Every in-manifest failure — checksum mismatch,
+# missing .minisig while minisign is installed, bad signature — runs OUTSIDE that
+# catch and aborts hard. (A previous version put these inside the catch; under
+# $ErrorActionPreference='Stop', Write-Error threw before `exit 1` and the catch
+# silently swallowed the abort, letting a tampered binary install.)
 $MinisignPubKey = 'RWQfIGHWpXR4MtPvcbWwN1J7mx9FGsCaHMmdIpGMZAKDvmILC2Of5Q/K'
 try {
     $verRaw  = (Invoke-WebRequest -Uri "$BaseUrl/version" -UseBasicParsing -ErrorAction Stop).Content
@@ -68,17 +76,40 @@ try {
 if ($version) {
     $manifestUrl = "$BaseUrl/dl/auxly-$version-checksums.txt"
     $sumsPath = "$tmp.sums"
+    $haveManifest = $false
     try {
         Invoke-WebRequest -Uri $manifestUrl -OutFile $sumsPath -UseBasicParsing -ErrorAction Stop
+        $haveManifest = $true
+    } catch {
+        # Manifest absent (pre-signing release) — staged: install unverified.
+    }
+    if ($haveManifest) {
+        # Full first-field match (mirrors manifestHasHash in verify.go); a substring
+        # regex would pass a manifest that merely CONTAINS the hash anywhere on a line.
         $hash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLower()
-        $manifest = (Get-Content -LiteralPath $sumsPath -Raw).ToLower()
-        if ($manifest -notmatch [Regex]::Escape($hash)) {
+        $match = $false
+        foreach ($line in (Get-Content -LiteralPath $sumsPath)) {
+            $field = (($line -split '\s+') | Where-Object { $_ -ne '' } | Select-Object -First 1)
+            if ($field -and $field.ToLower() -eq $hash) { $match = $true; break }
+        }
+        if (-not $match) {
             Remove-Item -LiteralPath $tmp, $sumsPath -Force -ErrorAction SilentlyContinue
             Write-Error "Checksum mismatch - refusing to install."; exit 1
         }
         if (Get-Command minisign -ErrorAction SilentlyContinue) {
             $sigPath = "$tmp.sig"
-            Invoke-WebRequest -Uri "$manifestUrl.minisig" -OutFile $sigPath -UseBasicParsing -ErrorAction Stop
+            $haveSig = $false
+            try {
+                Invoke-WebRequest -Uri "$manifestUrl.minisig" -OutFile $sigPath -UseBasicParsing -ErrorAction Stop
+                $haveSig = $true
+            } catch {
+                # A dropped .minisig must NOT downgrade a host that can verify to
+                # checksum-only — fail closed.
+            }
+            if (-not $haveSig) {
+                Remove-Item -LiteralPath $tmp, $sumsPath -Force -ErrorAction SilentlyContinue
+                Write-Error "Signature missing for a signed release but minisign is installed - refusing to install."; exit 1
+            }
             & minisign -Vm $sumsPath -x $sigPath -P $MinisignPubKey | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 Remove-Item -LiteralPath $tmp, $sumsPath, $sigPath -Force -ErrorAction SilentlyContinue
@@ -88,8 +119,6 @@ if ($version) {
             Remove-Item -LiteralPath $sigPath -Force -ErrorAction SilentlyContinue
         }
         Remove-Item -LiteralPath $sumsPath -Force -ErrorAction SilentlyContinue
-    } catch {
-        # Manifest absent (pre-signing release) — staged: install unverified.
     }
 }
 
