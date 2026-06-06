@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.18] - 2026-06-06
+
+**One-click Windows connect — the "Connect new" flow no longer hangs on "Installing…", and
+no longer reports a green "Done" on failure.** Provisioning a Windows box from the Remote tab
+could stall for minutes on the install step and then fail — while the panel header still read
+a green "✓ Done". Two root causes:
+
+1. **Hang:** the Windows `irm | iex` installer over SSH *completes on the box but leaves the
+   SSH session lingering*. Because v1.0.17 reuses one SSH connection (`ControlMaster`), that
+   lingering install **held the shared socket**, so the follow-up out-of-band
+   `auxly --version` verify reused the poisoned socket and blocked behind it — the connect
+   waited out both timeouts and aborted before ever reaching the automatic key-authorize and
+   agent-wire steps. (Which is why a Windows box used to need a manual `auxly connect auto`
+   on the box plus hand-authorizing its key.)
+2. **False success:** `auxly host setup --provision` printed the provisioning failure as a
+   warning but still **exited 0**, so the TUI rendered a green "✓ Done" over a failed connect.
+
+### Fixed
+
+- **Install + readiness poll now run on their own isolated SSH connection** (no shared
+  `ControlMaster`). A lingering Windows install session can no longer wedge the socket the
+  later steps reuse — the exact poisoning that made the verify hang. POSIX `curl | sh` is
+  unchanged.
+- **Install and verify run concurrently:** the install fires while `auxly --version` is
+  polled; the moment the box answers, the connect proceeds and reaps the lingering install
+  session — so it never SITS on "Installing…" waiting out a session that already finished.
+- **On-box `auxly` commands after install now run on a fresh connection.** The agent-wire
+  (`connect use`) and `[r] reconnect` (`connect auto`) reused the shared `ControlMaster`
+  opened by the OS probe *before* auxly was installed — so that session still carried the
+  pre-install PATH and the call failed with `'auxly' is not recognized`. They now use an
+  isolated post-install connection that sees the updated PATH (the same reason the readiness
+  poll resolved auxly while the muxed wire didn't).
+- **`auxly host setup --provision` now exits non-zero when provisioning fails** — including
+  when agent wiring fails — so the TUI shows the real outcome ("Finished with issues" + the
+  error) instead of a misleading green "✓ Done". The relay/connection rows are already
+  persisted, so re-running (or `[r] reconnect`) resumes cleanly.
+- **Wired Windows boxes no longer show "unreachable" in the version column** (and are no
+  longer skipped by `[u]` Update or statusline sync). The version sweep probed a bare
+  `auxly --version`, which a non-interactive Windows SSH session can't resolve; it now falls
+  back to the installer's absolute path (`%LOCALAPPDATA%\Programs\auxly\auxly.exe`) over
+  PowerShell, the same PATH-independent probe the connect flow already used.
+- Net result: adding a Windows box from the TUI reaches its existing auto-chain every time —
+  **authorize the box's key here → save the connection → wire the box's agent (MCP + skills +
+  statusline)** — with no commands on the box, and an honest success/failure header.
+
 ## [1.0.17] - 2026-06-06
 
 **Reliable remote provisioning — no more `MaxStartups` floods.** Connecting/provisioning a

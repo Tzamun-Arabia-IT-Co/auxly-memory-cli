@@ -245,7 +245,10 @@ func runHostReconnect(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("🔗 Reconnecting %s (%s)...\n", c.Name, c.Target)
-	out, err := runSSH(p, "auxly", "connect", "auto")
+	// Fresh connection (withoutMux): never reuse a ControlMaster that may have been
+	// opened before auxly was installed on the box (its session carries the stale
+	// pre-install PATH, so `auxly …` would fail with 'auxly is not recognized').
+	out, err := runSSH(withoutMux(p), "auxly", "connect", "auto")
 	if err != nil {
 		fmt.Printf("   ⚠ remote reconnect failed: %v\n   %s\n", err, firstLine(out))
 		return err

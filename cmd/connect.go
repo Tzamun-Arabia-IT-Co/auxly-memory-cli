@@ -51,6 +51,20 @@ type remoteProfile struct {
 	// non-interactive SSH command runs with a minimal PATH (e.g. macOS omits
 	// /usr/local/bin), so a bare `auxly` may not resolve. Defaults to "auxly".
 	HostBin string `yaml:"host_bin,omitempty"`
+
+	// noMux, when set, forces this command onto its OWN SSH connection (no shared
+	// ControlMaster). Unexported on purpose — runtime-only, never persisted. Used
+	// for the long-lived install and the readiness poll during provisioning: if a
+	// Windows install session lingers, isolating it means it can't wedge the shared
+	// master that the follow-up steps (key-authorize, wire) reuse. See withoutMux.
+	noMux bool `yaml:"-"`
+}
+
+// withoutMux returns a copy of p that runs on its own SSH connection (no
+// ControlMaster multiplexing). Value copy — the original profile is untouched.
+func withoutMux(p remoteProfile) remoteProfile {
+	p.noMux = true
+	return p
 }
 
 // hostAuxlyBin returns the command used to invoke auxly on the host — the
@@ -239,7 +253,7 @@ func sshConnArgs(p remoteProfile) []string {
 	// handshake. It is unsupported on a Windows *client*, so enable it only off-
 	// Windows — and the only Windows-as-client case (a box dialing the host) makes a
 	// single connection anyway, so it loses nothing.
-	if runtime.GOOS != "windows" {
+	if runtime.GOOS != "windows" && !p.noMux {
 		if cp := sshControlPath(p); cp != "" {
 			args = append(args,
 				"-o", "ControlMaster=auto",
@@ -322,6 +336,61 @@ func retryProbe(probe func() error, attempts int, backoff time.Duration) error {
 		}
 	}
 	return lastErr
+}
+
+// Install-readiness poll policy. After a (possibly detached, on Windows) install
+// is kicked off, the box needs a few seconds to finish downloading + placing the
+// binary and for a fresh SSH login to pick up the updated PATH. Polling
+// `auxly --version` across that window is the real readiness signal — it works
+// whether the install ran synchronously (POSIX) or detached in the background
+// (Windows), so the connect never has to WAIT on the lingering install session.
+const (
+	installPollTimeout  = 150 * time.Second
+	installPollInterval = 2 * time.Second
+	installProbeTimeout = 8 * time.Second
+	// installRunTimeout bounds the install session itself. It outlasts the poll so a
+	// genuinely-slow install isn't reaped before readiness can be confirmed; on the
+	// common path the poll succeeds far sooner and cancels it early.
+	installRunTimeout = 180 * time.Second
+)
+
+// pollVerifyAuxly polls `auxly --version` on the box until it returns a non-empty
+// version or the timeout elapses, returning the first line of the version output
+// on success. Each individual probe is bounded by installProbeTimeout so a single
+// stalled SSH session can never wedge the whole loop. This replaces the old single
+// out-of-band verify that could block behind a lingering install on the shared
+// ControlMaster socket.
+func pollVerifyAuxly(p remoteProfile, timeout, interval time.Duration) (string, error) {
+	return pollVerifyWith(func() (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), installProbeTimeout)
+		defer cancel()
+		return runSSHCtx(ctx, p, hostAuxlyBin(p), "--version")
+	}, timeout, interval)
+}
+
+// pollVerifyWith is the pure driver behind pollVerifyAuxly: it calls probe until it
+// returns a non-empty (whitespace-trimmed) string with no error, or the timeout
+// elapses, returning the first non-empty line on success and the last error on
+// failure. The probe is injected so the poll policy is unit-testable without real
+// SSH (pass interval 0 in tests).
+func pollVerifyWith(probe func() (string, error), timeout, interval time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		out, err := probe()
+		if err == nil && strings.TrimSpace(out) != "" {
+			return strings.TrimSpace(firstLine(out)), nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(interval)
+	}
+	if lastErr == nil {
+		return "", fmt.Errorf("auxly did not become ready within %s", timeout)
+	}
+	return "", fmt.Errorf("auxly did not become ready within %s: %w", timeout, lastErr)
 }
 
 // probeHostReachable confirms the host answers `<hostbin> --version` over the
@@ -484,7 +553,7 @@ func runDoctor(p remoteProfile) error {
 		// registry; if it's not live yet, fall back to the conventional install path.
 		out, verErr := runSSH(p, "auxly", "--version")
 		if verErr != nil {
-			if out2, e2 := runRemoteScript(p, osWindows, "", `& "$env:LOCALAPPDATA\Programs\auxly\auxly.exe" --version`); e2 == nil {
+			if out2, e2 := runRemoteScript(p, osWindows, "", `& "`+winAuxlyAbsPath+`" --version`); e2 == nil {
 				out, verErr = strings.TrimSpace(out2), nil
 			}
 		}
@@ -1590,10 +1659,33 @@ func removeAuxlySkills() int {
 	return count
 }
 
+// winAuxlyAbsPath is the installer's known per-user location for auxly on Windows.
+// Invoking it directly is PATH-independent, so a version/wire probe still resolves
+// even when a non-interactive SSH session hasn't picked up the freshly-added PATH.
+const winAuxlyAbsPath = `$env:LOCALAPPDATA\Programs\auxly\auxly.exe`
+
+// remoteAuxlyVersionBanner returns the box's `auxly --version` banner. It tries a
+// bare PATH lookup first and, on failure, falls back to the known Windows install
+// path via PowerShell (PATH-independent). Runs on a FRESH connection (withoutMux)
+// so it never reuses a ControlMaster opened before auxly was installed — the stale
+// session carries the pre-install PATH and would falsely report the box missing.
+// On a non-Windows box the fallback simply errors (no powershell), so the original
+// failure is preserved.
+func remoteAuxlyVersionBanner(p remoteProfile) (string, error) {
+	if out, err := runSSH(withoutMux(p), hostAuxlyBin(p), "--version"); err == nil {
+		return out, nil
+	}
+	out, err := runRemoteScript(withoutMux(p), osWindows, "", `& "`+winAuxlyAbsPath+`" --version`)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // connectTest runs the lightweight `auxly --version` reachability check.
 func connectTest(p remoteProfile) error {
 	fmt.Println("🔌 Testing remote auxly availability...")
-	out, err := runSSH(p, "auxly", "--version")
+	out, err := remoteAuxlyVersionBanner(p)
 	if err != nil {
 		return fmt.Errorf("remote `auxly --version` failed: %w", err)
 	}

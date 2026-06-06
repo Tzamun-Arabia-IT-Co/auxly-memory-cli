@@ -336,32 +336,53 @@ func provisionConsumer(hc hostConfig) error {
 	}
 	name := offerName()
 
-	// 1. Install / update auxly on the box (OS-aware: POSIX curl|sh or PowerShell irm|iex).
+	// 1. Install / update auxly on the box (OS-aware: POSIX curl|sh or PowerShell
+	//    irm|iex), then confirm readiness by polling `auxly --version`. Readiness —
+	//    not the install call's clean exit — is the source of truth, because a
+	//    Windows irm|iex install over SSH completes on the box yet can leave the
+	//    session lingering. The install AND the poll run on their OWN connection
+	//    (withoutMux): if the install session lingers, isolating it means it can't
+	//    wedge the shared ControlMaster socket that the later steps (key-authorize,
+	//    hostname, wire) reuse — that socket-poisoning was what made the verify
+	//    hang forever before. Bounded timeout reaps the lingering session; the
+	//    install itself has already finished on the box by then.
 	fmt.Println("📦 Installing/updating auxly on the remote box...")
 	relayOS, _, derr := detectRemoteOS(relay)
 	if derr != nil {
 		fmt.Printf("   ⚠ remote OS detection failed: %v\n", derr)
 		return derr
 	}
+	installP := withoutMux(relay)
 	installPosix := "curl -fsSL " + update.BaseURL() + "/cli | sh"
 	installPS := winInstallCmd(update.BaseURL() + "/cli.ps1")
-	installOut, installErr := runRemoteScriptTimeout(relay, relayOS, installPosix, installPS, 90*time.Second)
 
-	// The installer can complete on the box yet leave the SSH session lingering
-	// (a known Windows irm|iex-over-SSH quirk), so verify out-of-band rather than
-	// trusting the install call's clean exit.
-	verifyOut, verifyErr := runSSH(relay, hostAuxlyBin(relay), "--version")
-	if verifyErr == nil && strings.TrimSpace(verifyOut) != "" {
-		fmt.Println("   ✓ auxly installed on the box")
-		if installErr != nil && !errors.Is(installErr, context.DeadlineExceeded) {
-			fmt.Printf("   (note: install call returned %v, but auxly verified OK)\n", installErr)
-		}
+	// Fire the install and poll for readiness CONCURRENTLY. The install runs on its
+	// own connection; the poll runs on others. As soon as `auxly --version` answers,
+	// we stop waiting on the install — so a lingering Windows session never makes the
+	// connect SIT on "Installing…" the way it did before. cancelInstall reaps that
+	// lingering session once the outcome is known.
+	installCtx, cancelInstall := context.WithTimeout(context.Background(), installRunTimeout)
+	defer cancelInstall()
+	installDone := make(chan error, 1)
+	go func() {
+		_, ierr := runRemoteScriptCtx(installCtx, installP, relayOS, installPosix, installPS)
+		installDone <- ierr
+	}()
+
+	ver, verifyErr := pollVerifyAuxly(installP, installPollTimeout, installPollInterval)
+	cancelInstall()
+	if verifyErr == nil && ver != "" {
+		fmt.Printf("   ✓ auxly ready on the box (%s)\n", ver)
 	} else {
-		if installErr != nil {
-			fmt.Printf("   ⚠ remote install failed or timed out: %v\n   %s\n", installErr, firstLine(installOut))
+		// Poll never saw a ready auxly — the install genuinely failed. Enrich the
+		// error with the install call's own result (it has finished by now, since the
+		// poll outlasts the install timeout).
+		installErr := <-installDone
+		if installErr != nil && !errors.Is(installErr, context.DeadlineExceeded) && !errors.Is(installErr, context.Canceled) {
+			fmt.Printf("   ⚠ remote install failed: %v\n", installErr)
 			return fmt.Errorf("remote install did not verify: install: %w; verify %s --version: %v", installErr, hostAuxlyBin(relay), verifyErr)
 		}
-		fmt.Printf("   ⚠ remote install did not verify: %v\n   %s\n", verifyErr, firstLine(verifyOut))
+		fmt.Printf("   ⚠ remote install did not verify: %v\n", verifyErr)
 		return fmt.Errorf("remote install did not verify with %s --version: %w", hostAuxlyBin(relay), verifyErr)
 	}
 
@@ -400,11 +421,20 @@ func provisionConsumer(hc hostConfig) error {
 	//    warning and let the user retry, rather than discarding the whole provision.
 	target := fmt.Sprintf("%s@localhost:%d", hostUser, hc.ReversePort)
 	fmt.Println("🔗 Wiring the box's agent to this machine's memory...")
-	wireArgs := []string{"auxly", "connect", "use", name, "--method", "rendezvous", "--host", target, "--host-bin", macBin}
-	if out, werr := runSSH(relay, wireArgs...); werr != nil {
+	// Run on a FRESH connection (withoutMux): the shared ControlMaster was opened
+	// by the OS probe BEFORE auxly was installed, so its session still carries the
+	// pre-install PATH and a reused `auxly …` resolves to nothing ('auxly is not
+	// recognized'). A fresh post-install session sees the updated PATH — the same
+	// reason the readiness poll resolves auxly while the muxed wire did not.
+	wireArgs := []string{hostAuxlyBin(relay), "connect", "use", name, "--method", "rendezvous", "--host", target, "--host-bin", macBin}
+	if out, werr := runSSH(withoutMux(relay), wireArgs...); werr != nil {
 		fmt.Printf("   ⚠ remote wiring failed: %v\n   %s\n", werr, firstLine(out))
 		fmt.Printf("   The connection %q is saved — re-run wiring with [r] reconnect on the box row, or `/auxly-remote-connect` on the box.\n", clientName)
-		return nil // connection recorded; wiring is retryable
+		// The box is reachable with its key authorized, but its agent isn't wired —
+		// the connect's actual goal isn't met, so surface this as a failure (the
+		// header reads "Finished with issues", not a misleading green "Done"). The
+		// connection row is already saved above, so [r] reconnect resumes cleanly.
+		return fmt.Errorf("remote agent wiring failed (connection %q saved, retry with [r] reconnect): %w", clientName, werr)
 	}
 	fmt.Println("   ✓ MCP launcher + skills wired on the box")
 	fmt.Println("👉 RESTART the agent on the box to load its memory link.")
@@ -742,7 +772,11 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 	if doProvision {
 		fmt.Println()
 		if err := provisionConsumer(hc); err != nil {
+			// Surface as a non-zero exit so callers (the TUI captured-run, scripts)
+			// see the failure instead of a misleading success. The relay config is
+			// already persisted above, so re-running picks up where this left off.
 			fmt.Printf("   ⚠ Remote provisioning incomplete: %v\n", err)
+			return fmt.Errorf("remote provisioning incomplete: %w", err)
 		}
 	} else {
 		printConsumerCommand(hc)

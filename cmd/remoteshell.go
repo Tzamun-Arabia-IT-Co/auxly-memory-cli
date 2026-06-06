@@ -250,6 +250,18 @@ func winInstallCmd(psURL string) string {
 	return "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; irm " + psURL + " | iex"
 }
 
+// runRemoteScriptCtx runs the same logical script as runRemoteScript but under a
+// caller-supplied context, so the caller can cancel a still-running (or lingering)
+// session early — used during provisioning to reap a lingering Windows install the
+// moment readiness is confirmed out-of-band, instead of waiting out its timeout.
+func runRemoteScriptCtx(ctx context.Context, p remoteProfile, fam remoteOS, posix, powershell string) (string, error) {
+	argv, err := remoteShellArgv(fam, posix, powershell)
+	if err != nil {
+		return "", err
+	}
+	return runSSHCtx(ctx, p, argv...)
+}
+
 func looksLikeUnixUname(out string) bool {
 	if out == "" {
 		return false
