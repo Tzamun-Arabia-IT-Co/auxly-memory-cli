@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,11 +36,37 @@ var Current = "1.0.19"
 const checkInterval = 24 * time.Hour
 
 // BaseURL is the distribution host. Overridable for testing/self-hosting.
+//
+// M4: a poisoned or inherited AUXLY_INSTALL_BASE must not silently downgrade
+// update/install traffic to http. The override is honored only when it is HTTPS,
+// targets localhost (for local testing), or AUXLY_INSECURE_INSTALL=1 is set
+// explicitly; otherwise we fall back to the secure default.
 func BaseURL() string {
 	if v := strings.TrimSpace(os.Getenv("AUXLY_INSTALL_BASE")); v != "" {
-		return strings.TrimRight(v, "/")
+		v = strings.TrimRight(v, "/")
+		if isSecureInstallBase(v) {
+			return v
+		}
 	}
 	return "https://auxly.io"
+}
+
+func isSecureInstallBase(v string) bool {
+	if os.Getenv("AUXLY_INSECURE_INSTALL") == "1" {
+		return true
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return true
+	}
+	// Plain http is allowed ONLY for an exact loopback host (local dev). Compare the
+	// parsed hostname exactly — a prefix check would let http://localhost.evil.tld
+	// through.
+	host := strings.ToLower(u.Hostname())
+	return strings.EqualFold(u.Scheme, "http") && (host == "localhost" || host == "127.0.0.1" || host == "::1")
 }
 
 // Latest fetches the newest published version string from {base}/version.
@@ -224,12 +251,23 @@ func SelfUpdate() (string, error) {
 		return "", fmt.Errorf("download failed: HTTP %d for %s", resp.StatusCode, url)
 	}
 
+	binBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read update: %w", err)
+	}
+
+	// H2/H3: verify the download against a minisign-signed checksum manifest before
+	// it ever touches disk as the live binary. Staged — see verifyDownloadedBinary.
+	if err := verifyDownloadedBinary(binBytes); err != nil {
+		return "", fmt.Errorf("update verification failed (refusing to install): %w", err)
+	}
+
 	tmp, err := os.CreateTemp(filepath.Dir(exe), ".auxly-update-*")
 	if err != nil {
 		return "", fmt.Errorf("could not create temp file next to %s (permissions?): %w", exe, err)
 	}
 	tmpPath := tmp.Name()
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	if _, err := tmp.Write(binBytes); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
 		return "", fmt.Errorf("failed to write update: %w", err)

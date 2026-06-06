@@ -228,7 +228,7 @@ func saveHostConfigs(relays []hostConfig) error {
 		return fmt.Errorf("failed to marshal host config: %w", err)
 	}
 	path := filepath.Join(dir, "host.yaml")
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("failed to write host config %s: %w", path, err)
 	}
 	return nil

@@ -17,7 +17,7 @@ import (
 //
 // in the SAME commit. This makes a stale export OR a forgotten version bump
 // impossible — the build won't go green until both are done.
-const contentFingerprint = "d603f7d4f03a5f1e1a9ae161fe91003bec2fb86f5d11d8b40bbea870b535e04f"
+const contentFingerprint = "12c8ed1af46d60095b26910dd7092838a8dd21a442ffa0a9b0d61cc4f38543ab"
 
 func TestSkillContentFingerprint(t *testing.T) {
 	h := sha256.New()

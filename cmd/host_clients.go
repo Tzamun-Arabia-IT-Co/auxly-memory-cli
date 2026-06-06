@@ -101,7 +101,7 @@ func saveClients(cs []clientEntry) error {
 		return err
 	}
 	path := filepath.Join(dir, "clients.yaml")
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }
 
 // sameClient reports whether two entries refer to the same box: either the same

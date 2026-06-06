@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/safepath"
 )
 
 // PendingFile represents a file waiting for approval.
@@ -34,7 +35,7 @@ func NewManager(memoryRoot string) *Manager {
 
 // List returns all files in .pending/.
 func (m *Manager) List() ([]PendingFile, error) {
-	if err := os.MkdirAll(m.pendingDir, 0755); err != nil {
+	if err := os.MkdirAll(m.pendingDir, 0700); err != nil {
 		return nil, err
 	}
 
@@ -62,7 +63,7 @@ func (m *Manager) List() ([]PendingFile, error) {
 // Write writes content to a pending file.
 // The filename is prefixed with a timestamp to avoid collisions.
 func (m *Manager) Write(targetFile, content string) (string, error) {
-	if err := os.MkdirAll(m.pendingDir, 0755); err != nil {
+	if err := os.MkdirAll(m.pendingDir, 0700); err != nil {
 		return "", err
 	}
 
@@ -73,7 +74,7 @@ func (m *Manager) Write(targetFile, content string) (string, error) {
 
 	// Write metadata header + content
 	header := fmt.Sprintf("---\ntarget: %s\ncreated: %s\n---\n\n", targetFile, time.Now().UTC().Format(time.RFC3339))
-	if err := os.WriteFile(pendingPath, []byte(header+content), 0644); err != nil {
+	if err := os.WriteFile(pendingPath, []byte(header+content), 0600); err != nil {
 		return "", err
 	}
 	return pendingName, nil
@@ -96,8 +97,14 @@ func (m *Manager) Approve(pendingName string) error {
 	// Extract content (everything after the frontmatter closing ---)
 	diffContent := extractContent(string(data))
 
-	// Write to target
-	targetPath := filepath.Join(m.memoryRoot, target)
+	// Write to target — validate the frontmatter-supplied target stays inside the
+	// vault. A malicious/poisoned pending entry could carry target: ../../.ssh/...
+	// (C3); ResolveSafe allows legitimate relative subpaths but rejects absolute
+	// paths, ".." escapes, and symlink escapes.
+	targetPath, err := safepath.ResolveSafe(m.memoryRoot, target)
+	if err != nil {
+		return fmt.Errorf("invalid pending target %q: %w", target, err)
+	}
 
 	// Read existing content
 	var existingContent string

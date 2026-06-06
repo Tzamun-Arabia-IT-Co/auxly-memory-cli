@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
@@ -136,7 +137,7 @@ func saveRemotes(cfg remotesConfig) error {
 		return fmt.Errorf("failed to marshal remotes config: %w", err)
 	}
 	path := filepath.Join(dir, "remotes.yaml")
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("failed to write remotes config %s: %w", path, err)
 	}
 	return nil
@@ -459,21 +460,61 @@ func validateForExec(p remoteProfile) error {
 		}
 	}
 	for _, a := range p.SSHArgs {
-		low := strings.ToLower(strings.ReplaceAll(a, " ", ""))
-		if strings.Contains(low, "proxycommand") ||
-			strings.Contains(low, "localcommand") ||
-			strings.Contains(low, "permitlocalcommand") {
-			return fmt.Errorf("refusing ssh_args entry %q: command-executing ssh options are not allowed in remote profiles", a)
+		// Validation applies to USER-SUPPLIED ssh_args only. Auxly's own
+		// ControlMaster/ControlPath/ControlPersist and ProxyJump are generated in
+		// sshConnArgs and never routed through here, so blocking them in user args
+		// is regression-safe (M3).
+		// Strip ALL whitespace (not just ASCII space) before matching: ssh accepts
+		// a tab/space between `-o` and its keyword (`-o\tInclude=…`), so a space-only
+		// strip would let `-o<TAB>Include` slip past the adjacency checks below.
+		low := strings.ToLower(strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
+				return -1
+			}
+			return r
+		}, a))
+		// Command-executing options, or options that hijack the multiplex control
+		// socket (Control*). These have no legitimate path-component use, so a plain
+		// substring match is safe.
+		for _, bad := range []string{"proxycommand", "localcommand", "permitlocalcommand", "controlmaster", "controlpath", "controlpersist"} {
+			if strings.Contains(low, bad) {
+				return fmt.Errorf("refusing ssh_args entry %q: %q is not allowed in remote profiles (loads external config or executes commands)", a, bad)
+			}
+		}
+		// The SSH `Include` directive loads an EXTERNAL config (which could itself
+		// carry a ProxyCommand). Match it as a directive only — `-oInclude=...`,
+		// `-o Include ...` (one arg, spaces stripped → "-oinclude…") and a raw
+		// `Include …` element — NOT the word "include" inside a legitimate path such
+		// as `-i ~/include/id_ed25519` or `-oIdentityFile=/srv/include/key`.
+		if strings.HasPrefix(low, "include") || strings.Contains(low, "-oinclude") {
+			return fmt.Errorf("refusing ssh_args entry %q: the SSH Include directive is not allowed in remote profiles (loads external config)", a)
+		}
+		// -F (alternate config file) and -S (control socket), in both "-F file" and
+		// "-Ffile" forms.
+		t := strings.TrimSpace(a)
+		if t == "-F" || t == "-S" || strings.HasPrefix(t, "-F") || strings.HasPrefix(t, "-S") {
+			return fmt.Errorf("refusing ssh_args entry %q: alternate-config (-F) and control-socket (-S) flags are not allowed in remote profiles", a)
 		}
 	}
-	// MemPath is interpolated into the remote command line (re-parsed by the
-	// host shell), so reject argv-flag smuggling and shell metacharacters.
+	// MemPath and HostBin are interpolated into the remote command line (re-parsed
+	// by the host shell), so reject argv-flag smuggling and shell metacharacters.
 	if mp := strings.TrimSpace(p.MemPath); mp != "" {
 		if strings.HasPrefix(mp, "-") {
 			return fmt.Errorf("refusing mem_path %q: must not begin with '-'", mp)
 		}
 		if strings.ContainsAny(mp, " \t\n;|&$`<>(){}*?!\"'\\") {
 			return fmt.Errorf("refusing mem_path %q: must be a plain path with no whitespace or shell metacharacters", mp)
+		}
+	}
+	// HostBin (H1): same anti-smuggling treatment. The metacharacter set excludes
+	// backslash and colon so legitimate Windows host paths
+	// (C:\...\auxly.exe) are still accepted; a bare "auxly" passes too.
+	if hb := strings.TrimSpace(p.HostBin); hb != "" {
+		if strings.HasPrefix(hb, "-") {
+			return fmt.Errorf("refusing host_bin %q: must not begin with '-'", hb)
+		}
+		if strings.ContainsAny(hb, " \t\n;|&$`<>(){}*?!\"'") {
+			return fmt.Errorf("refusing host_bin %q: must be a plain path with no whitespace or shell metacharacters", hb)
 		}
 	}
 	return nil
@@ -1599,6 +1640,9 @@ func removeAuxlyEntry(path, name string) bool {
 	if err != nil {
 		return false
 	}
+	// IDE/agent MCP config JSON (Claude Desktop, Cursor, Copilot, …) is not secret
+	// and `auxly setup` writes it 0644 — match that so connect/disconnect doesn't
+	// leave the file at a different, more-restrictive mode than setup created it.
 	return os.WriteFile(path, newData, 0644) == nil
 }
 

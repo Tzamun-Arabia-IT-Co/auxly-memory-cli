@@ -722,7 +722,7 @@ func (m wizardModel) runMigration() tea.Cmd {
 		if err := os.MkdirAll(memPath, 0755); err != nil {
 			return migrationDoneMsg{count: 0, log: []string{"✗ " + err.Error()}}
 		}
-		os.MkdirAll(filepath.Join(memPath, ".pending"), 0755)
+		os.MkdirAll(filepath.Join(memPath, ".pending"), 0700)
 
 		entries, err := templates.FS.ReadDir(".")
 		if err != nil {
@@ -742,7 +742,12 @@ func (m wizardModel) runMigration() tea.Cmd {
 				continue
 			}
 			time.Sleep(50 * time.Millisecond)
-			if err := os.WriteFile(destPath, data, 0644); err != nil {
+			// Config YAML (trust.yaml, …) seeds 0600; memory .md keeps 0644.
+			perm := os.FileMode(0o644)
+			if ext := filepath.Ext(entry.Name()); ext == ".yaml" || ext == ".yml" {
+				perm = 0o600
+			}
+			if err := os.WriteFile(destPath, data, perm); err != nil {
 				continue
 			}
 			count++
@@ -751,7 +756,7 @@ func (m wizardModel) runMigration() tea.Cmd {
 
 		auditPath := filepath.Join(memPath, ".audit.log")
 		if _, err := os.Stat(auditPath); os.IsNotExist(err) {
-			os.WriteFile(auditPath, []byte{}, 0644)
+			os.WriteFile(auditPath, []byte{}, 0600)
 			count++
 			log = append(log, ".audit.log")
 		}

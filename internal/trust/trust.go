@@ -53,7 +53,7 @@ func (c *Config) Save(memoryRoot string) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal trust config: %w", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }
 
 // GetTrustLevel returns the trust level for a given provider.

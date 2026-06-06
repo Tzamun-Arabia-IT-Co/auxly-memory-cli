@@ -8,6 +8,21 @@
 set -eu
 
 BASE_URL="${AUXLY_INSTALL_BASE:-https://auxly.io}"
+# M4: never let an inherited/poisoned AUXLY_INSTALL_BASE downgrade the download to
+# http. Accept https, or http on localhost (dev), or an explicit insecure opt-in.
+# Patterns are delimiter-anchored so http://localhost.evil.example does NOT match
+# (only exact loopback host, optionally with :port or /path).
+case "$BASE_URL" in
+  https://*) : ;;
+  http://localhost|http://localhost:*|http://localhost/*) : ;;
+  http://127.0.0.1|http://127.0.0.1:*|http://127.0.0.1/*) : ;;
+  *)
+    if [ "${AUXLY_INSECURE_INSTALL:-}" != "1" ]; then
+      echo "Refusing insecure AUXLY_INSTALL_BASE ($BASE_URL); using https://auxly.io" >&2
+      BASE_URL="https://auxly.io"
+    fi
+    ;;
+esac
 BINARY="auxly"
 
 # --- Parse args ---------------------------------------------------------------
@@ -50,6 +65,55 @@ if ! curl -fSL "$URL" -o "$TMP"; then
   echo "✗ Download failed: ${URL}" >&2
   exit 1
 fi
+
+# --- Verify against the signed checksum manifest (H3, staged) ------------------
+# Pinned minisign public key (matches internal/update/verify.go). Not a secret.
+# STAGED ROLLOUT: a release published before signing existed has NO manifest —
+# the manifest fetch 404s, the whole block is skipped, and the binary installs
+# unverified so the existing distribution keeps working. But the moment a manifest
+# IS present (signing is live for this release), verification becomes MANDATORY and
+# fails CLOSED:
+#   • no SHA-256 tool on the box        -> refuse (can't verify a signed release)
+#   • computed hash not in the manifest -> refuse (first-field match, not substring)
+#   • minisign installed but .minisig   -> refuse (don't let a dropped sig downgrade
+#     missing or not verifying              a host that CAN verify to checksum-only)
+# The remaining "drop the whole manifest to force the staged skip" downgrade is the
+# known, accepted cost of staging; it closes when the self-updater/installers flip
+# to default-deny once signing infra is live (see internal/update/verify.go).
+MINISIGN_PUBKEY="RWQfIGHWpXR4MtPvcbWwN1J7mx9FGsCaHMmdIpGMZAKDvmILC2Of5Q/K"
+VERSION="$(curl -fsSL "${BASE_URL}/version" 2>/dev/null | tr -d 'v \r\n\t')"
+if [ -n "$VERSION" ]; then
+  MANIFEST_URL="${BASE_URL}/dl/auxly-${VERSION}-checksums.txt"
+  SUMS="${TMP}.sums"; SIG="${TMP}.sig"
+  if curl -fsSL "$MANIFEST_URL" -o "$SUMS" 2>/dev/null; then
+    # Manifest present => signed release. Integrity is now required, not best-effort.
+    SUM=""
+    if command -v sha256sum >/dev/null 2>&1; then SUM="$(sha256sum "$TMP" | awk '{print $1}')";
+    elif command -v shasum  >/dev/null 2>&1; then SUM="$(shasum -a 256 "$TMP" | awk '{print $1}')"; fi
+    if [ -z "$SUM" ]; then
+      echo "✗ No SHA-256 tool (sha256sum/shasum) to verify the signed release — refusing to install." >&2
+      echo "  Install coreutils (Linux) or ensure shasum is on PATH, then retry." >&2
+      rm -f "$SUMS"; exit 1
+    fi
+    # Full first-field match (mirrors manifestHasHash in verify.go); a substring
+    # grep would pass a manifest that merely CONTAINS the hash anywhere on a line.
+    if ! awk -v s="$SUM" 'tolower($1)==tolower(s){found=1} END{exit found?0:1}' "$SUMS"; then
+      echo "✗ Checksum mismatch — refusing to install." >&2; rm -f "$SUMS"; exit 1
+    fi
+    if command -v minisign >/dev/null 2>&1; then
+      if ! curl -fsSL "${MANIFEST_URL}.minisig" -o "$SIG" 2>/dev/null; then
+        echo "✗ Signature missing for a signed release but minisign is installed — refusing to install." >&2
+        rm -f "$SUMS" "$SIG"; exit 1
+      fi
+      if ! minisign -Vm "$SUMS" -x "$SIG" -P "$MINISIGN_PUBKEY" >/dev/null 2>&1; then
+        echo "✗ Signature verification failed — refusing to install." >&2; rm -f "$SUMS" "$SIG"; exit 1
+      fi
+      echo "🔒 Signature verified"
+    fi
+    rm -f "$SUMS" "$SIG"
+  fi
+fi
+
 chmod +x "$TMP"
 
 # --- Pick a writable install dir on PATH --------------------------------------

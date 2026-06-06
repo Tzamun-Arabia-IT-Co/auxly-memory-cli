@@ -431,7 +431,7 @@ func (m settingsModel) saveTrust() tea.Cmd {
 		trustPath := filepath.Join(memPath, "trust.yaml")
 		data, err := yaml.Marshal(&trust)
 		if err == nil {
-			_ = os.WriteFile(trustPath, data, 0644)
+			_ = os.WriteFile(trustPath, data, 0600)
 		}
 		agents := detect.InstalledAgents()
 		return settingsRefreshMsg{agents: agents, trust: trust, agentBrands: buildAgentSettingsBrands(agents, logger)}

@@ -70,7 +70,7 @@ You natively support the following slash commands! When the user inputs one of t
 - `/auxly-memory`: Call the `auxly_skill_memory` tool to display a consolidated markdown profile of the user's identity, preferences, and infrastructure.
 - `/auxly-max`: Call the `auxly_skill_max` tool to obtain the dynamic Maximum Memory sync instructions block to sync other agents.
 - `/auxly-sync [content]`: Call the `auxly_skill_sync` tool with the provided content to perform an automated smart delta-merge into the preferences file.
-- `/auxly-pending [list/approve/reject] [id]`: Call the `auxly_skill_pending` tool to list, approve, or reject queued pending entries directly in-chat.
+- `/auxly-pending [list]`: Call the `auxly_skill_pending` tool to LIST the pending queue. Approving/rejecting is human-only — tell the user to run `auxly approve <id>` / `auxly reject <id>` in their terminal, or use the dashboard Approvals tab.
 - `/auxly-status`: Call the `auxly_skill_status` tool to show system diagnostics, active connections, and remote/SSH attribution.
 - `/auxly-forget [query]`: Call the `auxly_skill_forget` tool to search and prune obsolete bullet statements.
 - `/auxly-learn [context]`: Call the `auxly_skill_learn` tool to parse context and suggest new facts for the user to review.

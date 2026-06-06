@@ -27,6 +27,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # H2/H3: minisign is required for the goreleaser `signs` step that signs the
+      # checksum manifest. Install it and materialize the private key from a secret.
+      - name: Install minisign
+        run: sudo apt-get update && sudo apt-get install -y minisign
+
+      - name: Write minisign signing key
+        shell: bash
+        run: printf '%s' "${{ secrets.MINISIGN_KEY }}" > "${RUNNER_TEMP}/minisign.key"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -36,6 +45,9 @@ jobs:
         env:
           # Default token: creates the Release + uploads assets in THIS repo.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # minisign signing of the checksum manifest (H2/H3).
+          MINISIGN_KEY_FILE: ${{ runner.temp }}/minisign.key
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
           # PAT (repo scope): lets goreleaser push the formula to the tap repo.
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           # Gemini/Antigravity Live Usage OAuth clients — injected into release

@@ -28,7 +28,7 @@ func runPopulate(cmd *cobra.Command, args []string) error {
 	if err := os.MkdirAll(memPath, 0755); err != nil {
 		return err
 	}
-	os.MkdirAll(filepath.Join(memPath, ".pending"), 0755)
+	os.MkdirAll(filepath.Join(memPath, ".pending"), 0700)
 
 	// Auto-detect
 	prof := profiler.Detect()
@@ -70,7 +70,12 @@ func runPopulate(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				continue
 			}
-			os.WriteFile(destPath, data, 0644)
+			// Config YAML (trust.yaml, …) seeds 0600; memory .md keeps 0644.
+			perm := os.FileMode(0o644)
+			if ext := filepath.Ext(entry.Name()); ext == ".yaml" || ext == ".yml" {
+				perm = 0o600
+			}
+			os.WriteFile(destPath, data, perm)
 			fmt.Printf("  ✓ %s (template)\n", entry.Name())
 		}
 	}
@@ -78,7 +83,7 @@ func runPopulate(cmd *cobra.Command, args []string) error {
 	// Audit log
 	auditPath := filepath.Join(memPath, ".audit.log")
 	if _, err := os.Stat(auditPath); os.IsNotExist(err) {
-		os.WriteFile(auditPath, []byte{}, 0644)
+		os.WriteFile(auditPath, []byte{}, 0600)
 	}
 
 	// Marker

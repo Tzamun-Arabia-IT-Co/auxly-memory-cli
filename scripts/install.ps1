@@ -8,6 +8,24 @@
 $ErrorActionPreference = 'Stop'
 
 $BaseUrl = if ($env:AUXLY_INSTALL_BASE) { $env:AUXLY_INSTALL_BASE } else { 'https://auxly.io' }
+# M4: never let an inherited/poisoned AUXLY_INSTALL_BASE downgrade the download to
+# http. Accept https, or http on an EXACT loopback host (dev), or explicit opt-in.
+# The hostname is parsed (not prefix-matched) so http://localhost.evil.example is
+# rejected.
+$secureBase = $false
+if ($env:AUXLY_INSECURE_INSTALL -eq '1') {
+    $secureBase = $true
+} else {
+    try {
+        $u = [Uri]$BaseUrl
+        if ($u.Scheme -eq 'https') { $secureBase = $true }
+        elseif ($u.Scheme -eq 'http' -and @('localhost','127.0.0.1','::1') -contains $u.Host) { $secureBase = $true }
+    } catch { $secureBase = $false }
+}
+if (-not $secureBase) {
+    Write-Warning "Refusing insecure AUXLY_INSTALL_BASE ($BaseUrl); using https://auxly.io"
+    $BaseUrl = 'https://auxly.io'
+}
 $Binary  = 'auxly.exe'
 
 # --- Detect architecture ------------------------------------------------------
@@ -36,6 +54,74 @@ $dest = Join-Path $installDir $Binary
 # file and the next launch picks up the new binary.
 $tmp = Join-Path $installDir 'auxly.exe.new'
 Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+
+# --- Verify against the signed checksum manifest (H3, staged) ------------------
+# Pinned minisign public key (matches internal/update/verify.go). Not a secret.
+# STAGED ROLLOUT: a release published before signing existed has NO manifest — the
+# manifest fetch fails, verification is skipped, and the binary installs unverified
+# so the existing distribution keeps working. Once a manifest IS present (signing is
+# live), verification is MANDATORY and fails CLOSED.
+#
+# IMPORTANT: only the *manifest fetch* is wrapped in a try/catch (that's the legit
+# "no manifest yet" staged case). Every in-manifest failure — checksum mismatch,
+# missing .minisig while minisign is installed, bad signature — runs OUTSIDE that
+# catch and aborts hard. (A previous version put these inside the catch; under
+# $ErrorActionPreference='Stop', Write-Error threw before `exit 1` and the catch
+# silently swallowed the abort, letting a tampered binary install.)
+$MinisignPubKey = 'RWQfIGHWpXR4MtPvcbWwN1J7mx9FGsCaHMmdIpGMZAKDvmILC2Of5Q/K'
+try {
+    $verRaw  = (Invoke-WebRequest -Uri "$BaseUrl/version" -UseBasicParsing -ErrorAction Stop).Content
+    $version = ($verRaw -replace '[^0-9A-Za-z.\-]', '')
+} catch { $version = '' }
+if ($version) {
+    $manifestUrl = "$BaseUrl/dl/auxly-$version-checksums.txt"
+    $sumsPath = "$tmp.sums"
+    $haveManifest = $false
+    try {
+        Invoke-WebRequest -Uri $manifestUrl -OutFile $sumsPath -UseBasicParsing -ErrorAction Stop
+        $haveManifest = $true
+    } catch {
+        # Manifest absent (pre-signing release) — staged: install unverified.
+    }
+    if ($haveManifest) {
+        # Full first-field match (mirrors manifestHasHash in verify.go); a substring
+        # regex would pass a manifest that merely CONTAINS the hash anywhere on a line.
+        $hash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLower()
+        $match = $false
+        foreach ($line in (Get-Content -LiteralPath $sumsPath)) {
+            $field = (($line -split '\s+') | Where-Object { $_ -ne '' } | Select-Object -First 1)
+            if ($field -and $field.ToLower() -eq $hash) { $match = $true; break }
+        }
+        if (-not $match) {
+            Remove-Item -LiteralPath $tmp, $sumsPath -Force -ErrorAction SilentlyContinue
+            Write-Error "Checksum mismatch - refusing to install."; exit 1
+        }
+        if (Get-Command minisign -ErrorAction SilentlyContinue) {
+            $sigPath = "$tmp.sig"
+            $haveSig = $false
+            try {
+                Invoke-WebRequest -Uri "$manifestUrl.minisig" -OutFile $sigPath -UseBasicParsing -ErrorAction Stop
+                $haveSig = $true
+            } catch {
+                # A dropped .minisig must NOT downgrade a host that can verify to
+                # checksum-only — fail closed.
+            }
+            if (-not $haveSig) {
+                Remove-Item -LiteralPath $tmp, $sumsPath -Force -ErrorAction SilentlyContinue
+                Write-Error "Signature missing for a signed release but minisign is installed - refusing to install."; exit 1
+            }
+            & minisign -Vm $sumsPath -x $sigPath -P $MinisignPubKey | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Remove-Item -LiteralPath $tmp, $sumsPath, $sigPath -Force -ErrorAction SilentlyContinue
+                Write-Error "Signature verification failed - refusing to install."; exit 1
+            }
+            Write-Host "Signature verified"
+            Remove-Item -LiteralPath $sigPath -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $sumsPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 try {
   if (Test-Path -LiteralPath $dest) {
     $old = Join-Path $installDir ('auxly.exe.old-' + [Guid]::NewGuid().ToString('N').Substring(0,8))

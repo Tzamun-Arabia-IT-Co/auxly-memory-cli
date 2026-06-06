@@ -346,7 +346,6 @@ func (s *Server) getTools() []tool {
 					"file":     {Type: "string", Description: "Target file (e.g. identity.md, preferences.md)"},
 					"diff":     {Type: "string", Description: "Content to add. Prefix lines with + to append."},
 					"reason":   {Type: "string", Description: "Why this memory is being written/updated"},
-					"provider": {Type: "string", Description: "Provider name (claude, chatgpt, codex, gemini, copilot, antigravity). Defaults to claude."},
 				},
 				Required: []string{"file", "diff", "reason"},
 			},
@@ -417,12 +416,12 @@ func (s *Server) getTools() []tool {
 		},
 		{
 			Name:        "auxly_skill_pending",
-			Description: "Slash skill '/auxly-pending': Manage pending memory changes awaiting human approval directly inside the active chat panel",
+			Description: "Slash skill '/auxly-pending': List memory changes awaiting human approval. Approving/rejecting is human-only — done in the Auxly dashboard's Approvals tab or via 'auxly approve <id>' / 'auxly reject <id>' in the terminal, never by the agent.",
 			InputSchema: inputSchema{
 				Type: "object",
 				Properties: map[string]property{
-					"action":    {Type: "string", Description: "Operation: list, approve, or reject. Defaults to list."},
-					"target_id": {Type: "string", Description: "The entry ID to approve or reject"},
+					"action":    {Type: "string", Description: "Only 'list' is available over MCP (the default). Approve/reject are human-only — the agent must ask the user to run 'auxly approve <id>' / 'auxly reject <id>' locally or use the dashboard."},
+					"target_id": {Type: "string", Description: "Optional entry ID, used only to reference an entry when telling the user what to approve locally."},
 				},
 			},
 		},
@@ -499,15 +498,14 @@ func (s *Server) handleToolCall(req *jsonRPCRequest) {
 		file, _ := params.Arguments["file"].(string)
 		diff, _ := params.Arguments["diff"].(string)
 		reason, _ := params.Arguments["reason"].(string)
-		provider, _ := params.Arguments["provider"].(string)
-		if provider == "" {
-			provider = getProviderFromParent()
-		}
-		if provider == "" {
-			provider = os.Getenv("AUXLY_PROVIDER")
-		}
-		if provider == "" {
-			provider = "claude"
+		// C1: provider identity is SERVER-SIDE attribution only. We never trust a
+		// client-supplied "provider" arg for trust enforcement — otherwise an agent
+		// could claim an `auto`-trusted provider to bypass its own require_approval/
+		// read_only policy. Resolve from the launcher env / process ancestry and log
+		// any client-supplied mismatch for the audit trail.
+		provider := s.resolveProvider()
+		if claimed, _ := params.Arguments["provider"].(string); strings.TrimSpace(claimed) != "" && !strings.EqualFold(strings.TrimSpace(claimed), provider) {
+			s.logActivity(provider, "provider_mismatch", file)
 		}
 		result = s.toolWrite(file, diff, reason, provider)
 	case "auxly_memory_search":
@@ -652,15 +650,10 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("🔒 This remote connection does not have write access to '%s'.", file)}}, IsError: true}
 	}
 
-	if provider == "" {
-		provider = os.Getenv("AUXLY_PROVIDER")
-	}
-	if provider == "" {
-		provider = getProviderFromParent()
-	}
-	if provider == "" {
-		provider = "claude"
-	}
+	// C1: EVERY write path (auxly_memory_write, auxly_skill_sync, …) is gated by
+	// SERVER-SIDE provider attribution. We ignore any caller-supplied provider for
+	// the trust decision so no MCP tool can route around the authoritative identity.
+	provider = s.resolveProvider()
 
 	// Check trust level
 	trustCfg, err := trust.Load(s.memoryPath)
@@ -1013,32 +1006,20 @@ func (s *Server) toolSkillPending(action, targetID string) toolResult {
 		return toolResult{Content: []toolContent{{Type: "text", Text: "Error: Please specify the pending entry filename/ID to resolve."}}, IsError: true}
 	}
 
-	if action == "approve" {
-		err := s.pendingMgr.Approve(targetID)
-		if err != nil {
-			return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error approving entry: %v", err)}}, IsError: true}
-		}
-		// Log write event in audit.db
-		if s.logger != nil {
-			provider := getProviderFromParent()
-			if provider == "" {
-				provider = "claude"
-			}
-			agentID := fmt.Sprintf("%s-mcp", provider)
-			s.logger.LogWithSource(agentID, provider, "write", targetID, "", "Approved pending change via skill", "auto", s.sourceMeta)
-		}
-		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(fmt.Sprintf("✓ Successfully approved and committed pending entry: %s", targetID))}}}
+	if action == "approve" || action == "reject" {
+		// C2: approving/rejecting is a HUMAN-only action and is intentionally NOT
+		// performed over MCP. Otherwise an agent on require_approval could approve
+		// its OWN pending write and bypass the human gate entirely. Direct the user
+		// to a channel the agent cannot drive: the dashboard or the local CLI.
+		msg := fmt.Sprintf("🔒 Approving or rejecting pending changes is human-only — an agent can't do it.\n"+
+			"Ask the user to %s entry %q via either:\n"+
+			"  • the Auxly dashboard → Approvals tab, or\n"+
+			"  • their terminal:  auxly %s %s\n\n"+
+			"Over MCP this tool only LISTS pending entries.", action, targetID, action, targetID)
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(msg)}}}
 	}
 
-	if action == "reject" {
-		err := s.pendingMgr.Reject(targetID)
-		if err != nil {
-			return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error rejecting entry: %v", err)}}, IsError: true}
-		}
-		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(fmt.Sprintf("✗ Successfully rejected and deleted pending entry: %s", targetID))}}}
-	}
-
-	return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: Unknown action '%s'. Supported actions are list, approve, reject.", action)}}, IsError: true}
+	return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: action %q is not available over MCP. The only MCP action is 'list'; approve/reject are human-only (run 'auxly approve <id>' / 'auxly reject <id>' locally).", action)}}, IsError: true}
 }
 
 func (s *Server) toolSkillStatus() toolResult {
@@ -1140,6 +1121,19 @@ func detectRelayOfferNames() []string {
 func (s *Server) toolSkillForget(query string) toolResult {
 	if strings.TrimSpace(query) == "" {
 		return toolResult{Content: []toolContent{{Type: "text", Text: "Error: Query cannot be empty"}}, IsError: true}
+	}
+
+	// C1: pruning DELETES memory content, so gate it by SERVER-SIDE provider trust
+	// exactly like writes. A destructive delete can't be queued through the additive
+	// pending flow, so read_only and require_approval providers cannot prune over
+	// MCP — the human prunes locally.
+	provider := s.resolveProvider()
+	trustCfg, terr := trust.Load(s.memoryPath)
+	if terr != nil {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error loading trust config: %v", terr)}}, IsError: true}
+	}
+	if level := trustCfg.GetTrustLevel(provider); level != trust.LevelAuto {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("❌ Provider %q is %s — pruning memory over MCP requires 'auto' trust. Ask the user to prune locally (e.g. 'auxly forget').", provider, level)}}, IsError: true}
 	}
 
 	files, err := s.store.List()
@@ -1401,16 +1395,16 @@ func (s *Server) getPrompts() []prompt {
 		},
 		{
 			Name:        "auxly-pending",
-			Description: "Manage pending memory changes awaiting human approval directly inside the chat.",
+			Description: "List memory changes awaiting human approval. Approving/rejecting is human-only (dashboard Approvals tab or 'auxly approve <id>' / 'auxly reject <id>' in the terminal) — the agent cannot approve.",
 			Arguments: []promptArgument{
 				{
 					Name:        "action",
-					Description: "Operation: list, approve, or reject. Defaults to list.",
+					Description: "Only 'list' is available over MCP (default). Approve/reject are human-only and must be run locally by the user.",
 					Required:    false,
 				},
 				{
 					Name:        "target_id",
-					Description: "The entry ID to approve or reject",
+					Description: "Optional entry ID, used only to reference an entry when telling the user what to approve locally.",
 					Required:    false,
 				},
 			},

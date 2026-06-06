@@ -25,34 +25,20 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.0.19
+## 🆕 What's New in Version 1.0.20
 
-**One-click Windows boxes — add a Windows machine from the TUI and everything configures itself.** The host-push **Connect new** flow installs auxly, authorizes the key, and wires the box's agent (MCP + skills + statusline) end-to-end over SSH, with **no commands to run on the box**. The Windows-specific stalls and false "Done" headers are fixed, **`[u]` Update works on a live Windows box**, and relay-connected boxes show their host name in the statusline (no longer "Local").
+**Security hardening — the whole codebase audited, every Critical / High / Medium finding closed.** An independent security audit hardened the MCP trust boundary, path handling, remote/SSH execution, software distribution, and on-disk permissions — with **no change to how Auxly works for you**, verified by a live functional smoke test and multiple independent regression reviews.
 
-### 🪟 Connecting a Windows box — two ways
+### 🔒 What changed
+- **Trust boundary tightened.** A connected agent can no longer spoof another provider's identity to escape its `trust.yaml` level, and **agents can't approve their own pending writes** — approval is human-only (CLI/TUI).
+- **Path & symlink escapes blocked.** A shared `safepath` guard refuses any vault/workspace path that climbs out of its root or follows a symlink outside the vault; legitimate relative subpaths still work.
+- **Remote SSH execution hardened.** `ssh_args` and the host-binary path are validated against config-loading / command-executing options (`ProxyCommand`, `Include`, `Control*`, `-F`/`-S`, …) and shell-metacharacter injection. Your normal profiles — and Windows binary paths — are unaffected.
+- **Signed, verifiable releases.** Release checksums are signed with **minisign**; `auxly update` and both install scripts verify the downloaded binary against the signed manifest (public key pinned into the binary) before trusting it. Rolled out in stages so existing installs keep working; enforce strictly with `AUXLY_REQUIRE_SIGNATURE=1`.
 
-**Option A — from the host's TUI (one click):** open the **Remote** tab → **`c` Connect new** → point it at `user@windows-box`. Auxly handles install + key-auth + agent wiring automatically, then just restart the agent on the box.
+### ✨ Also fixed
+- **The statusline usage meter no longer freezes at "⧗ as of HH:MM".** The post-429 back-off is now persisted across refreshes, so a rate-limited provider self-heals instead of getting stuck on last-good — and Auxly stops re-probing your token while it's throttled.
 
-**Option B — on the box (also fully supported):**
-
-1. **On the host** (your Mac/Linux machine) — publish its memory and open the relay tunnel:
-   ```bash
-   auxly host setup --rendezvous <user@windows-box>
-   ```
-2. **On the Windows box** — install auxly and connect it (in PowerShell):
-   ```powershell
-   irm https://auxly.io/cli.ps1 | iex
-   auxly connect auto          # or run the /auxly-remote-connect skill in your agent
-   ```
-
-> **Under the hood (1.0.18):** the host-push install + readiness check run concurrently on an isolated SSH connection, so a lingering Windows installer session can't stall the connect; agent wiring and `[r] reconnect` run on a fresh post-install connection (so `auxly` resolves on the box's updated PATH); a failed provision now surfaces honestly instead of a green "Done"; and the Windows installer swaps the binary safely even while a live session is using it, so **`[u]` Update works on a connected Windows box**.
-
-### Other Windows capabilities (all working)
-- **Connect *to* a Windows box** (`auxly connect`) — auto-detects OS, provisions via **PowerShell** instead of POSIX `sh` (the old `'sh' is not recognized` failure is gone), auto-installs a clean host.
-- **🧠 Windows as a memory host** — serves its vault via `auxly mcp-server` over SSH; keep-alive via Windows Task Scheduler.
-- **🗂️ Cross-platform agent config** — Claude, Cursor, Copilot, Gemini configs resolve under `%APPDATA%` / `%LOCALAPPDATA%` on Windows (and `~/.config` on Linux).
-
-See the [CHANGELOG](CHANGELOG.md) for the full list.
+See the [CHANGELOG](CHANGELOG.md) for the full list — including 1.0.19's one-click Windows boxes (add a Windows machine from the TUI and it installs + wires itself over SSH).
 
 ---
 
@@ -343,7 +329,7 @@ Pending writes show up as reviewable diffs in the dashboard's **Approvals** tab 
 | `/auxly-learn` `[folder] [topic]` | Reads the memory vault — optionally a single folder, optionally focused on a topic — and grounds the agent in it for the session. No args = learn everything. |
 | `/auxly-max` | Exhaustive self-harvest — scans the whole session and writes every fact up into the vault, one category at a time (private facts go to `personal.md`). Push-only. |
 | `/auxly-forget` `[query]` | Searches memory and cleanly prunes obsolete or outdated lines. |
-| `/auxly-pending` `[list\|approve\|reject]` | Manages the approval queue from inside the chat panel. |
+| `/auxly-pending` `[list]` | Lists the approval queue. Approving/rejecting is **human-only** — use the dashboard's **Approvals** tab or run `auxly approve <id>` / `auxly reject <id>` in your terminal (an agent can't approve its own writes). |
 | `/auxly-status` | Shows whether the agent is connected and the MCP link is live, plus diagnostics. |
 | `/auxly-bootstrap` | Generates a copyable onboarding block to paste into a tool that doesn't have Auxly installed (e.g. ChatGPT). |
 | `/auxly-remote-connect` | Detects and connects this machine to a remote Auxly memory host (or reports the active link). |
