@@ -25,9 +25,9 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.0.18
+## 🆕 What's New in Version 1.0.19
 
-**One-click Windows boxes — add a Windows machine from the TUI and everything configures itself.** The host-push **Connect new** flow now installs auxly, authorizes the key, and wires the box's agent (MCP + skills + statusline) end-to-end over SSH, with **no commands to run on the box**. The Windows-specific stalls and false "Done" headers from earlier builds are fixed.
+**One-click Windows boxes — add a Windows machine from the TUI and everything configures itself.** The host-push **Connect new** flow installs auxly, authorizes the key, and wires the box's agent (MCP + skills + statusline) end-to-end over SSH, with **no commands to run on the box**. The Windows-specific stalls and false "Done" headers are fixed, **`[u]` Update works on a live Windows box**, and relay-connected boxes show their host name in the statusline (no longer "Local").
 
 ### 🪟 Connecting a Windows box — two ways
 

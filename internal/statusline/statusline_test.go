@@ -183,6 +183,15 @@ func TestDetectRole(t *testing.T) {
 	if role, remote := detectRole(dir); role != "remote→prod-box" || !remote {
 		t.Errorf("remotes.yaml should be remote→prod-box, got %q remote=%v", role, remote)
 	}
+	// remotes.yaml in the REAL list form `saveRemotes` writes (a YAML sequence: the
+	// first key sits on the `- name:` line). A relay box's host is the tunnel
+	// endpoint localhost, so the role must come from the NAME — this is the case that
+	// regressed to "local" before yamlScalar learned to strip the sequence dash.
+	os.WriteFile(filepath.Join(dir, "remotes.yaml"),
+		[]byte("remotes:\n    - name: HLab-Mac-mini\n      method: rendezvous\n      user: lab\n      host: localhost\n      port: 2222\n"), 0o644)
+	if role, remote := detectRole(dir); role != "remote→HLab-Mac-mini" || !remote {
+		t.Errorf("relay box should be remote→HLab-Mac-mini, got %q remote=%v", role, remote)
+	}
 }
 
 // TestInstallUninstallRoundTrip verifies the additive + reversible install: a prior

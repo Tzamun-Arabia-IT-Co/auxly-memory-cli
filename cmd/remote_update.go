@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/statusline"
@@ -69,10 +72,70 @@ func updateRemoteAuxly(p remoteProfile) error {
 	if err != nil {
 		return err
 	}
+	// Record the version we're replacing so the swap is detectable even when the
+	// installer session lingers (the Windows irm|iex-over-SSH quirk) and never
+	// returns — readiness, not the install call's exit, is the source of truth.
+	before := ""
+	if b, e := remoteAuxlyVersionBanner(p); e == nil {
+		before = parseRemoteVersion(b)
+	}
+	target, _ := update.Latest() // "" if the version endpoint is unreachable
+
+	// Install and verify CONCURRENTLY on isolated connections (mirrors
+	// provisionConsumer): a lingering Windows install can't poison the shared socket
+	// or make the TUI sit on "Updating…" — we poll the version and return the moment
+	// it flips to the target, then reap the lingering session.
+	installP := withoutMux(p)
 	posix := "curl -fsSL " + remoteInstallURL + " | sh"
 	powershell := winInstallCmd(remoteInstallPS)
-	_, err = runRemoteScript(p, fam, posix, powershell)
-	return err
+
+	installCtx, cancel := context.WithTimeout(context.Background(), installRunTimeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, ierr := runRemoteScriptCtx(installCtx, installP, fam, posix, powershell)
+		done <- ierr
+	}()
+
+	_, perr := pollRemoteUpdated(installP, before, target, installPollTimeout, installPollInterval)
+	cancel()
+	if perr == nil {
+		return nil
+	}
+	ierr := <-done
+	if ierr != nil && !errors.Is(ierr, context.DeadlineExceeded) && !errors.Is(ierr, context.Canceled) {
+		return fmt.Errorf("remote update install failed: %w", ierr)
+	}
+	return fmt.Errorf("remote update did not take effect (still %q): %w", before, perr)
+}
+
+// pollRemoteUpdated polls the box's version until it reaches target (when the
+// latest version is known) or simply changes from before, returning the new
+// version. Bounded; each probe is the Windows-aware remoteAuxlyVersionBanner so it
+// resolves even when a fresh non-interactive Windows session lacks auxly on PATH.
+func pollRemoteUpdated(p remoteProfile, before, target string, timeout, interval time.Duration) (string, error) {
+	return pollVerifyWith(func() (string, error) {
+		b, e := remoteAuxlyVersionBanner(p)
+		if e != nil {
+			return "", e
+		}
+		v := parseRemoteVersion(b)
+		if v == "" {
+			return "", fmt.Errorf("no version reported yet")
+		}
+		if target != "" {
+			if v == target {
+				return v, nil
+			}
+			return "", fmt.Errorf("still %s, want %s", v, target)
+		}
+		// No known target: accept any version once we never knew the prior one, or a
+		// change away from it.
+		if before == "" || v != before {
+			return v, nil
+		}
+		return "", fmt.Errorf("version unchanged (%s)", v)
+	}, timeout, interval)
 }
 
 // remoteStatuslineResult reports what installRemoteStatusline achieved on a box, so

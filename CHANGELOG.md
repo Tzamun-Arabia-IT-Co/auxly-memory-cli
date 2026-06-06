@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.19] - 2026-06-06
+
+**Remote-box updates and the relay statusline, fixed.** Follow-ups from live testing a
+connected Windows box.
+
+### Fixed
+
+- **`[u]` Update of a Windows box no longer hangs the TUI on "Updating…".** The update's
+  install-over-SSH lingers (the same Windows quirk as the connect install), so
+  `updateRemoteAuxly` blocked until its timeout even though the box had already updated. It
+  now runs the install and a version poll **concurrently on an isolated connection** and
+  returns the moment the box reports the new version — reaping the lingering session. (Same
+  fix shape as v1.0.18's connect install.)
+- **The Windows installer swaps a *running* `auxly.exe` instead of failing on the lock.** A
+  box with a live MCP session locks `auxly.exe`, so `Invoke-WebRequest -OutFile` over it
+  failed with `exit status 1`. The installer now downloads to a temp file, moves the running
+  binary aside (Windows allows renaming a running `.exe`), and drops the new one in place —
+  non-disruptive. (Ships via the `auxly.io/cli.ps1` proxy.)
+- **Relay-connected boxes no longer show "Local" in their statusline.** `detectRole` read the
+  box's `remotes.yaml` with a mini-parser that missed the profile `name` when it sat on a
+  YAML sequence line (`- name: …`, the real on-disk format), so a relay box — whose host is
+  the tunnel's `localhost` — fell through to "local". The parser now strips the sequence
+  dash, so the line correctly reads `remote→<host-name>`.
+
+### Docs
+
+- README "What's New" → 1.0.18/1.0.19: one-click Windows host-push connect, and `[u]` Update
+  working on a live Windows box.
+
 ## [1.0.18] - 2026-06-06
 
 **One-click Windows connect — the "Connect new" flow no longer hangs on "Installing…", and

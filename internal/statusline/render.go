@@ -491,10 +491,15 @@ func detectRole(auxDir string) (string, bool) {
 	return "remote→" + label, true
 }
 
-// yamlScalar pulls the first `key: value` scalar from a YAML blob without a full parser.
+// yamlScalar pulls the first `key: value` scalar from a YAML blob without a full
+// parser. It tolerates a leading sequence dash so it finds the key on a list
+// item's first line — remotes.yaml is written as `remotes:\n  - name: …\n    host: …`,
+// where the first key sits on the `- name:` line; without stripping the `- ` a
+// relay box's name was never read and detectRole fell through to "local".
 func yamlScalar(text, key string) string {
 	for _, ln := range strings.Split(text, "\n") {
 		t := strings.TrimSpace(ln)
+		t = strings.TrimPrefix(t, "- ") // YAML sequence item: "- name: value"
 		if strings.HasPrefix(t, key+":") {
 			v := strings.TrimSpace(strings.TrimPrefix(t, key+":"))
 			v = strings.Trim(v, `"'`)
