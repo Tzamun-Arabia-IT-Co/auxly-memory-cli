@@ -211,10 +211,42 @@ func connTarget(p remoteProfile) string {
 
 // sshConnArgs returns the base ssh option args (BatchMode/ConnectTimeout/-J/-p
 // plus user@host) reused by the launcher, doctor, and test paths.
+// sshControlPath returns a per-target socket path for SSH connection multiplexing,
+// or "" if the directory can't be prepared. Kept short (Unix socket paths cap near
+// 104 bytes) and made unique via ssh's %C token (a hash of the connection 4-tuple).
+func sshControlPath(p remoteProfile) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Join(home, ".ssh", "auxly-cm")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "%C")
+}
+
 func sshConnArgs(p remoteProfile) []string {
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=10",
+	}
+	// Reuse ONE underlying SSH connection across the many short commands a connect/
+	// provision runs (OS probe, key check, install, verify, hostname, wire). Without
+	// multiplexing, each is a fresh pre-auth handshake, and a burst of them trips the
+	// remote sshd's MaxStartups (Windows default 10) → "Connection reset by peer" and
+	// a failed, half-saved provision. ControlMaster collapses the burst to a single
+	// handshake. It is unsupported on a Windows *client*, so enable it only off-
+	// Windows — and the only Windows-as-client case (a box dialing the host) makes a
+	// single connection anyway, so it loses nothing.
+	if runtime.GOOS != "windows" {
+		if cp := sshControlPath(p); cp != "" {
+			args = append(args,
+				"-o", "ControlMaster=auto",
+				"-o", "ControlPath="+cp,
+				"-o", "ControlPersist=30s",
+			)
+		}
 	}
 	// Through a relay/tunnel the endpoint is localhost:<reverse-port>, whose host
 	// key is first-seen. Under BatchMode an unknown key would hard-fail, so accept
