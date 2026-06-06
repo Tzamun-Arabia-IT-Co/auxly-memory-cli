@@ -279,7 +279,7 @@ Now, inside any connected agent's chat, start teaching it:
 /auxly-memory                # shows the profile every agent now shares
 ```
 
-From here on, anything any agent learns about you can be saved with `/auxly-sync`, and every other agent picks it up automatically.
+From here on, save one thing with `/auxly-sync <topic>` or harvest a whole session with `/auxly-max` — and every other agent picks it up automatically. Agents save the odd fact on their own now and then, but to keep your usage light they're **not** aggressive about it — so run these yourself whenever you want to be sure (see [Keeping your memory in sync](#keeping-your-memory-in-sync--run-these-yourself)).
 
 ---
 
@@ -349,6 +349,17 @@ Pending writes show up as reviewable diffs in the dashboard's **Approvals** tab 
 | `/auxly-remote-connect` | Detects and connects this machine to a remote Auxly memory host (or reports the active link). |
 
 Under the hood these map to MCP tools (`auxly_skill_sync`, `auxly_memory_read`, `auxly_memory_write`, `auxly_memory_search`, `auxly_pending_list`, …) that any MCP client can call directly.
+
+### Keeping your memory in sync — run these yourself
+
+By design, Auxly's agents are **lightly** nudged to keep memory updated — never aggressively. An agent may save something on its own **from time to time** when it notices a clearly important fact, but it deliberately won't mine every message in the background, because constant background syncing would steadily **consume your tokens**. Since that occasional auto-sync is **best-effort, not guaranteed**, the reliable way to capture what matters is to run one of these yourself whenever you want to be sure:
+
+- **`/auxly-max`** — whenever you feel a session produced something worth keeping, run this to harvest the **entire session** into the vault (one category at a time; private facts go to `personal.md`). Best at the end of a working session or before you switch context.
+- **`/auxly-sync <topic>`** — to push **one specific thing** right now — a decision, a preference, a config value, a fact — without harvesting everything. The agent files it under the best-fit category automatically.
+
+> **Rule of thumb:** `/auxly-max` = "save the whole session," `/auxly-sync <topic>` = "save just this." Both are push-only and safe to run as often as you like.
+
+A more thorough, **guaranteed** token-aware auto-capture that works across **every** connected agent — not just Claude — is on the roadmap. Until then, the occasional self-sync stays light to protect your usage, and these two commands are the reliable way to keep your memory current.
 
 ---
 
