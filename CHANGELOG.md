@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.21] - 2026-06-06
+
+**npm + pip distribution channels, plus install-robustness hardening.**
+
+### Added
+
+- **`npm install -g auxly-cli`** and **`pip install auxly-cli`** — thin wrapper packages
+  that download the prebuilt auxly binary for your platform and **verify it against the
+  minisign-signed checksum manifest** (same pinned key as the Go binary) before use. npm
+  verifies in-process with Node stdlib (BLAKE2b-512 + ed25519, zero deps); pip ships a
+  pure-Python wheel that downloads + verifies on first run and caches under `~/.cache/auxly`.
+  Both **require a valid signature by default** (`AUXLY_ALLOW_UNSIGNED=1` to override).
+
+### Fixed
+
+- **Installers no longer fail-closed on a non-manifest 200.** The staged-verify logic
+  assumed a 404 for an absent checksum manifest, but a CDN can answer 200 with an SPA/HTML
+  page (auxly.io's `/dl` did this for the first signed release). The self-updater and both
+  installers now content-sniff the manifest and treat a non-checksum 200 as "absent" →
+  staged skip, instead of refusing to install.
+- **`AUXLY_REQUIRE_SIGNATURE=1` is now honored by the shell installers** — strict mode
+  refuses a checksum-only install when minisign isn't available, rather than silently
+  downgrading.
+- **Dev-mode `auxly update`** now locates the module root via `go.mod` (it was hardcoded to a
+  removed `auxly-cli/` subdir → `chdir …/auxly-cli: no such file`) and installs over the
+  currently-running binary (it was a fixed `~/.local/bin` path, so a box whose `auxly`
+  resolved elsewhere rebuilt fine but kept running the stale binary).
+
 ## [1.0.20] - 2026-06-06
 
 **Security hardening release.** A full security audit of the codebase (delegated to

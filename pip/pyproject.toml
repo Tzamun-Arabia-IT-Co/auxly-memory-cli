@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auxly-cli"
-version = "1.0.20"
+version = "1.0.21"
 description = "Local-first unified memory system for AI agents — downloads the signature-verified auxly binary."
 readme = "README.md"
 requires-python = ">=3.8"
