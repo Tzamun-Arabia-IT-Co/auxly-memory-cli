@@ -130,6 +130,14 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		xattrCmd := exec.Command("xattr", "-c", targetBin)
 		_ = xattrCmd.Run()
 
+		// On Apple Silicon a copied/rewritten Go binary carries an invalid ad-hoc
+		// signature and the kernel SIGKILLs it on launch ("zsh: killed"). Re-sign so
+		// the freshly-installed dev binary actually runs. Release binaries are signed
+		// by CI — this only matters for the local dev rebuild.
+		if runtime.GOOS == "darwin" {
+			_ = exec.Command("codesign", "--force", "--sign", "-", targetBin).Run()
+		}
+
 		fmt.Print("🎉 " + bold + green + "SUCCESS! Auxly has been rebuilt and updated successfully!" + reset + "\r\n")
 		fmt.Printf("   ↳ Global path: %s\r\n", targetBin)
 		fmt.Printf("   ↳ Active version: dev-latest\r\n\r\n")
