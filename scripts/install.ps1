@@ -79,7 +79,12 @@ if ($version) {
     $haveManifest = $false
     try {
         Invoke-WebRequest -Uri $manifestUrl -OutFile $sumsPath -UseBasicParsing -ErrorAction Stop
-        $haveManifest = $true
+        # A CDN missing the asset may answer 200 with an SPA/HTML page rather than a
+        # 404. Only treat it as a real manifest if it has a checksum-shaped line, so
+        # we staged-skip junk instead of fail-closing a legitimate install.
+        if ((Get-Content -LiteralPath $sumsPath -Raw) -match '(?m)^[0-9a-fA-F]{64}\s') {
+            $haveManifest = $true
+        }
     } catch {
         # Manifest absent (pre-signing release) — staged: install unverified.
     }
@@ -117,6 +122,12 @@ if ($version) {
             }
             Write-Host "Signature verified"
             Remove-Item -LiteralPath $sigPath -Force -ErrorAction SilentlyContinue
+        }
+        elseif ($env:AUXLY_REQUIRE_SIGNATURE -eq '1') {
+            # Strict mode requested but minisign isn't installed — checksum-only is
+            # not enough under AUXLY_REQUIRE_SIGNATURE.
+            Remove-Item -LiteralPath $tmp, $sumsPath -Force -ErrorAction SilentlyContinue
+            Write-Error "AUXLY_REQUIRE_SIGNATURE=1 but minisign is not installed - cannot verify the signature. Install minisign and retry, or unset the variable."; exit 1
         }
         Remove-Item -LiteralPath $sumsPath -Force -ErrorAction SilentlyContinue
     }

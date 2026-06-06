@@ -90,3 +90,44 @@ func TestVerifyDownloadedBinary_StagedFallback(t *testing.T) {
 		t.Fatal("AUXLY_REQUIRE_SIGNATURE=1 must fail when no signature is published")
 	}
 }
+
+// A CDN that lacks the manifest may answer 200 with an HTML/SPA page instead of a
+// real 404. That junk must be treated as "absent" → staged skip, NOT fail-closed.
+func TestVerifyDownloadedBinary_Non404SpaPageIsStaged(t *testing.T) {
+	const spa = "<!doctype html><html><head><title>auxly</title></head><body>app</body></html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/version") {
+			w.Write([]byte("9.9.9"))
+			return
+		}
+		w.WriteHeader(http.StatusOK) // 200 with a bogus body for manifest + .minisig
+		w.Write([]byte(spa))
+	}))
+	defer srv.Close()
+	t.Setenv("AUXLY_INSTALL_BASE", srv.URL)
+
+	if err := verifyDownloadedBinary([]byte("anything")); err != nil {
+		t.Fatalf("a non-manifest 200 must be treated as absent (staged skip), got: %v", err)
+	}
+
+	t.Setenv("AUXLY_REQUIRE_SIGNATURE", "1")
+	if err := verifyDownloadedBinary([]byte("anything")); err == nil {
+		t.Fatal("AUXLY_REQUIRE_SIGNATURE=1 must reject a bogus non-manifest 200")
+	}
+}
+
+func TestLooksLikeChecksumManifest(t *testing.T) {
+	good := []byte("8363672aa042f14a9463dbead5283e72ac9dcd0b31dda2a2b74a0fd2955a6664  auxly-linux-amd64\n")
+	if !looksLikeChecksumManifest(good) {
+		t.Error("real manifest line should be recognized")
+	}
+	if looksLikeChecksumManifest([]byte("<!doctype html><html></html>")) {
+		t.Error("HTML must not be recognized as a manifest")
+	}
+	if !looksLikeMinisig([]byte("untrusted comment: signature from minisign secret key\nRUQf...")) {
+		t.Error("minisig header should be recognized")
+	}
+	if looksLikeMinisig([]byte("<!doctype html>")) {
+		t.Error("HTML must not be recognized as a minisig")
+	}
+}

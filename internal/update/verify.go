@@ -62,6 +62,34 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
+// looksLikeChecksumManifest reports whether b has at least one line shaped like a
+// goreleaser checksum entry ("<64-hex-sha256>  <filename>"). Used to distinguish a
+// real manifest from an HTML/SPA page a CDN may serve with HTTP 200 for a missing
+// asset.
+func looksLikeChecksumManifest(b []byte) bool {
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && len(f[0]) == 64 && isHex(f[0]) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeMinisig reports whether b begins like a minisign signature file.
+func looksLikeMinisig(b []byte) bool {
+	return strings.HasPrefix(strings.TrimSpace(string(b)), "untrusted comment:")
+}
+
+func isHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
 // fetchIfPresent GETs url, returning (body, true, nil) on 200, (nil, false, nil)
 // on 404 (so the caller can apply the staged fallback), or an error otherwise.
 func fetchIfPresent(url string) ([]byte, bool, error) {
@@ -114,11 +142,22 @@ func verifyDownloadedBinary(bin []byte) error {
 		return fmt.Errorf("fetch signature: %w", serr)
 	}
 
+	// A server that lacks the manifest may answer 200 with an SPA/HTML page rather
+	// than a real 404 (auxly.io's /dl did exactly this before its rule was fixed).
+	// Treat a 200 whose body is NOT a checksum manifest / minisig as "absent" so the
+	// staged fallback applies instead of fail-closing a legitimate install on junk.
+	if mok && !looksLikeChecksumManifest(manifest) {
+		mok = false
+	}
+	if sok && !looksLikeMinisig(sig) {
+		sok = false
+	}
+
 	if !mok || !sok {
 		if os.Getenv("AUXLY_REQUIRE_SIGNATURE") == "1" {
 			return fmt.Errorf("release signature required but not published (manifest=%t signature=%t)", mok, sok)
 		}
-		return nil // staged: pre-signing release
+		return nil // staged: pre-signing release (or a non-manifest 200 from the CDN)
 	}
 
 	if err := verifyManifestSignature(manifest, sig); err != nil {

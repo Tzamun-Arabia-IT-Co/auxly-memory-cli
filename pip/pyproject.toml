@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auxly-cli"
+version = "1.0.21"
+description = "Local-first unified memory system for AI agents — downloads the signature-verified auxly binary."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Tzamun Arabia IT Co.", email = "hi@auxly.io" }]
+keywords = ["auxly", "ai", "memory", "mcp", "cli", "agents"]
+dependencies = ["cryptography>=3.4"]
+
+[project.urls]
+Homepage = "https://auxly.io"
+Repository = "https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli"
+Issues = "https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/issues"
+
+[project.scripts]
+auxly = "auxly_cli._runner:main"
+
+[tool.setuptools]
+packages = ["auxly_cli"]

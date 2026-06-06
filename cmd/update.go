@@ -63,10 +63,17 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Print("\r\n")
 
-		// 2. Run go build inside auxly-cli
+		// 2. Build the Go binary from the module root (the dir holding go.mod).
+		// The main package used to live in an `auxly-cli/` subdir; it's now at the
+		// repo root, so locate go.mod across the likely layouts instead of blindly
+		// appending `auxly-cli` (which failed with "chdir …/auxly-cli: no such
+		// file or directory" on the current single-module layout).
 		buildDir := wd
-		if filepath.Base(wd) != "auxly-cli" {
-			buildDir = filepath.Join(wd, "auxly-cli")
+		for _, cand := range []string{wd, filepath.Join(wd, "auxly-cli"), filepath.Join(wd, "..")} {
+			if _, statErr := os.Stat(filepath.Join(cand, "go.mod")); statErr == nil {
+				buildDir = cand
+				break
+			}
 		}
 		fmt.Print("⚙️  " + bold + "Compiling & rebuilding Go binary..." + reset + "\r\n")
 
@@ -88,9 +95,20 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Print("✅ Compilation completed successfully!\r\n\r\n")
 
-		// 3. Install globally to ~/.local/bin/auxly
+		// 3. Install over the CURRENTLY-RUNNING binary so the update actually
+		// takes effect on PATH. Hardcoding ~/.local/bin/auxly meant a dev box whose
+		// `auxly` resolves elsewhere (e.g. ~/.bun/bin/auxly) rebuilt fine but kept
+		// running the stale binary. Fall back to ~/.local/bin/auxly only when the
+		// running path can't be resolved.
 		home, _ := os.UserHomeDir()
 		targetBin := filepath.Join(home, ".local", "bin", "auxly")
+		if exe, exeErr := os.Executable(); exeErr == nil && exe != "" {
+			if real, linkErr := filepath.EvalSymlinks(exe); linkErr == nil && real != "" {
+				targetBin = real
+			} else {
+				targetBin = exe
+			}
+		}
 		sourceBin := filepath.Join(buildDir, "auxly")
 
 		fmt.Printf("🚚 Installing fresh binary globally to: %s...\r\n", targetBin)
