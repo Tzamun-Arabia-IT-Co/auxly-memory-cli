@@ -459,21 +459,45 @@ func validateForExec(p remoteProfile) error {
 		}
 	}
 	for _, a := range p.SSHArgs {
+		// Validation applies to USER-SUPPLIED ssh_args only. Auxly's own
+		// ControlMaster/ControlPath/ControlPersist and ProxyJump are generated in
+		// sshConnArgs and never routed through here, so blocking them in user args
+		// is regression-safe (M3).
 		low := strings.ToLower(strings.ReplaceAll(a, " ", ""))
-		if strings.Contains(low, "proxycommand") ||
-			strings.Contains(low, "localcommand") ||
-			strings.Contains(low, "permitlocalcommand") {
-			return fmt.Errorf("refusing ssh_args entry %q: command-executing ssh options are not allowed in remote profiles", a)
+		// Command-executing options, plus options that load an EXTERNAL config
+		// (-F / Include) — which could itself carry a ProxyCommand — or hijack the
+		// multiplex control socket (Control*).
+		for _, bad := range []string{"proxycommand", "localcommand", "permitlocalcommand", "include", "controlmaster", "controlpath", "controlpersist"} {
+			if strings.Contains(low, bad) {
+				return fmt.Errorf("refusing ssh_args entry %q: %q is not allowed in remote profiles (loads external config or executes commands)", a, bad)
+			}
+		}
+		// -F (alternate config file) and -S (control socket), in both "-F file" and
+		// "-Ffile" forms.
+		t := strings.TrimSpace(a)
+		if t == "-F" || t == "-S" || strings.HasPrefix(t, "-F") || strings.HasPrefix(t, "-S") {
+			return fmt.Errorf("refusing ssh_args entry %q: alternate-config (-F) and control-socket (-S) flags are not allowed in remote profiles", a)
 		}
 	}
-	// MemPath is interpolated into the remote command line (re-parsed by the
-	// host shell), so reject argv-flag smuggling and shell metacharacters.
+	// MemPath and HostBin are interpolated into the remote command line (re-parsed
+	// by the host shell), so reject argv-flag smuggling and shell metacharacters.
 	if mp := strings.TrimSpace(p.MemPath); mp != "" {
 		if strings.HasPrefix(mp, "-") {
 			return fmt.Errorf("refusing mem_path %q: must not begin with '-'", mp)
 		}
 		if strings.ContainsAny(mp, " \t\n;|&$`<>(){}*?!\"'\\") {
 			return fmt.Errorf("refusing mem_path %q: must be a plain path with no whitespace or shell metacharacters", mp)
+		}
+	}
+	// HostBin (H1): same anti-smuggling treatment. The metacharacter set excludes
+	// backslash and colon so legitimate Windows host paths
+	// (C:\...\auxly.exe) are still accepted; a bare "auxly" passes too.
+	if hb := strings.TrimSpace(p.HostBin); hb != "" {
+		if strings.HasPrefix(hb, "-") {
+			return fmt.Errorf("refusing host_bin %q: must not begin with '-'", hb)
+		}
+		if strings.ContainsAny(hb, " \t\n;|&$`<>(){}*?!\"'") {
+			return fmt.Errorf("refusing host_bin %q: must be a plain path with no whitespace or shell metacharacters", hb)
 		}
 	}
 	return nil

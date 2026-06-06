@@ -106,3 +106,15 @@ func TestResolveSafe_RejectsSymlinkedParentDir(t *testing.T) {
 		t.Fatalf("ResolveSafe followed symlinked parent dir, got %q, want error", got)
 	}
 }
+
+func TestResolveSafe_FreshRootAllowsFirstWrite(t *testing.T) {
+	// The vault root does not exist yet — the first write must still resolve.
+	root := filepath.Join(t.TempDir(), "vault-not-created-yet")
+	got, err := ResolveSafe(root, "identity.md")
+	if err != nil {
+		t.Fatalf("ResolveSafe into a fresh (nonexistent) root should succeed: %v", err)
+	}
+	if want := filepath.Join(root, "identity.md"); got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}

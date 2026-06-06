@@ -51,11 +51,16 @@ func ResolveSafe(root, name string) (string, error) {
 		return "", err
 	}
 
+	// Fresh vault: if the root itself doesn't exist yet, Resolve already guarantees
+	// lexical containment and a non-existent tree has no symlinks to escape through.
+	// Without this early return the ancestor walk would climb above root to "/" and
+	// wrongly reject the first write into a brand-new vault.
+	if _, rerr := os.Lstat(root); rerr != nil {
+		return resolved, nil
+	}
+
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		// Root may not exist yet (first write into a fresh vault); fall back to
-		// the lexical root so the boundary check below still applies once parents
-		// are created.
 		realRoot = filepath.Clean(root)
 	}
 

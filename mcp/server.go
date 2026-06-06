@@ -650,15 +650,10 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("🔒 This remote connection does not have write access to '%s'.", file)}}, IsError: true}
 	}
 
-	if provider == "" {
-		provider = os.Getenv("AUXLY_PROVIDER")
-	}
-	if provider == "" {
-		provider = getProviderFromParent()
-	}
-	if provider == "" {
-		provider = "claude"
-	}
+	// C1: EVERY write path (auxly_memory_write, auxly_skill_sync, …) is gated by
+	// SERVER-SIDE provider attribution. We ignore any caller-supplied provider for
+	// the trust decision so no MCP tool can route around the authoritative identity.
+	provider = s.resolveProvider()
 
 	// Check trust level
 	trustCfg, err := trust.Load(s.memoryPath)
@@ -1126,6 +1121,19 @@ func detectRelayOfferNames() []string {
 func (s *Server) toolSkillForget(query string) toolResult {
 	if strings.TrimSpace(query) == "" {
 		return toolResult{Content: []toolContent{{Type: "text", Text: "Error: Query cannot be empty"}}, IsError: true}
+	}
+
+	// C1: pruning DELETES memory content, so gate it by SERVER-SIDE provider trust
+	// exactly like writes. A destructive delete can't be queued through the additive
+	// pending flow, so read_only and require_approval providers cannot prune over
+	// MCP — the human prunes locally.
+	provider := s.resolveProvider()
+	trustCfg, terr := trust.Load(s.memoryPath)
+	if terr != nil {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error loading trust config: %v", terr)}}, IsError: true}
+	}
+	if level := trustCfg.GetTrustLevel(provider); level != trust.LevelAuto {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("❌ Provider %q is %s — pruning memory over MCP requires 'auto' trust. Ask the user to prune locally (e.g. 'auxly forget').", provider, level)}}, IsError: true}
 	}
 
 	files, err := s.store.List()

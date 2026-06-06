@@ -91,3 +91,50 @@ func TestSkillPending_ListStillWorks(t *testing.T) {
 		t.Fatalf("list should work over MCP: %s", resultText(res))
 	}
 }
+
+// C1 (closure): auxly_skill_sync must be gated by server-side provider trust too —
+// it must not route around resolveProvider via getProviderFromParent.
+func TestSkillSync_GatedByServerProvider(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &trust.Config{Default: trust.LevelAuto, Providers: map[string]trust.ProviderConfig{
+		"evilprov": {TrustLevel: trust.LevelReadOnly},
+	}}
+	if err := cfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUXLY_PROVIDER", "evilprov")
+	s := NewServer(dir)
+
+	out := resultText(s.toolSkillSync("Style: terse", "preferences", "global"))
+	if !strings.Contains(out, "read_only") {
+		t.Fatalf("skill_sync must be gated read_only by server-side provider; got: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "preferences.md")); err == nil {
+		t.Fatal("read_only provider must not write preferences.md via skill_sync")
+	}
+}
+
+// C1 (closure): auxly_skill_forget must be trust-gated — a non-auto provider
+// cannot prune (delete) memory content over MCP.
+func TestSkillForget_GatedByServerProvider(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &trust.Config{Default: trust.LevelAuto, Providers: map[string]trust.ProviderConfig{
+		"evilprov": {TrustLevel: trust.LevelReadOnly},
+	}}
+	if err := cfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "preferences.md"), []byte("- secret line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUXLY_PROVIDER", "evilprov")
+	s := NewServer(dir)
+
+	if res := s.toolSkillForget("secret"); !res.IsError {
+		t.Fatalf("skill_forget must be gated for non-auto providers; got: %s", resultText(res))
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "preferences.md"))
+	if !strings.Contains(string(data), "secret line") {
+		t.Fatal("read_only provider pruned content via skill_forget — trust gate failed")
+	}
+}
