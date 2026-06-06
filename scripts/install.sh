@@ -85,8 +85,11 @@ VERSION="$(curl -fsSL "${BASE_URL}/version" 2>/dev/null | tr -d 'v \r\n\t')"
 if [ -n "$VERSION" ]; then
   MANIFEST_URL="${BASE_URL}/dl/auxly-${VERSION}-checksums.txt"
   SUMS="${TMP}.sums"; SIG="${TMP}.sig"
-  if curl -fsSL "$MANIFEST_URL" -o "$SUMS" 2>/dev/null; then
-    # Manifest present => signed release. Integrity is now required, not best-effort.
+  if curl -fsSL "$MANIFEST_URL" -o "$SUMS" 2>/dev/null && grep -qiE '^[0-9a-f]{64}[[:space:]]' "$SUMS"; then
+    # Manifest present AND looks like a real checksums file => signed release.
+    # (A CDN missing the asset may answer 200 with an SPA/HTML page rather than a
+    # 404 — the grep guard treats that junk as "absent" so we staged-skip instead
+    # of fail-closing.) Integrity is now required, not best-effort.
     SUM=""
     if command -v sha256sum >/dev/null 2>&1; then SUM="$(sha256sum "$TMP" | awk '{print $1}')";
     elif command -v shasum  >/dev/null 2>&1; then SUM="$(shasum -a 256 "$TMP" | awk '{print $1}')"; fi
