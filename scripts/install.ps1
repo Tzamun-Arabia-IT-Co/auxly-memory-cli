@@ -28,7 +28,28 @@ $installDir = Join-Path $env:LOCALAPPDATA 'Programs\auxly'
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 $dest = Join-Path $installDir $Binary
 
-Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+# Download to a temp file first, then swap it into place. Writing straight over
+# $dest fails when auxly.exe is currently RUNNING (a live MCP session on the box
+# locks it) — that's the "update failed / exit status 1" on Windows. Windows lets
+# a running .exe be RENAMED out of the way, so we move the old binary aside and
+# drop the new one in its place; the still-running process keeps using the renamed
+# file and the next launch picks up the new binary.
+$tmp = Join-Path $installDir 'auxly.exe.new'
+Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+try {
+  if (Test-Path -LiteralPath $dest) {
+    $old = Join-Path $installDir ('auxly.exe.old-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
+    Move-Item -LiteralPath $dest -Destination $old -Force
+  }
+  Move-Item -LiteralPath $tmp -Destination $dest -Force
+} catch {
+  Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+  Write-Error "Failed to install auxly.exe (close any agent using it, then retry): $_"
+  exit 1
+}
+# Best-effort sweep of superseded binaries that are no longer locked.
+Get-ChildItem -LiteralPath $installDir -Filter 'auxly.exe.old-*' -ErrorAction SilentlyContinue |
+  ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
 
 # --- Add to per-user PATH (persisted, for new terminals) ----------------------
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
