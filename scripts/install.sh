@@ -65,6 +65,35 @@ if ! curl -fSL "$URL" -o "$TMP"; then
   echo "✗ Download failed: ${URL}" >&2
   exit 1
 fi
+
+# --- Verify against the signed checksum manifest (H3, staged) ------------------
+# Pinned minisign public key (matches internal/update/verify.go). Not a secret.
+# STAGED: releases published before signing existed have no manifest — those are
+# installed unverified so the existing distribution keeps working; once a manifest
+# is present, a checksum mismatch (or a failed signature, when minisign is on the
+# box) aborts the install.
+MINISIGN_PUBKEY="RWQfIGHWpXR4MtPvcbWwN1J7mx9FGsCaHMmdIpGMZAKDvmILC2Of5Q/K"
+VERSION="$(curl -fsSL "${BASE_URL}/version" 2>/dev/null | tr -d 'v \r\n\t')"
+if [ -n "$VERSION" ]; then
+  MANIFEST_URL="${BASE_URL}/dl/auxly-${VERSION}-checksums.txt"
+  SUMS="${TMP}.sums"; SIG="${TMP}.sig"
+  if curl -fsSL "$MANIFEST_URL" -o "$SUMS" 2>/dev/null; then
+    SUM=""
+    if command -v sha256sum >/dev/null 2>&1; then SUM="$(sha256sum "$TMP" | awk '{print $1}')";
+    elif command -v shasum  >/dev/null 2>&1; then SUM="$(shasum -a 256 "$TMP" | awk '{print $1}')"; fi
+    if [ -n "$SUM" ] && ! grep -iq "$SUM" "$SUMS"; then
+      echo "✗ Checksum mismatch — refusing to install." >&2; rm -f "$SUMS"; exit 1
+    fi
+    if command -v minisign >/dev/null 2>&1 && curl -fsSL "${MANIFEST_URL}.minisig" -o "$SIG" 2>/dev/null; then
+      if ! minisign -Vm "$SUMS" -x "$SIG" -P "$MINISIGN_PUBKEY" >/dev/null 2>&1; then
+        echo "✗ Signature verification failed — refusing to install." >&2; rm -f "$SUMS" "$SIG"; exit 1
+      fi
+      echo "🔒 Signature verified"
+    fi
+    rm -f "$SUMS" "$SIG"
+  fi
+fi
+
 chmod +x "$TMP"
 
 # --- Pick a writable install dir on PATH --------------------------------------

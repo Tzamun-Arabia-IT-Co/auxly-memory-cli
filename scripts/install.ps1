@@ -54,6 +54,45 @@ $dest = Join-Path $installDir $Binary
 # file and the next launch picks up the new binary.
 $tmp = Join-Path $installDir 'auxly.exe.new'
 Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+
+# --- Verify against the signed checksum manifest (H3, staged) ------------------
+# Pinned minisign public key (matches internal/update/verify.go). Not a secret.
+# STAGED: a release with no published manifest installs unverified (keeps the
+# existing distribution working); once present, a checksum mismatch — or a failed
+# signature when minisign is installed — aborts the install.
+$MinisignPubKey = 'RWQfIGHWpXR4MtPvcbWwN1J7mx9FGsCaHMmdIpGMZAKDvmILC2Of5Q/K'
+try {
+    $verRaw  = (Invoke-WebRequest -Uri "$BaseUrl/version" -UseBasicParsing -ErrorAction Stop).Content
+    $version = ($verRaw -replace '[^0-9A-Za-z.\-]', '')
+} catch { $version = '' }
+if ($version) {
+    $manifestUrl = "$BaseUrl/dl/auxly-$version-checksums.txt"
+    $sumsPath = "$tmp.sums"
+    try {
+        Invoke-WebRequest -Uri $manifestUrl -OutFile $sumsPath -UseBasicParsing -ErrorAction Stop
+        $hash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLower()
+        $manifest = (Get-Content -LiteralPath $sumsPath -Raw).ToLower()
+        if ($manifest -notmatch [Regex]::Escape($hash)) {
+            Remove-Item -LiteralPath $tmp, $sumsPath -Force -ErrorAction SilentlyContinue
+            Write-Error "Checksum mismatch - refusing to install."; exit 1
+        }
+        if (Get-Command minisign -ErrorAction SilentlyContinue) {
+            $sigPath = "$tmp.sig"
+            Invoke-WebRequest -Uri "$manifestUrl.minisig" -OutFile $sigPath -UseBasicParsing -ErrorAction Stop
+            & minisign -Vm $sumsPath -x $sigPath -P $MinisignPubKey | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Remove-Item -LiteralPath $tmp, $sumsPath, $sigPath -Force -ErrorAction SilentlyContinue
+                Write-Error "Signature verification failed - refusing to install."; exit 1
+            }
+            Write-Host "Signature verified"
+            Remove-Item -LiteralPath $sigPath -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $sumsPath -Force -ErrorAction SilentlyContinue
+    } catch {
+        # Manifest absent (pre-signing release) — staged: install unverified.
+    }
+}
+
 try {
   if (Test-Path -LiteralPath $dest) {
     $old = Join-Path $installDir ('auxly.exe.old-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
