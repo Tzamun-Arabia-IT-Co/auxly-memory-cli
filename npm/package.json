@@ -1,6 +1,6 @@
 {
   "name": "auxly-cli",
-  "version": "1.0.21",
+  "version": "1.0.22",
   "description": "Local-first unified memory system for AI agents — installs the prebuilt, signature-verified auxly binary.",
   "keywords": ["auxly", "ai", "memory", "mcp", "cli", "agents"],
   "homepage": "https://auxly.io",

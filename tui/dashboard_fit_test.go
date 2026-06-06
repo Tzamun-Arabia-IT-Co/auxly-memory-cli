@@ -442,3 +442,150 @@ func TestDashboardRichFitsTallWideTerminal(t *testing.T) {
 		t.Errorf("rich dashboard height %d exceeds terminal 53", h)
 	}
 }
+
+// manyRemotesDashboard reproduces the reported case: a host with MANY connected
+// remote boxes, which is what made the left column overflow and tipped the whole
+// dashboard into compact (dropping the bars + recent feed).
+func manyRemotesDashboard(t *testing.T, n int) model {
+	t.Helper()
+	m := populatedDashboard(t)
+	m.dashboard.stats.LastWriteTime = time.Now().Format(time.RFC3339)
+	m.dashboard.composition = []categoryStat{
+		{label: "projects", items: 60}, {label: "infra", items: 38}, {label: "daily", items: 33},
+		{label: "agents", items: 29}, {label: "preferences", items: 25}, {label: "products", items: 9},
+	}
+	m.dashboard.recentWrites = make([]audit.Entry, 8)
+	for i := range m.dashboard.recentWrites {
+		m.dashboard.recentWrites[i] = audit.Entry{Timestamp: m.dashboard.stats.LastWriteTime, Provider: "claude-code", Action: "write", File: "projects.md", Diff: "+a\n"}
+	}
+	sessions := make([]agentSession, 0, n+1)
+	for i := 0; i < n; i++ {
+		sessions = append(sessions, agentSession{
+			Provider: "claude-code", Remote: true,
+			Host: fmt.Sprintf("box-%02d.example.net", i),
+			IP:   fmt.Sprintf("10.0.0.%d", i+1), OS: "linux",
+		})
+	}
+	sessions = append(sessions, agentSession{Provider: "claude", Remote: false, PID: 1})
+	m.dashboard.sessions = sessions
+	return m
+}
+
+// TestConnectionsPanelScrollsWhenOverflowing is the core guarantee: a long remote
+// list is height-bounded and scrolls IN PLACE — it must NOT push the dashboard into
+// compact (the bars + recent feed stay visible), and scrolling reveals later hosts.
+func TestConnectionsPanelScrollsWhenOverflowing(t *testing.T) {
+	m := manyRemotesDashboard(t, 20)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 170, Height: 56})
+	m = updated.(model)
+	m.screen = screenDashboard
+	d := m.dashboard
+
+	if d.remoteGroupCount() != 20 {
+		t.Fatalf("expected 20 remote groups, got %d", d.remoteGroupCount())
+	}
+	if d.connMaxScroll(false) <= 0 {
+		t.Fatalf("20 remotes must overflow (maxScroll>0), got %d", d.connMaxScroll(false))
+	}
+
+	// Panel windows the list: the first host shows, a far-down host is below the fold,
+	// and the scroll affordance is present.
+	top := stripANSI(d.renderConnectionsSummary(false))
+	if !strings.Contains(top, "more below — Shift+J") {
+		t.Errorf("overflowing connections must show the scroll affordance with its key:\n%s", top)
+	}
+	if !strings.Contains(top, "box-00.example.net") {
+		t.Errorf("first remote should be visible at scroll 0:\n%s", top)
+	}
+	if strings.Contains(top, "box-19.example.net") {
+		t.Errorf("last remote must be BELOW the fold at scroll 0 (windowed):\n%s", top)
+	}
+
+	// The panel height is BOUNDED: 20 remotes render no taller than the visible cap
+	// allows (2 lines/remote + the ▲/▼ + local line), NOT 20 rows. This is what keeps
+	// the left column from tipping the dashboard into compact.
+	cap := d.connVisibleCap(false)
+	if h := lipgloss.Height(d.renderConnectionsSummary(false)); h > cap*2+4 {
+		t.Errorf("connections panel height %d exceeds the bound for cap %d (must scroll, not grow)", h, cap)
+	}
+
+	// Bounding the panel keeps the rich layout: NOT compact, bars + feed visible —
+	// 20 remotes that previously would have buried them off-screen.
+	if d.bodyCompact() {
+		t.Fatalf("20 remotes must NOT force compact at 170x56 — the panel scrolls instead (body height=%d)",
+			lipgloss.Height(d.renderBody(false)))
+	}
+	view := stripANSI(m.View())
+	for _, w := range []string{"Memory by category", "Recent Memory Changes"} {
+		if !strings.Contains(view, w) {
+			t.Errorf("rich section %q must stay visible while connections scroll", w)
+		}
+	}
+
+	// Scrolling to the bottom reveals the last host and hides the first.
+	d.connScroll = d.connMaxScroll(false)
+	bottom := stripANSI(d.renderConnectionsSummary(false))
+	if !strings.Contains(bottom, "box-19.example.net") {
+		t.Errorf("scrolled-to-bottom must reveal the last remote:\n%s", bottom)
+	}
+	if !strings.Contains(bottom, "more above") {
+		t.Errorf("scrolled list must show the ▲ above affordance:\n%s", bottom)
+	}
+}
+
+// TestConnectionsWheelAndKeysScroll verifies the wheel (over the left box) and the
+// PgUp/PgDn fallback move connScroll, clamped at both ends.
+func TestConnectionsWheelAndKeysScroll(t *testing.T) {
+	m := manyRemotesDashboard(t, 9)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 170, Height: 44})
+	m = updated.(model)
+	m.screen = screenDashboard
+	maxOff := m.dashboard.connMaxScroll(m.dashboard.bodyCompact())
+
+	// Wheel down over the left box (X<=47) scrolls; wheel up clamps at 0.
+	for i := 0; i < maxOff+3; i++ {
+		m.dashboard, _ = m.dashboard.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown, X: 10, Y: 12})
+	}
+	if m.dashboard.connScroll != maxOff {
+		t.Errorf("wheel-down must clamp at maxScroll %d, got %d", maxOff, m.dashboard.connScroll)
+	}
+	// Wheel over the agent grid (right side, X>47) must NOT scroll connections.
+	before := m.dashboard.connScroll
+	m.dashboard, _ = m.dashboard.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp, X: 120, Y: 12})
+	if m.dashboard.connScroll != before {
+		t.Errorf("wheel over the agent grid must not move connections (%d→%d)", before, m.dashboard.connScroll)
+	}
+	// PgUp keyboard fallback scrolls back up; clamps at 0.
+	for i := 0; i < maxOff+3; i++ {
+		m.dashboard, _ = m.dashboard.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	}
+	if m.dashboard.connScroll != 0 {
+		t.Errorf("PgUp must clamp at 0, got %d", m.dashboard.connScroll)
+	}
+	// Ctrl+↓ / Ctrl+↑ alias (for terminals/users who reach for those) scrolls too.
+	m.dashboard, _ = m.dashboard.Update(tea.KeyMsg{Type: tea.KeyCtrlDown})
+	if m.dashboard.connScroll != 1 {
+		t.Errorf("Ctrl+Down must scroll connections down, got %d", m.dashboard.connScroll)
+	}
+	m.dashboard, _ = m.dashboard.Update(tea.KeyMsg{Type: tea.KeyCtrlUp})
+	if m.dashboard.connScroll != 0 {
+		t.Errorf("Ctrl+Up must scroll connections up, got %d", m.dashboard.connScroll)
+	}
+
+	// Advertised J/K (Shift+j/k): J scrolls down, K scrolls up — universal, no Fn,
+	// and distinct from lowercase j/k which drive the agent grid.
+	m.dashboard, _ = m.dashboard.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'J'}})
+	if m.dashboard.connScroll != 1 {
+		t.Errorf("J must scroll connections down, got %d", m.dashboard.connScroll)
+	}
+	m.dashboard, _ = m.dashboard.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'K'}})
+	if m.dashboard.connScroll != 0 {
+		t.Errorf("K must scroll connections up, got %d", m.dashboard.connScroll)
+	}
+	// Lowercase j must NOT scroll connections (it navigates the agent grid).
+	before2 := m.dashboard.connScroll
+	m.dashboard, _ = m.dashboard.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if m.dashboard.connScroll != before2 {
+		t.Errorf("lowercase j must drive cards, not scroll connections (%d→%d)", before2, m.dashboard.connScroll)
+	}
+}
