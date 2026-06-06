@@ -112,6 +112,12 @@ if [ -n "$VERSION" ]; then
         echo "✗ Signature verification failed — refusing to install." >&2; rm -f "$SUMS" "$SIG"; exit 1
       fi
       echo "🔒 Signature verified"
+    elif [ "${AUXLY_REQUIRE_SIGNATURE:-}" = "1" ]; then
+      # Strict mode requested, but we can't verify the minisign signature without
+      # the minisign binary. Checksum-only is not enough under AUXLY_REQUIRE_SIGNATURE.
+      echo "✗ AUXLY_REQUIRE_SIGNATURE=1 but minisign is not installed — cannot verify the signature." >&2
+      echo "  Install minisign (e.g. 'brew install minisign') and retry, or unset AUXLY_REQUIRE_SIGNATURE." >&2
+      rm -f "$SUMS"; exit 1
     fi
     rm -f "$SUMS" "$SIG"
   fi

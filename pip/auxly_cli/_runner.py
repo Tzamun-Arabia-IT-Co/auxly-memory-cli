@@ -35,8 +35,16 @@ def _target() -> tuple[str, str]:
 
 def _cache_dir() -> Path:
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(Path.home(), ".cache")
-    d = Path(base) / "auxly" / __version__
+    root = Path(base) / "auxly"
+    d = root / __version__
     d.mkdir(parents=True, exist_ok=True)
+    # Restrict to the owner so another local user can't pre-place / swap the cached
+    # binary that we exec (the cached copy is run without re-fetching the manifest).
+    for p in (root, d):
+        try:
+            os.chmod(p, 0o700)
+        except OSError:
+            pass
     return d
 
 
@@ -52,23 +60,30 @@ def _download_and_verify(dest: Path, bin_name: str) -> None:
     sys.stderr.write(f"auxly: downloading {bin_name} (v{__version__})…\n")
     binary = _fetch(f"{base}/{bin_name}")
 
-    manifest = sig = None
+    # Every release this wrapper targets (it is version-locked to a release tag)
+    # ships a signed manifest, so verification is REQUIRED by default — a missing or
+    # junk manifest aborts rather than running an unverified binary.
+    # AUXLY_ALLOW_UNSIGNED=1 relaxes this for emergencies.
+    allow_unsigned = os.environ.get("AUXLY_ALLOW_UNSIGNED") == "1"
     try:
         manifest = _fetch(f"{base}/{manifest_name}").decode("utf-8")
         sig = _fetch(f"{base}/{manifest_name}.minisig").decode("utf-8")
     except Exception as e:  # noqa: BLE001
-        if os.environ.get("AUXLY_REQUIRE_SIGNATURE") == "1":
-            raise SystemExit(f"auxly: signature required but unavailable: {e}")
-        sys.stderr.write(f"auxly: signed manifest unavailable ({e}); HTTPS only\n")
+        if not allow_unsigned:
+            raise SystemExit(
+                f"auxly: signed manifest unavailable ({e}) and verification is required "
+                "— set AUXLY_ALLOW_UNSIGNED=1 only if you accept an unverified install"
+            )
+        sys.stderr.write(f"auxly: AUXLY_ALLOW_UNSIGNED=1 — installing unverified ({e})\n")
+        manifest = sig = None
 
     if manifest and sig:
         import re
 
-        looks_like = re.search(r"^[0-9a-f]{64}\s+\S", manifest, re.MULTILINE)
-        if not looks_like:
-            if os.environ.get("AUXLY_REQUIRE_SIGNATURE") == "1":
-                raise SystemExit("auxly: fetched manifest is not a checksums file")
-            sys.stderr.write("auxly: manifest not a checksums file; skipping verification\n")
+        if not re.search(r"^[0-9a-f]{64}\s+\S", manifest, re.MULTILINE):
+            if not allow_unsigned:
+                raise SystemExit("auxly: fetched manifest is not a checksums file — refusing")
+            sys.stderr.write("auxly: AUXLY_ALLOW_UNSIGNED=1 — manifest not a checksums file; unverified\n")
         else:
             verify_minisign(manifest.encode("utf-8"), sig)  # raises on failure
             if not manifest_has_hash(manifest, sha256_hex(binary)):

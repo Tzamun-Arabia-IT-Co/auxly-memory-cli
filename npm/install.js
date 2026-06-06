@@ -57,36 +57,44 @@ async function main() {
   console.log(`auxly: downloading ${binName} (v${version})…`)
   const bin = await fetchBuffer(`${base}/${binName}`)
 
-  // Integrity + authenticity. The manifest + signature ship with every release;
-  // if they are absent (an unsigned legacy release) we keep SHA over HTTPS only.
+  // Integrity + authenticity. Every release this package targets (it is version-
+  // locked to a release tag) ships a signed manifest, so verification is REQUIRED
+  // by default — a missing or junk manifest aborts rather than silently installing
+  // an unverified binary. AUXLY_ALLOW_UNSIGNED=1 relaxes this for emergencies.
+  const allowUnsigned = process.env.AUXLY_ALLOW_UNSIGNED === '1'
   let manifest, sig
   try {
     manifest = (await fetchBuffer(`${base}/${manifestName}`)).toString('utf8')
     sig = (await fetchBuffer(`${base}/${manifestName}.minisig`)).toString('utf8')
   } catch (e) {
-    if (process.env.AUXLY_REQUIRE_SIGNATURE === '1') {
-      throw new Error(`signature required but manifest/sig unavailable: ${e.message}`)
+    if (!allowUnsigned) {
+      throw new Error(
+        `signed manifest unavailable (${e.message}) and verification is required ` +
+          '— set AUXLY_ALLOW_UNSIGNED=1 only if you accept an unverified install'
+      )
     }
-    console.warn(`auxly: signed manifest unavailable (${e.message}); proceeding on HTTPS + no verification`)
+    console.warn(`auxly: AUXLY_ALLOW_UNSIGNED=1 — installing without verification (${e.message})`)
+    return writeBinary(bin)
   }
 
-  if (manifest && sig) {
-    const looksLikeManifest = /^[0-9a-f]{64}\s+\S/m.test(manifest)
-    if (!looksLikeManifest) {
-      if (process.env.AUXLY_REQUIRE_SIGNATURE === '1') {
-        throw new Error('fetched manifest is not a checksums file')
-      }
-      console.warn('auxly: manifest did not look like a checksums file; skipping verification')
-    } else {
-      verifyMinisign(Buffer.from(manifest, 'utf8'), sig) // throws on failure
-      const hash = sha256Hex(bin)
-      if (!manifestHasHash(manifest, hash)) {
-        throw new Error('downloaded binary SHA-256 is not in the signed manifest — refusing to install')
-      }
-      console.log('auxly: signature + checksum verified ✔')
+  if (!/^[0-9a-f]{64}\s+\S/m.test(manifest)) {
+    if (!allowUnsigned) {
+      throw new Error('fetched manifest is not a checksums file — refusing to install')
     }
+    console.warn('auxly: AUXLY_ALLOW_UNSIGNED=1 — manifest is not a checksums file; installing unverified')
+    return writeBinary(bin)
   }
 
+  verifyMinisign(Buffer.from(manifest, 'utf8'), sig) // throws on failure
+  if (!manifestHasHash(manifest, sha256Hex(bin))) {
+    throw new Error('downloaded binary SHA-256 is not in the signed manifest — refusing to install')
+  }
+  console.log('auxly: signature + checksum verified ✔')
+  return writeBinary(bin)
+}
+
+function writeBinary(bin) {
+  const { ext } = target()
   const vendorDir = path.join(__dirname, 'vendor')
   fs.mkdirSync(vendorDir, { recursive: true })
   const dest = path.join(vendorDir, `auxly${ext}`)

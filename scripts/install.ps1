@@ -123,6 +123,12 @@ if ($version) {
             Write-Host "Signature verified"
             Remove-Item -LiteralPath $sigPath -Force -ErrorAction SilentlyContinue
         }
+        elseif ($env:AUXLY_REQUIRE_SIGNATURE -eq '1') {
+            # Strict mode requested but minisign isn't installed — checksum-only is
+            # not enough under AUXLY_REQUIRE_SIGNATURE.
+            Remove-Item -LiteralPath $tmp, $sumsPath -Force -ErrorAction SilentlyContinue
+            Write-Error "AUXLY_REQUIRE_SIGNATURE=1 but minisign is not installed - cannot verify the signature. Install minisign and retry, or unset the variable."; exit 1
+        }
         Remove-Item -LiteralPath $sumsPath -Force -ErrorAction SilentlyContinue
     }
 }
