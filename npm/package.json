@@ -1,0 +1,32 @@
+{
+  "name": "auxly-cli",
+  "version": "1.0.20",
+  "description": "Local-first unified memory system for AI agents — installs the prebuilt, signature-verified auxly binary.",
+  "keywords": ["auxly", "ai", "memory", "mcp", "cli", "agents"],
+  "homepage": "https://auxly.io",
+  "bugs": "https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/issues",
+  "license": "MIT",
+  "author": "Tzamun Arabia IT Co. <hi@auxly.io>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli.git",
+    "directory": "npm"
+  },
+  "bin": {
+    "auxly": "bin/auxly.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "install.js",
+    "bin/auxly.js",
+    "lib/verify.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "os": ["darwin", "linux", "win32"],
+  "cpu": ["x64", "arm64"]
+}

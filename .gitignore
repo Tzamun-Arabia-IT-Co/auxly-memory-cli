@@ -69,3 +69,9 @@ docs/
 
 # agent-tooling project-id cache (not part of the repo)
 cache/
+
+# npm/pip wrapper build artifacts
+npm/vendor/
+pip/dist/
+pip/build/
+pip/*.egg-info/
