@@ -464,13 +464,21 @@ func validateForExec(p remoteProfile) error {
 		// sshConnArgs and never routed through here, so blocking them in user args
 		// is regression-safe (M3).
 		low := strings.ToLower(strings.ReplaceAll(a, " ", ""))
-		// Command-executing options, plus options that load an EXTERNAL config
-		// (-F / Include) — which could itself carry a ProxyCommand — or hijack the
-		// multiplex control socket (Control*).
-		for _, bad := range []string{"proxycommand", "localcommand", "permitlocalcommand", "include", "controlmaster", "controlpath", "controlpersist"} {
+		// Command-executing options, or options that hijack the multiplex control
+		// socket (Control*). These have no legitimate path-component use, so a plain
+		// substring match is safe.
+		for _, bad := range []string{"proxycommand", "localcommand", "permitlocalcommand", "controlmaster", "controlpath", "controlpersist"} {
 			if strings.Contains(low, bad) {
 				return fmt.Errorf("refusing ssh_args entry %q: %q is not allowed in remote profiles (loads external config or executes commands)", a, bad)
 			}
+		}
+		// The SSH `Include` directive loads an EXTERNAL config (which could itself
+		// carry a ProxyCommand). Match it as a directive only — `-oInclude=...`,
+		// `-o Include ...` (one arg, spaces stripped → "-oinclude…") and a raw
+		// `Include …` element — NOT the word "include" inside a legitimate path such
+		// as `-i ~/include/id_ed25519` or `-oIdentityFile=/srv/include/key`.
+		if strings.HasPrefix(low, "include") || strings.Contains(low, "-oinclude") {
+			return fmt.Errorf("refusing ssh_args entry %q: the SSH Include directive is not allowed in remote profiles (loads external config)", a)
 		}
 		// -F (alternate config file) and -S (control socket), in both "-F file" and
 		// "-Ffile" forms.
@@ -1623,7 +1631,10 @@ func removeAuxlyEntry(path, name string) bool {
 	if err != nil {
 		return false
 	}
-	return os.WriteFile(path, newData, 0600) == nil
+	// IDE/agent MCP config JSON (Claude Desktop, Cursor, Copilot, …) is not secret
+	// and `auxly setup` writes it 0644 — match that so connect/disconnect doesn't
+	// leave the file at a different, more-restrictive mode than setup created it.
+	return os.WriteFile(path, newData, 0644) == nil
 }
 
 // launcherMatches reports whether a server definition is our connect-mcp

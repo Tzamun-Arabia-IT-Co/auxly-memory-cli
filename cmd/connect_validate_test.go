@@ -39,6 +39,10 @@ func TestValidateForExec_SSHArgs(t *testing.T) {
 		{"-o", "StrictHostKeyChecking=accept-new"},
 		{"-o", "ConnectTimeout=10"},
 		{"-C"},
+		// Legitimate identity paths whose directory is literally named "include"
+		// must NOT be mistaken for the SSH Include directive (regression guard).
+		{"-i", "/home/wael/include/id_ed25519"},
+		{"-o", "IdentityFile=/srv/include/key"},
 	}
 	for _, args := range okArgs {
 		if err := validateForExec(remoteProfile{SSHArgs: args}); err != nil {
@@ -52,6 +56,8 @@ func TestValidateForExec_SSHArgs(t *testing.T) {
 		{"-F", "/tmp/evil_ssh_config"},
 		{"-F/tmp/evil"},
 		{"-o", "Include=/tmp/evil"},
+		{"-oInclude=/etc/passwd"},      // single-element -oInclude form
+		{"-o", "Include /etc/passwd"},  // single-element space form (stripped → "include/etc/passwd")
 		{"-o", "ControlPath=/tmp/hijack"},
 		{"-o", "ControlMaster=yes"},
 		{"-S", "/tmp/ctl"},
