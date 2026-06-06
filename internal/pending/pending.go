@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/safepath"
 )
 
 // PendingFile represents a file waiting for approval.
@@ -96,8 +97,14 @@ func (m *Manager) Approve(pendingName string) error {
 	// Extract content (everything after the frontmatter closing ---)
 	diffContent := extractContent(string(data))
 
-	// Write to target
-	targetPath := filepath.Join(m.memoryRoot, target)
+	// Write to target — validate the frontmatter-supplied target stays inside the
+	// vault. A malicious/poisoned pending entry could carry target: ../../.ssh/...
+	// (C3); ResolveSafe allows legitimate relative subpaths but rejects absolute
+	// paths, ".." escapes, and symlink escapes.
+	targetPath, err := safepath.ResolveSafe(m.memoryRoot, target)
+	if err != nil {
+		return fmt.Errorf("invalid pending target %q: %w", target, err)
+	}
 
 	// Read existing content
 	var existingContent string

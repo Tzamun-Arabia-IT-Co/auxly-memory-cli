@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/safepath"
 )
 
 // FileInfo represents metadata about a memory file.
@@ -123,11 +125,12 @@ func (s *Store) List() ([]FileInfo, error) {
 // View reads and returns the contents of a memory file, prioritizing local workspace overrides.
 func (s *Store) View(filename string) (string, error) {
 	if s.WorkspaceRoot != "" {
-		localPath := filepath.Join(s.WorkspaceRoot, filepath.Clean(filename))
-		if _, err := os.Stat(localPath); err == nil {
-			data, err := os.ReadFile(localPath)
-			if err == nil {
-				return string(data), nil
+		if localPath, perr := safepath.ResolveSafe(s.WorkspaceRoot, filename); perr == nil {
+			if _, err := os.Stat(localPath); err == nil {
+				data, err := os.ReadFile(localPath)
+				if err == nil {
+					return string(data), nil
+				}
 			}
 		}
 	}
@@ -157,7 +160,10 @@ func (s *Store) WriteScoped(filename string, content string, scope string) error
 		if err := os.MkdirAll(s.WorkspaceRoot, 0755); err != nil {
 			return fmt.Errorf("cannot create workspace memory directory: %w", err)
 		}
-		path = filepath.Join(s.WorkspaceRoot, filepath.Clean(filename))
+		path, err = safepath.ResolveSafe(s.WorkspaceRoot, filename)
+		if err != nil {
+			return err
+		}
 	} else {
 		path, err = s.resolvePath(filename)
 		if err != nil {
@@ -239,9 +245,10 @@ func (s *Store) Search(query string) (map[string][]string, error) {
 // Exists checks if a memory file exists either globally or locally.
 func (s *Store) Exists(filename string) bool {
 	if s.WorkspaceRoot != "" {
-		localPath := filepath.Join(s.WorkspaceRoot, filepath.Clean(filename))
-		if _, err := os.Stat(localPath); err == nil {
-			return true
+		if localPath, perr := safepath.ResolveSafe(s.WorkspaceRoot, filename); perr == nil {
+			if _, err := os.Stat(localPath); err == nil {
+				return true
+			}
 		}
 	}
 	path, err := s.resolvePath(filename)
@@ -334,15 +341,10 @@ func extractSection(doc, heading string) (section, remaining string, found bool)
 	return section, remaining, true
 }
 
+// resolvePath validates a filename stays within the global vault root, allowing
+// relative subpaths but rejecting absolute paths, ".." escapes, and symlink
+// escapes. Delegates to safepath so the boundary logic is shared with the
+// workspace branches and the pending package.
 func (s *Store) resolvePath(filename string) (string, error) {
-	cleaned := filepath.Clean(filename)
-	if filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "..") {
-		return "", fmt.Errorf("access denied: path traversal attempt for '%s'", filename)
-	}
-	resolved := filepath.Join(s.Root, cleaned)
-	rel, err := filepath.Rel(s.Root, resolved)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return "", fmt.Errorf("access denied: path escapes boundary")
-	}
-	return resolved, nil
+	return safepath.ResolveSafe(s.Root, filename)
 }
