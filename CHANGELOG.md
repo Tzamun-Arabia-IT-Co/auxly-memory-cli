@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.20] - 2026-06-06
+
+**Security hardening release.** A full security audit of the codebase (delegated to
+independent reviewers) surfaced findings across the MCP trust boundary, path handling,
+remote/SSH execution, software distribution, and file permissions. **Every Critical, High,
+and Medium finding is closed**, each behind an independent adversarial-review gate, with no
+change to existing functionality — verified by a live functional smoke test plus multiple
+independent regression reviews. This release also stops the statusline usage meter from
+freezing.
+
+### Security
+
+- **MCP provider identity is now server-side only.** A connected agent could previously
+  claim another provider's identity in a write call to inherit its `trust.yaml` level and
+  bypass its own `require_approval` / `read_only` gate. The server now derives the provider
+  from launcher attribution + process ancestry and **ignores any client-supplied `provider`
+  argument** (logging a `provider_mismatch` when they differ). The `provider` field was
+  removed from the MCP write schema; the trusted CLI `--provider` flag is unchanged.
+- **Agents can no longer approve their own pending writes.** The MCP approve/reject path is
+  now **human-only** (the tools redirect to the CLI/TUI); an agent on `require_approval`
+  cannot self-approve a queued change.
+- **Path-traversal and symlink escape are blocked at a shared boundary.** A new
+  `internal/safepath` guard validates every vault/workspace path: a pending change targeting
+  `../../.ssh/authorized_keys`, a workspace read that climbs out of its root, and a symlink
+  inside the vault pointing outside it are all refused. Legitimate relative subpaths still
+  resolve normally.
+- **Remote SSH execution is hardened.** `ssh_args` in a remote profile are validated against
+  options that load external config or execute commands (`ProxyCommand`, `LocalCommand`, the
+  `Include` directive, `Control*`, `-F`, `-S`); the host-binary path rejects flag-smuggling
+  and shell metacharacters. Auxly's own generated connection args are unaffected, and
+  legitimate identity paths and Windows binary paths still pass.
+- **Releases and self-update are now cryptographically verifiable (staged rollout).** The
+  release checksum manifest is signed with **minisign**, and `auxly update` plus both
+  installers verify the downloaded binary against the signed manifest before trusting it,
+  using a public key pinned into the binary. Staged: releases published before signing
+  existed install unverified so nothing breaks; verification is enforced once a signed
+  manifest is present — or always, with `AUXLY_REQUIRE_SIGNATURE=1`. The install base URL is
+  pinned to HTTPS (localhost allowed for dev).
+- **Sensitive on-disk files use tight permissions.** Config and credential files
+  (`trust.yaml`, `remotes.yaml`, `clients.yaml`), the audit log, and the pending queue are
+  now `0600`/`0700`; memory `.md` files and IDE MCP-config JSON stay world-readable (`0644`),
+  matching what `setup` writes.
+
+### Fixed
+
+- **The statusline usage meter no longer freezes at "⧗ as of HH:MM".** The plan-usage line
+  refreshes through a short-lived background process on each render (the render itself stays
+  network-free), but the post-429 circuit breaker lived only in memory — so a rate-limited
+  provider (Anthropic's usage endpoint, while an active session shares the same OAuth token)
+  got re-probed every few minutes and its snapshot never advanced, while other providers
+  stayed live. The cooldown is now **persisted to disk**, so every refresher backs off
+  together and the line self-heals once the limit clears — and it stops firing repeat 429s
+  at your token.
+
 ## [1.0.19] - 2026-06-06
 
 **Remote-box updates and the relay statusline, fixed.** Follow-ups from live testing a
