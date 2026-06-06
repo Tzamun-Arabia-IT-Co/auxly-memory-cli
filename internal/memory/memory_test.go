@@ -97,6 +97,24 @@ func TestExists_RejectsWorkspaceTraversal(t *testing.T) {
 	}
 }
 
+// L2/H4: seeded config YAML (trust.yaml) must be 0600, not world-readable.
+func TestSeedDefaultFiles_ConfigYamlIs0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permission bits differ on Windows")
+	}
+	root := t.TempDir()
+	if _, err := SeedDefaultFiles(root); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(root, "trust.yaml"))
+	if err != nil {
+		t.Skipf("trust.yaml not seeded in this build: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("trust.yaml seeded with mode %o, want 0600", fi.Mode().Perm())
+	}
+}
+
 func TestView_RejectsSymlinkEscape(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink semantics differ on Windows")

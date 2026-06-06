@@ -742,7 +742,12 @@ func (m wizardModel) runMigration() tea.Cmd {
 				continue
 			}
 			time.Sleep(50 * time.Millisecond)
-			if err := os.WriteFile(destPath, data, 0644); err != nil {
+			// Config YAML (trust.yaml, …) seeds 0600; memory .md keeps 0644.
+			perm := os.FileMode(0o644)
+			if ext := filepath.Ext(entry.Name()); ext == ".yaml" || ext == ".yml" {
+				perm = 0o600
+			}
+			if err := os.WriteFile(destPath, data, perm); err != nil {
 				continue
 			}
 			count++

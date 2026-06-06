@@ -70,7 +70,12 @@ func runPopulate(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				continue
 			}
-			os.WriteFile(destPath, data, 0644)
+			// Config YAML (trust.yaml, …) seeds 0600; memory .md keeps 0644.
+			perm := os.FileMode(0o644)
+			if ext := filepath.Ext(entry.Name()); ext == ".yaml" || ext == ".yml" {
+				perm = 0o600
+			}
+			os.WriteFile(destPath, data, perm)
 			fmt.Printf("  ✓ %s (template)\n", entry.Name())
 		}
 	}

@@ -36,7 +36,13 @@ func SeedDefaultFiles(root string) ([]string, error) {
 		if readErr != nil {
 			continue
 		}
-		if writeErr := os.WriteFile(dest, data, 0o644); writeErr != nil {
+		// Config YAML (trust.yaml, …) carries sensitive data — seed it 0600; memory
+		// .md files keep 0644.
+		perm := os.FileMode(0o644)
+		if ext := filepath.Ext(e.Name()); ext == ".yaml" || ext == ".yml" {
+			perm = 0o600
+		}
+		if writeErr := os.WriteFile(dest, data, perm); writeErr != nil {
 			continue
 		}
 		created = append(created, e.Name())
