@@ -111,7 +111,8 @@ func New() *Manager {
 		},
 		aliases: map[string]string{"claude-code": "claude"},
 	}
-	m.loadCache() // seed from the last session's last-good snapshot
+	m.loadCache()    // seed from the last session's last-good snapshot
+	m.loadCooldown() // honor a post-429 cooldown opened by an earlier process
 	return m
 }
 
@@ -140,6 +141,7 @@ func (m *Manager) Reports(ctx context.Context) []Report {
 	if len(stale) > 0 {
 		m.refresh(ctx, stale)
 		m.saveCache()
+		m.saveCooldown() // persist any 429 window so other processes back off too
 	}
 
 	m.mu.Lock()

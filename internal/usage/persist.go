@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Usage snapshots are persisted to disk so the dashboard shows the last-known
@@ -73,4 +74,76 @@ func (m *Manager) saveCache() {
 		return
 	}
 	_ = os.WriteFile(persistPath(), b, 0o600)
+}
+
+// cooldownPath is a function var (like persistPath) so tests can redirect it.
+var cooldownPath = func() string {
+	return filepath.Join(homeDir(), ".auxly", "usage-cooldown.json")
+}
+
+// loadCooldown seeds the in-memory post-429 circuit-breaker windows from disk.
+//
+// The breaker lives only in Manager.cooldown, but the statusline refreshes via a
+// FRESH `auxly statusline --refresh-usage` child each render — a new process with
+// an empty cooldown map. Without persistence the breaker resets every render, so a
+// rate-limited provider (Anthropic's usage endpoint especially, which 429s while an
+// active session shares the same OAuth token) gets re-probed every TTL and its
+// snapshot freezes at last-good forever ("⧗ as of HH:MM"). Persisting the window
+// lets each child honor a cooldown an earlier process opened. Expired windows are
+// ignored so a stale file never suppresses a legitimate refresh.
+func (m *Manager) loadCooldown() {
+	var stored map[string]time.Time
+	b, err := os.ReadFile(cooldownPath())
+	if err != nil || json.Unmarshal(b, &stored) != nil {
+		return
+	}
+	now := m.clock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for p, until := range stored {
+		if until.After(now) {
+			m.cooldown[p] = until
+		}
+	}
+}
+
+// saveCooldown persists the active (future) circuit-breaker windows, merging with
+// what's on disk so a window another process just opened isn't dropped. Expired
+// entries are pruned so the file can't grow unbounded; an empty result removes it.
+func (m *Manager) saveCooldown() {
+	now := m.clock()
+	m.mu.Lock()
+	current := make(map[string]time.Time, len(m.cooldown))
+	for p, until := range m.cooldown {
+		if until.After(now) {
+			current[p] = until
+		}
+	}
+	m.mu.Unlock()
+
+	stored := map[string]time.Time{}
+	if b, err := os.ReadFile(cooldownPath()); err == nil {
+		_ = json.Unmarshal(b, &stored)
+	}
+	for p, until := range stored {
+		if !until.After(now) {
+			delete(stored, p) // prune expired
+		}
+	}
+	for p, until := range current {
+		stored[p] = until
+	}
+
+	if len(stored) == 0 {
+		_ = os.Remove(cooldownPath())
+		return
+	}
+	b, err := json.MarshalIndent(stored, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(cooldownPath()), 0o700); err != nil {
+		return
+	}
+	_ = os.WriteFile(cooldownPath(), b, 0o600)
 }

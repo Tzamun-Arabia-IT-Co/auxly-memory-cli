@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -139,6 +140,93 @@ func TestForceRefreshKeepsLastGoodOnError(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("expected a refetch attempt on force refresh, calls=%d", calls)
+	}
+}
+
+// rateLimitedFetcher always returns a 429 — models Anthropic's usage endpoint
+// throttling the probe while an active session shares the same OAuth token.
+type rateLimitedFetcher struct {
+	id    string
+	calls *int32
+}
+
+func (f rateLimitedFetcher) provider() string { return f.id }
+
+func (f rateLimitedFetcher) fetch(_ context.Context) Report {
+	atomic.AddInt32(f.calls, 1)
+	return Report{Provider: f.id, Err: "rate limited — try later", RateLimited: true}
+}
+
+// TestCooldownPersistsAcrossManagers locks in the statusline-staleness fix: the
+// post-429 circuit breaker must survive across separate processes. The statusline
+// refreshes via a fresh `auxly statusline --refresh-usage` child each render, so a
+// cooldown that lived only in memory reset every time and re-hammered the rate-
+// limited endpoint — freezing the line at "⧗ as of HH:MM". A 429 in one Manager
+// must persist a cooldown that a brand-new Manager honors by skipping the fetch.
+func TestCooldownPersistsAcrossManagers(t *testing.T) {
+	dir := t.TempDir()
+	oldP, oldC := persistPath, cooldownPath
+	persistPath = func() string { return filepath.Join(dir, "usage-cache.json") }
+	cooldownPath = func() string { return filepath.Join(dir, "usage-cooldown.json") }
+	defer func() { persistPath, cooldownPath = oldP, oldC }()
+
+	var calls1 int32
+	m1 := &Manager{
+		cache:    map[string]cached{},
+		inFlight: map[string]bool{},
+		cooldown: map[string]time.Time{},
+		clock:    time.Now,
+		fetchers: []fetcher{rateLimitedFetcher{id: "claude", calls: &calls1}},
+	}
+	m1.Reports(context.Background()) // 429 → opens + persists the cooldown window
+	if calls1 != 1 {
+		t.Fatalf("first manager should attempt one fetch, got %d", calls1)
+	}
+
+	// A brand-new manager (the next detached refresh child) must load the persisted
+	// cooldown and SKIP the provider instead of re-probing a throttled endpoint.
+	var calls2 int32
+	m2 := &Manager{
+		cache:    map[string]cached{},
+		inFlight: map[string]bool{},
+		cooldown: map[string]time.Time{},
+		clock:    time.Now,
+		fetchers: []fetcher{rateLimitedFetcher{id: "claude", calls: &calls2}},
+	}
+	m2.loadCooldown()
+	m2.Reports(context.Background())
+	if calls2 != 0 {
+		t.Fatalf("second manager must honor the persisted cooldown and NOT re-fetch, got %d", calls2)
+	}
+}
+
+// TestCooldownExpiryAllowsRefetch verifies an EXPIRED window never suppresses a
+// legitimate refresh: once the cooldown passes, a new Manager refetches.
+func TestCooldownExpiryAllowsRefetch(t *testing.T) {
+	dir := t.TempDir()
+	oldC := cooldownPath
+	cooldownPath = func() string { return filepath.Join(dir, "usage-cooldown.json") }
+	defer func() { cooldownPath = oldC }()
+
+	// Write an already-expired cooldown directly to disk.
+	expired := map[string]time.Time{"claude": time.Now().Add(-time.Minute)}
+	b, _ := json.MarshalIndent(expired, "", "  ")
+	_ = os.WriteFile(cooldownPath(), b, 0o600)
+
+	var calls int32
+	open := make(chan struct{})
+	close(open)
+	m := &Manager{
+		cache:    map[string]cached{},
+		inFlight: map[string]bool{},
+		cooldown: map[string]time.Time{},
+		clock:    time.Now,
+		fetchers: []fetcher{gatedFetcher{id: "claude", calls: &calls, gate: open}},
+	}
+	m.loadCooldown()
+	m.Reports(context.Background())
+	if calls != 1 {
+		t.Fatalf("expired cooldown must not block a refetch, got %d calls", calls)
 	}
 }
 
