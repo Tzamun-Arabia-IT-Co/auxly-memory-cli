@@ -43,7 +43,12 @@ func probeClientVersions() []clientVersionStatus {
 			defer wg.Done()
 			st := clientVersionStatus{Name: c.Name, Target: c.Target, Latest: latest, Live: clientIsLive(live, c)}
 			if p, err := clientProfile(c); err == nil {
-				if banner, verr := runSSH(p, "auxly", "--version"); verr == nil {
+				// Windows-aware, fresh-connection probe: a bare `auxly --version` over a
+				// non-interactive Windows SSH session often misses the freshly-added PATH
+				// (and a muxed pre-install master carries a stale one), which made a wired
+				// Windows box show "unreachable" here. remoteAuxlyVersionBanner falls back
+				// to the absolute install path so the version resolves.
+				if banner, verr := remoteAuxlyVersionBanner(p); verr == nil {
 					st.Version = parseRemoteVersion(banner)
 					st.Reachable = st.Version != ""
 					st.Outdated = remoteNeedsUpdate(st.Version, latest, true)
@@ -163,7 +168,7 @@ func updateOneClient(c clientEntry, latest string, live map[string]bool, force b
 		fmt.Printf("   ⚠ %s: bad target %q: %v\n", c.Name, c.Target, err)
 		return false
 	}
-	banner, verr := runSSH(p, "auxly", "--version")
+	banner, verr := remoteAuxlyVersionBanner(p)
 	if verr != nil {
 		fmt.Printf("   ⚠ %s unreachable — skipped\n", c.Name)
 		return false
@@ -269,7 +274,7 @@ func syncBoxStatuslineResult(c clientEntry) string {
 	if perr != nil {
 		return fmt.Sprintf("   ⚠ %s: bad target %q: %v", c.Name, c.Target, perr)
 	}
-	if _, verr := runSSH(p, "auxly", "--version"); verr != nil {
+	if _, verr := remoteAuxlyVersionBanner(p); verr != nil {
 		return fmt.Sprintf("   ⚠ %s unreachable — skipped", c.Name)
 	}
 	res, serr := installRemoteStatusline(p)
