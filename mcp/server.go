@@ -343,9 +343,9 @@ func (s *Server) getTools() []tool {
 			InputSchema: inputSchema{
 				Type: "object",
 				Properties: map[string]property{
-					"file":     {Type: "string", Description: "Target file (e.g. identity.md, preferences.md)"},
-					"diff":     {Type: "string", Description: "Content to add. Prefix lines with + to append."},
-					"reason":   {Type: "string", Description: "Why this memory is being written/updated"},
+					"file":   {Type: "string", Description: "Target file (e.g. identity.md, preferences.md)"},
+					"diff":   {Type: "string", Description: "Content to add. Prefix lines with + to append."},
+					"reason": {Type: "string", Description: "Why this memory is being written/updated"},
 				},
 				Required: []string{"file", "diff", "reason"},
 			},

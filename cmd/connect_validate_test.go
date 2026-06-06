@@ -56,10 +56,10 @@ func TestValidateForExec_SSHArgs(t *testing.T) {
 		{"-F", "/tmp/evil_ssh_config"},
 		{"-F/tmp/evil"},
 		{"-o", "Include=/tmp/evil"},
-		{"-oInclude=/etc/passwd"},      // single-element -oInclude form
-		{"-o", "Include /etc/passwd"},  // single-element space form (stripped → "include/etc/passwd")
-		{"-o\tInclude=/tmp/evil"},      // TAB separator must not bypass (whitespace-aware strip)
-		{"-o", "\tInclude=/tmp/evil"},  // leading-tab element form
+		{"-oInclude=/etc/passwd"},     // single-element -oInclude form
+		{"-o", "Include /etc/passwd"}, // single-element space form (stripped → "include/etc/passwd")
+		{"-o\tInclude=/tmp/evil"},     // TAB separator must not bypass (whitespace-aware strip)
+		{"-o", "\tInclude=/tmp/evil"}, // leading-tab element form
 		{"-o", "ControlPath=/tmp/hijack"},
 		{"-o", "ControlMaster=yes"},
 		{"-S", "/tmp/ctl"},
