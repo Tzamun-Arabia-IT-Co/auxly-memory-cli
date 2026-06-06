@@ -136,7 +136,7 @@ func saveRemotes(cfg remotesConfig) error {
 		return fmt.Errorf("failed to marshal remotes config: %w", err)
 	}
 	path := filepath.Join(dir, "remotes.yaml")
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("failed to write remotes config %s: %w", path, err)
 	}
 	return nil
@@ -1623,7 +1623,7 @@ func removeAuxlyEntry(path, name string) bool {
 	if err != nil {
 		return false
 	}
-	return os.WriteFile(path, newData, 0644) == nil
+	return os.WriteFile(path, newData, 0600) == nil
 }
 
 // launcherMatches reports whether a server definition is our connect-mcp

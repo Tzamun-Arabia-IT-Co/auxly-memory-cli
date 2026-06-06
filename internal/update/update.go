@@ -35,11 +35,33 @@ var Current = "1.0.19"
 const checkInterval = 24 * time.Hour
 
 // BaseURL is the distribution host. Overridable for testing/self-hosting.
+//
+// M4: a poisoned or inherited AUXLY_INSTALL_BASE must not silently downgrade
+// update/install traffic to http. The override is honored only when it is HTTPS,
+// targets localhost (for local testing), or AUXLY_INSECURE_INSTALL=1 is set
+// explicitly; otherwise we fall back to the secure default.
 func BaseURL() string {
 	if v := strings.TrimSpace(os.Getenv("AUXLY_INSTALL_BASE")); v != "" {
-		return strings.TrimRight(v, "/")
+		v = strings.TrimRight(v, "/")
+		if isSecureInstallBase(v) {
+			return v
+		}
 	}
 	return "https://auxly.io"
+}
+
+func isSecureInstallBase(v string) bool {
+	low := strings.ToLower(v)
+	switch {
+	case strings.HasPrefix(low, "https://"):
+		return true
+	case os.Getenv("AUXLY_INSECURE_INSTALL") == "1":
+		return true
+	case strings.HasPrefix(low, "http://localhost"), strings.HasPrefix(low, "http://127.0.0.1"):
+		return true
+	default:
+		return false
+	}
 }
 
 // Latest fetches the newest published version string from {base}/version.

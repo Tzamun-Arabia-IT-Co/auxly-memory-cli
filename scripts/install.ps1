@@ -8,6 +8,12 @@
 $ErrorActionPreference = 'Stop'
 
 $BaseUrl = if ($env:AUXLY_INSTALL_BASE) { $env:AUXLY_INSTALL_BASE } else { 'https://auxly.io' }
+# M4: never let an inherited/poisoned AUXLY_INSTALL_BASE downgrade the download to
+# http. Accept https, or http on localhost (dev), or an explicit insecure opt-in.
+if ($BaseUrl -notmatch '^(https://|http://localhost|http://127\.0\.0\.1)' -and $env:AUXLY_INSECURE_INSTALL -ne '1') {
+    Write-Warning "Refusing insecure AUXLY_INSTALL_BASE ($BaseUrl); using https://auxly.io"
+    $BaseUrl = 'https://auxly.io'
+}
 $Binary  = 'auxly.exe'
 
 # --- Detect architecture ------------------------------------------------------

@@ -129,7 +129,7 @@ func (l *Logger) LogWithSource(agentID, provider, action, file, diff, reason, tr
 		return nil, fmt.Errorf("failed to marshal audit entry: %w", err)
 	}
 
-	f, err := os.OpenFile(l.logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(l.logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open .audit.log: %w", err)
 	}
