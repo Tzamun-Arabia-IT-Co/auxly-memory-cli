@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.22] - 2026-06-07
+
+**Dashboard: the Active Connections list no longer hides the rich panels — it scrolls in place.**
+
+### Fixed
+
+- **A long list of connected remote boxes no longer pushes the dashboard into compact
+  mode.** Previously, each remote took two lines in the full layout, so a handful of
+  connected machines made the left column tall enough to drop the **Memory by Category**
+  bars and the **Recent Memory Changes** feed (the dashboard fell back to a stripped-down
+  layout with empty space below). The Active Connections panel is now **height-bounded and
+  scrolls in place**, so the rich panels stay visible at the same terminal size.
+
+### Added
+
+- **Scrollable Active Connections panel.** When more remotes are connected than fit, the
+  panel shows a bold-amber `▲ N more above` / `▼ N more below — Shift+J` affordance and
+  scrolls within itself. Scroll with **`Shift+J` / `Shift+K`** (advertised; lowercase
+  `j`/`k` still navigate the agent cards), or the universal fallbacks **`PgDn`/`PgUp`**,
+  **`Ctrl+↓`/`Ctrl+↑`**, and the **mouse wheel** over the left box — so it works on any
+  keyboard, including mouseless Linux/SSH sessions and compact layouts without Page keys.
+
 ## [1.0.21] - 2026-06-06
 
 **npm + pip distribution channels, plus install-robustness hardening.**

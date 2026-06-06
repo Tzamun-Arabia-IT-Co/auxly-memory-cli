@@ -70,6 +70,12 @@ type dashboardModel struct {
 	activeAgentTab int         // 0 = Info, 1 = Recent Writes, 2 = Connected, 3 = Usage
 	gridCursor     int         // index into cards
 	cards          []agentCard // detected agent brands shown in the grid (dynamic)
+
+	// connScroll is the scroll offset into the Active Connections list. The panel
+	// is height-bounded so a long list of remotes can never push the rich layout
+	// (category bars + recent feed) off the fold; instead the list scrolls in place
+	// (mouse wheel over the left box, or PgUp/PgDn).
+	connScroll int
 }
 
 type dashboardRefreshMsg struct {
@@ -273,6 +279,11 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		if m.gridCursor >= len(m.cards) {
 			m.gridCursor = 0
 		}
+		// A disconnect can shrink the remote list below the scroll offset — re-clamp
+		// so the Active Connections window never points past the end.
+		if maxOff := m.connMaxScroll(m.bodyCompact()); m.connScroll > maxOff {
+			m.connScroll = maxOff
+		}
 		if m.reloaded && time.Since(m.reloadedAt) > 3*time.Second {
 			m.reloaded = false
 		}
@@ -341,6 +352,25 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
+		// Mouse wheel over the left diagnostics box scrolls the Active Connections
+		// list IN PLACE — the rest of the dashboard stays put. Gated to the left
+		// column's X range so wheeling over the agent grid doesn't move it.
+		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+			if m.selectedAgent == "" && !m.showUsagePopup && msg.X <= 47 {
+				maxOff := m.connMaxScroll(m.bodyCompact())
+				switch msg.Button {
+				case tea.MouseButtonWheelUp:
+					if m.connScroll > 0 {
+						m.connScroll--
+					}
+				case tea.MouseButtonWheelDown:
+					if m.connScroll < maxOff {
+						m.connScroll++
+					}
+				}
+			}
+			return m, nil
+		}
 		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
 			w := m.width
 			if w <= 0 {
@@ -521,6 +551,19 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		case "down", "j":
 			if m.gridCursor+cols < len(m.cards) {
 				m.gridCursor += cols
+			}
+		case "K", "pgup", "ctrl+up":
+			// Scroll the Active Connections list UP. Keyboard path for mouseless
+			// (Linux/SSH) sessions. Uppercase K/J is the advertised pair (lowercase
+			// j/k drive the agent grid); PgUp/PgDn and Ctrl+↑/↓ are universal aliases
+			// so it works regardless of keyboard layout.
+			if m.connScroll > 0 {
+				m.connScroll--
+			}
+		case "J", "pgdown", "ctrl+down":
+			// Scroll the Active Connections list DOWN.
+			if maxOff := m.connMaxScroll(m.bodyCompact()); m.connScroll < maxOff {
+				m.connScroll++
 			}
 		case "enter", " ":
 			if m.gridCursor >= 0 && m.gridCursor < len(m.cards) {
@@ -1397,6 +1440,57 @@ func (m dashboardModel) renderAgentCard(b agentCard, idx, gridCardW int) string 
 		Render(body)
 }
 
+// remoteGroupCount counts DISTINCT remote connections (same host+IP+provider
+// collapses to one, matching renderConnectionsSummary's ×N grouping) — the basis
+// for clamping connScroll.
+func (m dashboardModel) remoteGroupCount() int {
+	seen := make(map[string]bool)
+	n := 0
+	for _, s := range m.sessions {
+		if !s.Remote {
+			continue
+		}
+		key := strings.ToLower(s.Host + "|" + s.IP + "|" + s.Provider)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		n++
+	}
+	return n
+}
+
+// connVisibleCap is how many remote rows the Active Connections panel shows before
+// it scrolls. It's bounded by terminal height so the left column never grows tall
+// enough to force the whole dashboard into compact (which used to drop the category
+// bars + recent feed). Full mode spends 2 lines per remote, so its caps are smaller.
+func (m dashboardModel) connVisibleCap(compact bool) int {
+	if compact {
+		if m.height > 0 && m.height < 40 {
+			return 4
+		}
+		return 6
+	}
+	switch {
+	case m.height > 0 && m.height < 48:
+		return 3
+	case m.height > 0 && m.height < 60:
+		return 4
+	default:
+		return 5
+	}
+}
+
+// connMaxScroll is the largest valid connScroll offset for the current size: how
+// many remote rows sit below the visible window.
+func (m dashboardModel) connMaxScroll(compact bool) int {
+	over := m.remoteGroupCount() - m.connVisibleCap(compact)
+	if over < 0 {
+		return 0
+	}
+	return over
+}
+
 func (m dashboardModel) renderConnectionsSummary(compact bool) string {
 	dim := lipgloss.NewStyle().Foreground(ColorDim)
 	teal := lipgloss.NewStyle().Foreground(lipgloss.Color("#73CBAD"))
@@ -1440,7 +1534,33 @@ func (m dashboardModel) renderConnectionsSummary(compact bool) string {
 			groups = append(groups, remoteGroup{s: s, count: 1})
 		}
 
-		for _, g := range groups {
+		// Height-bounded window: show at most connVisibleCap rows and scroll the
+		// rest in place (▲/▼ affordances + mouse wheel / PgUp-PgDn), so a long remote
+		// list never tips the whole dashboard into compact mode.
+		visN := m.connVisibleCap(compact)
+		off := m.connScroll
+		if maxOff := len(groups) - visN; off > maxOff {
+			off = maxOff
+		}
+		if off < 0 {
+			off = 0
+		}
+		end := len(groups)
+		if visN > 0 && off+visN < end {
+			end = off + visN
+		}
+		window := groups
+		if len(groups) > visN && visN > 0 {
+			window = groups[off:end]
+		}
+		// Scroll affordances ride in bold amber so they stand out from the teal
+		// bullets / cyan hosts / dim details — the user needs to NOTICE the list scrolls.
+		scrollHint := yellow.Bold(true)
+		if off > 0 {
+			sb.WriteString(scrollHint.Render(fmt.Sprintf("▲ %d more above — Shift+K", off)) + "\n")
+		}
+
+		for _, g := range window {
 			s := g.s
 			host := s.Host
 			if host == "" {
@@ -1475,6 +1595,10 @@ func (m dashboardModel) renderConnectionsSummary(compact bool) string {
 				dim.Render(countSuffix),
 				dim.Render(detail),
 			))
+		}
+
+		if end < len(groups) {
+			sb.WriteString(scrollHint.Render(fmt.Sprintf("▼ %d more below — Shift+J", len(groups)-end)) + "\n")
 		}
 
 		if localCount > 0 {
