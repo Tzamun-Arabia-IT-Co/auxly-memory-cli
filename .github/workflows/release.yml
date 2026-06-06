@@ -57,3 +57,47 @@ jobs:
           GEMINI_CLIENT_SECRET: ${{ secrets.GEMINI_CLIENT_SECRET }}
           ANTIGRAVITY_CLIENT_ID: ${{ secrets.ANTIGRAVITY_CLIENT_ID }}
           ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.ANTIGRAVITY_CLIENT_SECRET }}
+
+  # Publish the npm + pip wrapper packages AFTER the release (and its signed
+  # checksum manifest) exist, so the wrappers can download+verify the matching
+  # binaries. Both packages just wrap the same GitHub release assets.
+  publish-packages:
+    needs: goreleaser
+    if: github.repository == 'Tzamun-Arabia-IT-Co/auxly-memory-cli'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release version (strip leading v)
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # --- npm (auxly-cli) ---
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish to npm
+        working-directory: npm
+        run: |
+          npm version "${{ steps.ver.outputs.version }}" --no-git-tag-version --allow-same-version
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # --- pip (auxly-cli) ---
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build + publish to PyPI
+        working-directory: pip
+        run: |
+          python -m pip install --upgrade build twine
+          V="${{ steps.ver.outputs.version }}"
+          sed -i "s/^version = .*/version = \"$V\"/" pyproject.toml
+          sed -i "s/^__version__ = .*/__version__ = \"$V\"/" auxly_cli/_runner.py
+          python -m build
+          python -m twine upload --non-interactive dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
