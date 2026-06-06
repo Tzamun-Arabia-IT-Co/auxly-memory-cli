@@ -156,6 +156,27 @@ irm https://auxly.io/cli.ps1 | iex
 brew install Tzamun-Arabia-IT-Co/homebrew-tap/auxly
 ```
 
+### npm
+
+```bash
+npm install -g auxly-cli
+```
+
+The npm package is a thin wrapper: on install it downloads the matching prebuilt
+binary for your platform and **verifies it against the signed checksum manifest**
+before vendoring it. Set `AUXLY_ALLOW_UNSIGNED=1` only if you knowingly install a
+release that predates signing.
+
+### pip
+
+```bash
+pip install auxly-cli
+```
+
+Same model as the npm package — the wheel fetches and **signature-verifies** the
+platform binary on first run, then caches it. `AUXLY_ALLOW_UNSIGNED=1` opts out of
+the strict check.
+
 ### Go
 
 ```bash
