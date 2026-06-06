@@ -25,13 +25,15 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.0.15
+## 🆕 What's New in Version 1.0.19
 
-**Full Windows support — validated end to end on a real Windows 11 host.** Connect *to* a Windows box, run a Windows box as a memory host, and connect a Windows box to your fleet.
+**One-click Windows boxes — add a Windows machine from the TUI and everything configures itself.** The host-push **Connect new** flow installs auxly, authorizes the key, and wires the box's agent (MCP + skills + statusline) end-to-end over SSH, with **no commands to run on the box**. The Windows-specific stalls and false "Done" headers are fixed, **`[u]` Update works on a live Windows box**, and relay-connected boxes show their host name in the statusline (no longer "Local").
 
-### 🪟 Connecting a Windows box (recommended path)
+### 🪟 Connecting a Windows box — two ways
 
-The reliable way to connect a Windows machine to a memory host:
+**Option A — from the host's TUI (one click):** open the **Remote** tab → **`c` Connect new** → point it at `user@windows-box`. Auxly handles install + key-auth + agent wiring automatically, then just restart the agent on the box.
+
+**Option B — on the box (also fully supported):**
 
 1. **On the host** (your Mac/Linux machine) — publish its memory and open the relay tunnel:
    ```bash
@@ -42,9 +44,8 @@ The reliable way to connect a Windows machine to a memory host:
    irm https://auxly.io/cli.ps1 | iex
    auxly connect auto          # or run the /auxly-remote-connect skill in your agent
    ```
-   Running the connect **on the box** is the most reliable path — auxly runs locally there, so there's no SSH session that can stall.
 
-> **Note on `auxly host setup --provision`:** the one-shot variant, where the host pushes install **and** wiring to the box over SSH, can intermittently stall on Windows due to a Windows OpenSSH session-lifetime quirk. As of **1.0.15** every over-SSH command is bounded by a timeout, so it **fails-fast instead of hanging** — but the on-box connect above is the recommended path.
+> **Under the hood (1.0.18):** the host-push install + readiness check run concurrently on an isolated SSH connection, so a lingering Windows installer session can't stall the connect; agent wiring and `[r] reconnect` run on a fresh post-install connection (so `auxly` resolves on the box's updated PATH); a failed provision now surfaces honestly instead of a green "Done"; and the Windows installer swaps the binary safely even while a live session is using it, so **`[u]` Update works on a connected Windows box**.
 
 ### Other Windows capabilities (all working)
 - **Connect *to* a Windows box** (`auxly connect`) — auto-detects OS, provisions via **PowerShell** instead of POSIX `sh` (the old `'sh' is not recognized` failure is gone), auto-installs a clean host.
