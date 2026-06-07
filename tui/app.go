@@ -134,8 +134,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// These sub-modes early-return, so refresh the viewport here too —
 			// otherwise the page (in the content viewport) keeps showing the stale
 			// frame and the wizard looks frozen even though its state advanced.
+			// The wizard is rendered at the bottom of the SSH view, so also scroll
+			// there — otherwise the viewport stays at the top showing the static
+			// list header while the form (below the fold) changes invisibly.
 			if m.vpReady {
 				m.syncViewport()
+				m.contentVP.GotoBottom()
 			}
 			return m, cmd
 		}
@@ -311,6 +315,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// gained/lost the scroll-hint line. Scroll offset is preserved.
 	if m.usesViewport() && m.vpReady {
 		m.syncViewport()
+		// The SSH wizard renders at the bottom of the view. When the wizard is
+		// open, keep the viewport pinned there so the form is always visible.
+		if m.screen == screenSSH && m.ssh.editingHost {
+			m.contentVP.GotoBottom()
+		}
 	}
 
 	return m, cmd
