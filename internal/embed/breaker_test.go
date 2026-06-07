@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -98,6 +99,70 @@ func TestBreakerAutoHalfOpenCloseOnSuccess(t *testing.T) {
 	}
 	if breakerOpen() {
 		t.Fatal("breaker should be closed after a successful Embed")
+	}
+}
+
+// TestBreakerHalfOpenSingleFlight proves that once the breaker half-opens (past
+// cooldown), only the FIRST caller of breakerAllow() is admitted; concurrent
+// callers are rejected until a record* call resolves the half-open slot.
+func TestBreakerHalfOpenSingleFlight(t *testing.T) {
+	resetBreaker()
+	t.Cleanup(resetBreaker)
+
+	breakerRecordFailure()
+	opened := breakerOpenedAt
+	breakerNow = func() time.Time { return opened.Add(breakerCooldown + time.Second) }
+
+	// Two sequential half-open claims: exactly one succeeds.
+	first := breakerAllow()
+	second := breakerAllow()
+	if !(first != second) {
+		t.Fatalf("half-open admitted both/neither caller: first=%v second=%v, want exactly one true", first, second)
+	}
+	if !first || second {
+		t.Fatalf("first caller should claim the half-open slot: first=%v second=%v", first, second)
+	}
+
+	// Still single-flight until resolved: another caller is rejected.
+	if breakerAllow() {
+		t.Fatal("breakerAllow admitted a third caller while half-open slot is in flight")
+	}
+
+	// A success closes the breaker and clears the in-flight slot.
+	breakerRecordSuccess()
+	if !breakerAllow() {
+		t.Fatal("breakerAllow should admit once the breaker is closed")
+	}
+}
+
+// TestBreakerHalfOpenConcurrent runs two goroutines racing on breakerAllow() the
+// instant the breaker half-opens; exactly one must be admitted.
+func TestBreakerHalfOpenConcurrent(t *testing.T) {
+	resetBreaker()
+	t.Cleanup(resetBreaker)
+
+	breakerRecordFailure()
+	opened := breakerOpenedAt
+	breakerNow = func() time.Time { return opened.Add(breakerCooldown + time.Second) }
+
+	var allowed int32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if breakerAllow() {
+				atomic.AddInt32(&allowed, 1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&allowed); got != 1 {
+		t.Fatalf("half-open admitted %d callers concurrently, want exactly 1", got)
 	}
 }
 

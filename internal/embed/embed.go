@@ -11,9 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/llm"
@@ -67,7 +70,11 @@ func New() *Client {
 		url = endpoint.EmbeddingsURL()
 	}
 
-	enabled := !endpoint.IsCloud || os.Getenv("AUXLY_EMBED_ALLOW_CLOUD") == "1"
+	// Gate on the LOCALITY of the EFFECTIVE embeddings URL (the one the request
+	// will actually hit), NOT on endpoint.IsCloud. A cloud override via
+	// AUXLY_EMBED_ENDPOINT / AUXLY_LLM_BASE / OLLAMA_HOST would otherwise slip the
+	// vault out to a public host without the opt-in.
+	enabled := isLocalEmbedURL(url) || os.Getenv("AUXLY_EMBED_ALLOW_CLOUD") == "1"
 
 	return &Client{
 		url:      url,
@@ -78,8 +85,41 @@ func New() *Client {
 	}
 }
 
-// Enabled reports whether embedding is permitted: false when the resolved
-// endpoint is cloud-backed without an explicit opt-in.
+// isLocalEmbedURL reports whether rawURL targets the local machine or a
+// private network — i.e. an endpoint where embedding the vault does not leave
+// the user's trust boundary. Loopback, RFC-1918 private ranges, *.local, and
+// unix-socket/empty hosts are local; everything else (public DNS / public IP)
+// is treated as cloud and requires AUXLY_EMBED_ALLOW_CLOUD=1.
+func isLocalEmbedURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false // unparseable -> fail closed (treat as cloud)
+	}
+
+	host := parsed.Hostname()
+	if host == "" {
+		return true // unix socket / relative URL -> no remote host
+	}
+
+	lower := strings.ToLower(host)
+	if lower == "localhost" ||
+		strings.HasSuffix(lower, ".local") ||
+		strings.HasSuffix(lower, ".localhost") {
+		return true
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		// IsPrivate covers RFC-1918 + IPv6 unique-local (fc00::/7).
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	}
+
+	// A hostname that isn't localhost/.local and doesn't parse as a private IP
+	// is treated as cloud (fail-closed).
+	return false
+}
+
+// Enabled reports whether embedding is permitted: false when the effective
+// embeddings URL is cloud-backed without an explicit opt-in.
 func (c *Client) Enabled() bool { return c.enabled }
 
 // Model returns the resolved embedding model id.
@@ -110,8 +150,9 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 		return nil, fmt.Errorf("embedding disabled (cloud endpoint without opt-in): %w", ErrUnavailable)
 	}
 
-	// Fail fast while the breaker is open: skip the HTTP attempt entirely.
-	if breakerOpen() {
+	// Fail fast while the breaker is open: skip the HTTP attempt entirely. When
+	// half-open, only the first caller is admitted (single-flight retest).
+	if !breakerAllow() {
 		return nil, fmt.Errorf("embedding circuit breaker open: %w", ErrUnavailable)
 	}
 

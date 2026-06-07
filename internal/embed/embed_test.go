@@ -87,6 +87,105 @@ func TestNewModelAndEnabled(t *testing.T) {
 	}
 }
 
+// TestIsLocalEmbedURL unit-tests the locality classifier directly: loopback,
+// RFC-1918 private ranges, link-local, *.local, and empty hosts are local;
+// public DNS names and public IPs (and unparseable hosts) are cloud.
+func TestIsLocalEmbedURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"localhost", "http://localhost:11434/v1/embeddings", true},
+		{"loopback ipv4", "http://127.0.0.1:8000/v1/embeddings", true},
+		{"loopback ipv6", "http://[::1]:8000/v1/embeddings", true},
+		{"private 192.168", "http://192.168.1.141:8000/v1/embeddings", true},
+		{"private 10.x", "http://10.0.0.5:11434/v1/embeddings", true},
+		{"private 172.16", "http://172.16.0.3:8000/v1/embeddings", true},
+		{"link-local 169.254", "http://169.254.10.10:8000/v1/embeddings", true},
+		{"dot local host", "http://foo.local:8080/v1/embeddings", true},
+		{"dot localhost host", "http://foo.localhost:8080/v1/embeddings", true},
+		{"empty host", "/v1/embeddings", true},
+		{"openai cloud", "https://api.openai.com/v1/embeddings", false},
+		{"public ip 8.8.8.8", "http://8.8.8.8/v1/embeddings", false},
+		{"bare public hostname", "https://some-public-host.example.com/v1/embeddings", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isLocalEmbedURL(tt.url); got != tt.want {
+				t.Errorf("isLocalEmbedURL(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEffectiveURLGate is the FIX-B regression suite: the cloud-exfiltration gate
+// must classify the EFFECTIVE embeddings URL (post AUXLY_EMBED_ENDPOINT /
+// AUXLY_LLM_BASE / OLLAMA_HOST override), not the resolved LLM provider's IsCloud
+// flag. A cloud URL without opt-in must yield Enabled()==false.
+func TestEffectiveURLGate(t *testing.T) {
+	resetBreaker()
+	t.Cleanup(resetBreaker)
+	tests := []struct {
+		name        string
+		env         map[string]string
+		wantEnabled bool
+	}{
+		{
+			name:        "embed endpoint openai without opt-in",
+			env:         map[string]string{"AUXLY_EMBED_ENDPOINT": "https://api.openai.com/v1/embeddings"},
+			wantEnabled: false,
+		},
+		{
+			name:        "embed endpoint openai with opt-in",
+			env:         map[string]string{"AUXLY_EMBED_ENDPOINT": "https://api.openai.com/v1/embeddings", "AUXLY_EMBED_ALLOW_CLOUD": "1"},
+			wantEnabled: true,
+		},
+		{
+			name:        "llm base public host without opt-in",
+			env:         map[string]string{"AUXLY_LLM_BASE": "https://some-public-host.example.com"},
+			wantEnabled: false,
+		},
+		{
+			name:        "llm base private host",
+			env:         map[string]string{"AUXLY_LLM_BASE": "http://192.168.1.141:8000"},
+			wantEnabled: true,
+		},
+		{
+			name:        "ollama host private",
+			env:         map[string]string{"OLLAMA_HOST": "http://10.0.0.5:11434"},
+			wantEnabled: true,
+		},
+		{
+			name:        "ollama host public without opt-in",
+			env:         map[string]string{"OLLAMA_HOST": "https://ollama.example.com"},
+			wantEnabled: false,
+		},
+		{
+			name:        "openai api key without opt-in regression",
+			env:         map[string]string{"OPENAI_API_KEY": "sk-x"},
+			wantEnabled: false,
+		},
+		{
+			name:        "default localhost",
+			env:         map[string]string{},
+			wantEnabled: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearEnv(t)
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			c := New()
+			if got := c.Enabled(); got != tt.wantEnabled {
+				t.Errorf("Enabled() = %v, want %v (url=%q)", got, tt.wantEnabled, c.url)
+			}
+		})
+	}
+}
+
 func TestProviderLocalDefault(t *testing.T) {
 	resetBreaker()
 	t.Cleanup(resetBreaker)
