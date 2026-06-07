@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/llm"
 )
 
 // providerKey canonicalizes a display agent name ("Claude Code / CLI", "Codex IDE
@@ -446,52 +448,16 @@ func (s *Store) runOrganizeModel(ctx context.Context, agentName string, agentPat
 		modelUsed = agentName
 		tokensUsed = (len(fullPrompt) + len(jsonContent)) / 4
 	} else {
-		// Run via direct LLM API calls (Ollama / OpenAI / Gemini)
-		apiURL := "http://localhost:11434/v1/chat/completions" // Ollama default
-		apiKey := ""
-		model := "qwen2.5-coder:7b" // Default fast local model
-
-		if os.Getenv("OPENAI_API_KEY") != "" {
-			apiURL = "https://api.openai.com/v1/chat/completions"
-			apiKey = os.Getenv("OPENAI_API_KEY")
-			model = "gpt-4o-mini"
-		} else if os.Getenv("GEMINI_API_KEY") != "" {
-			apiURL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-			apiKey = os.Getenv("GEMINI_API_KEY")
-			model = "gemini-1.5-flash"
-		} else if os.Getenv("OLLAMA_HOST") != "" {
-			apiURL = os.Getenv("OLLAMA_HOST") + "/v1/chat/completions"
-		} else if base := strings.TrimRight(os.Getenv("AUXLY_LLM_BASE"), "/"); base != "" {
-			// Any OpenAI-compatible endpoint (vLLM, LM Studio, a gateway, etc.).
-			apiURL = base + "/v1/chat/completions"
-		} else {
-			// Last resort: probe a local OpenAI-compatible server on the
-			// conventional localhost port (vLLM / LM Studio default). Stays on
-			// the loopback interface — never reaches out to the network.
-			client := &http.Client{Timeout: 800 * time.Millisecond}
-			if resp, err := client.Get("http://localhost:8000/v1/models"); err == nil {
-				resp.Body.Close()
-				apiURL = "http://localhost:8000/v1/chat/completions"
-			}
-		}
+		// Run via direct LLM API calls (Ollama / OpenAI / Gemini).
+		// Endpoint resolution (base URL, API key, default model) and the
+		// self-healing model selector are shared with internal/embed via the
+		// internal/llm package.
+		endpoint := llm.ResolveEndpoint()
+		apiURL := endpoint.ChatURL()
+		apiKey := endpoint.APIKey
 
 		// Dynamic self-healing model selector: query installed models on Ollama/vLLM to prevent 404s!
-		modelsURL := strings.Replace(apiURL, "/chat/completions", "/models", 1)
-		if client := (&http.Client{Timeout: 800 * time.Millisecond}); client != nil {
-			if resp, err := client.Get(modelsURL); err == nil {
-				defer resp.Body.Close()
-				type modelInfo struct {
-					ID string `json:"id"`
-				}
-				type modelsResp struct {
-					Data []modelInfo `json:"data"`
-				}
-				var mr modelsResp
-				if err := json.NewDecoder(resp.Body).Decode(&mr); err == nil && len(mr.Data) > 0 {
-					model = mr.Data[0].ID
-				}
-			}
-		}
+		model := llm.SelfHealModel(endpoint.ModelsURL(), endpoint.Model)
 
 		type msg struct {
 			Role    string `json:"role"`
