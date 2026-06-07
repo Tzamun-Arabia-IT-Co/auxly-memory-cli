@@ -1,0 +1,14 @@
+# Keep the build context small and free of local/dev artifacts.
+.git
+.github
+.claude
+.codex
+.gsd
+.auxly
+dist
+docs
+brand-logos
+*.md
+PROPOSALS.md
+*_test.go
+.DS_Store
