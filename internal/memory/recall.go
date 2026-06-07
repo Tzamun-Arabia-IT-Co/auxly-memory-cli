@@ -118,12 +118,20 @@ func (s *Store) refreshIndex(ctx context.Context, ix *Index, emb Embedder) {
 	if err != nil {
 		return
 	}
+	// Track every scope_key we actually process. Any stored scope NOT in this set
+	// is orphaned — a file deleted from the vault, or a global file shadowed by a
+	// workspace file of the same Name (List merges workspace-over-global, so the
+	// global's physical Path disappears here). Those chunks must be swept or stale/
+	// shadowed content could still be served via Load's bare-filename ACL.
+	processedScopes := make(map[string]bool, len(files))
 	for _, f := range files {
 		if f.Name == unifiedMemoryFile {
 			continue // hard exclusion — the aggregate is never indexed
 		}
+		processedScopes[f.Path] = true
 		s.refreshFile(ctx, ix, emb, f)
 	}
+	_ = ix.PruneScopesExcept(processedScopes)
 }
 
 // refreshFile reconciles one file's chunks with the index: embeds new chunks in a

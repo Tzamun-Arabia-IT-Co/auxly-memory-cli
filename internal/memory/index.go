@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no CGO) — enables cross-compilation
 )
@@ -66,6 +67,7 @@ func OpenIndex(path string, want IndexMeta) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open index db: %w", err)
 	}
+	applyConcurrencyPragmas(db)
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create index schema: %w", err)
@@ -87,6 +89,7 @@ func OpenIndexReadOnly(path string) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open index db: %w", err)
 	}
+	applyConcurrencyPragmas(db)
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ensure index schema: %w", err)
@@ -97,6 +100,15 @@ func OpenIndexReadOnly(path string) (*Index, error) {
 		return nil, fmt.Errorf("read index meta: %w", err)
 	}
 	return &Index{db: db, meta: meta}, nil
+}
+
+// applyConcurrencyPragmas switches the connection to WAL journaling and a 5s busy
+// timeout so multiple mcp-server processes sharing one embeddings.db can interleave
+// index writes/reads without instant "database is locked" failures. Best-effort:
+// a PRAGMA error is non-fatal (the index simply falls back to default behavior).
+func applyConcurrencyPragmas(db *sql.DB) {
+	_, _ = db.Exec("PRAGMA journal_mode=WAL;")
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
 }
 
 // Count returns the number of stored chunk vectors.
@@ -325,6 +337,83 @@ func (ix *Index) PruneExcept(scopeKey string, keep map[string]bool) error {
 		if _, err := ix.db.Exec("DELETE FROM chunks WHERE scope_key = ? AND hash = ?", scopeKey, h); err != nil {
 			return fmt.Errorf("prune chunk (%s, %s): %w", scopeKey, h, err)
 		}
+	}
+	return nil
+}
+
+// pruneBatchSize keeps each delete under SQLite's default 999-parameter limit
+// (one bound parameter per stale scope_key).
+const pruneBatchSize = 900
+
+// PruneScopesExcept deletes every chunk whose scope_key is not in keep.
+// Sweeps chunks orphaned by file deletion or workspace-over-global shadowing.
+//
+// An empty keep set clears the table outright. Otherwise it first reads the
+// DISTINCT scope_keys currently stored, computes the set absent from keep, and
+// deletes those stale scopes via bound parameters (never string-concatenated),
+// chunked to stay under the SQLite parameter limit. Deleting the stale set —
+// rather than a per-batch NOT IN over kept keys — keeps the result correct when
+// keep spans multiple batches.
+func (ix *Index) PruneScopesExcept(keep map[string]bool) error {
+	if len(keep) == 0 {
+		if _, err := ix.db.Exec("DELETE FROM chunks"); err != nil {
+			return fmt.Errorf("prune all chunks: %w", err)
+		}
+		return nil
+	}
+
+	stale, err := ix.staleScopes(keep)
+	if err != nil {
+		return err
+	}
+	for start := 0; start < len(stale); start += pruneBatchSize {
+		end := start + pruneBatchSize
+		if end > len(stale) {
+			end = len(stale)
+		}
+		if err := ix.deleteScopesIn(stale[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// staleScopes returns the DISTINCT stored scope_keys that are absent from keep.
+func (ix *Index) staleScopes(keep map[string]bool) ([]string, error) {
+	rows, err := ix.db.Query("SELECT DISTINCT scope_key FROM chunks")
+	if err != nil {
+		return nil, fmt.Errorf("scan scopes for prune: %w", err)
+	}
+	defer rows.Close()
+
+	var stale []string
+	for rows.Next() {
+		var sk string
+		if err := rows.Scan(&sk); err != nil {
+			return nil, fmt.Errorf("scan prune scope: %w", err)
+		}
+		if !keep[sk] {
+			stale = append(stale, sk)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate prune scopes: %w", err)
+	}
+	return stale, nil
+}
+
+// deleteScopesIn runs a single DELETE ... WHERE scope_key IN (?,?,...) for one
+// batch of stale keys, passing the keys as bound parameters.
+func (ix *Index) deleteScopesIn(keys []string) error {
+	placeholders := make([]string, len(keys))
+	args := make([]any, len(keys))
+	for i, k := range keys {
+		placeholders[i] = "?"
+		args[i] = k
+	}
+	query := "DELETE FROM chunks WHERE scope_key IN (" + strings.Join(placeholders, ",") + ")"
+	if _, err := ix.db.Exec(query, args...); err != nil {
+		return fmt.Errorf("prune stale scopes batch: %w", err)
 	}
 	return nil
 }
