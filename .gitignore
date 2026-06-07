@@ -76,3 +76,8 @@ pip/dist/
 pip/build/
 pip/*.egg-info/
 __pycache__/
+
+# Derived semantic index (rebuildable cache, never source of truth)
+.index/
+**/.index/
+*.embeddings.db

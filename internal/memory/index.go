@@ -78,6 +78,36 @@ func OpenIndex(path string, want IndexMeta) (*Index, error) {
 	return &Index{db: db, meta: want}, nil
 }
 
+// OpenIndexReadOnly opens an EXISTING index DB and reads its stored meta WITHOUT
+// reconciling/wiping. It is used for status reporting: it must never mutate or
+// invalidate the index. The schema is ensured (so Count works on a tables-present
+// DB) but no chunks are deleted regardless of meta.
+func OpenIndexReadOnly(path string) (*Index, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open index db: %w", err)
+	}
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ensure index schema: %w", err)
+	}
+	meta, _, err := readMeta(db)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("read index meta: %w", err)
+	}
+	return &Index{db: db, meta: meta}, nil
+}
+
+// Count returns the number of stored chunk vectors.
+func (ix *Index) Count() (int, error) {
+	var n int
+	if err := ix.db.QueryRow("SELECT COUNT(*) FROM chunks").Scan(&n); err != nil {
+		return 0, fmt.Errorf("count chunks: %w", err)
+	}
+	return n, nil
+}
+
 // reconcileMeta compares stored meta with want: a fresh DB just gets want
 // written; an exact match is left alone; any field difference wipes chunks and
 // overwrites meta.
