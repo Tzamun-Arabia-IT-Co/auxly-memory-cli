@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/embed"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/session"
@@ -95,7 +98,10 @@ type Server struct {
 	// true the per-remote file-sharing ACL (share) gates every read and write.
 	isRemote bool
 	share    *sharing.ClientShare
-	mu       sync.Mutex
+	// newEmbedder builds the embedder used by semantic recall. Injectable so tests
+	// can substitute a deterministic offline stub instead of hitting a live model.
+	newEmbedder func() memory.Embedder
+	mu          sync.Mutex
 }
 
 // NewServer creates a new MCP server.
@@ -113,6 +119,9 @@ func NewServer(memoryPath string) *Server {
 		outWriter:  os.Stdout,
 		sourceMeta: meta,
 	}
+	// Default embedder factory: a real local-first embed client. Tests override
+	// s.newEmbedder with a deterministic offline stub.
+	s.newEmbedder = func() memory.Embedder { return embed.New() }
 	// §10 per-remote file sharing: when serving an SSH-remote consumer, load that
 	// remote's sharing ACL from the host's clients.yaml (nil → safe default).
 	s.isRemote = meta.Source == "ssh-remote"
@@ -362,6 +371,17 @@ func (s *Server) getTools() []tool {
 			},
 		},
 		{
+			Name:        "auxly_memory_recall",
+			Description: "Semantic recall over the memory vault — find relevant memory by meaning, not exact keyword. Falls back to substring search when no embedding model is available.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]property{
+					"query": {Type: "string", Description: "Natural-language query to recall relevant memory by meaning"},
+				},
+				Required: []string{"query"},
+			},
+		},
+		{
 			Name:        "auxly_memory_stats",
 			Description: "Show memory usage statistics: total entries, writes today, writes per provider",
 			InputSchema: inputSchema{
@@ -512,6 +532,10 @@ func (s *Server) handleToolCall(req *jsonRPCRequest) {
 		query, _ := params.Arguments["query"].(string)
 		s.logActivity("", "search", "")
 		result = s.toolSearch(query)
+	case "auxly_memory_recall":
+		query, _ := params.Arguments["query"].(string)
+		s.logActivity("", "recall", "")
+		result = s.toolRecall(query)
 	case "auxly_memory_stats":
 		s.logActivity("", "stats", "")
 		result = s.toolStats()
@@ -731,6 +755,53 @@ func (s *Server) toolSearch(query string) toolResult {
 		}
 		shown++
 	}
+	if shown == 0 {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("No results for \"%s\"", query)}}}
+	}
+	return toolResult{Content: []toolContent{{Type: "text", Text: sb.String()}}}
+}
+
+// toolRecall performs semantic recall over the vault. ACL is enforced twice: once
+// as the index Load pre-filter (s.canRead, passed into Recall) so unshared vectors
+// are never scored, and again at render time (belt-and-suspenders). unified_memory.md
+// is hard-excluded at both layers. When no embedding model is available it falls
+// back to exact substring search so an offline box never hard-fails.
+func (s *Server) toolRecall(query string) toolResult {
+	if query == "" {
+		return toolResult{Content: []toolContent{{Type: "text", Text: "Error: query parameter required"}}, IsError: true}
+	}
+
+	emb := s.newEmbedder()
+	hits, err := s.store.Recall(context.Background(), query, 8, emb, s.canRead)
+	if errors.Is(err, embed.ErrUnavailable) {
+		// Offline / no model: fall back to exact substring search (still ACL-gated).
+		return s.toolSearch(query)
+	}
+	if err != nil {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}}, IsError: true}
+	}
+
+	// Group hits by file, re-applying canRead and the aggregate exclusion at render
+	// time as a second guard over the Load pre-filter.
+	var sb strings.Builder
+	currentFile := ""
+	shown := 0
+	for _, h := range hits {
+		if h.File == "unified_memory.md" || !s.canRead(h.File) {
+			continue
+		}
+		if h.File != currentFile {
+			sb.WriteString(fmt.Sprintf("\n📄 %s\n", h.File))
+			currentFile = h.File
+		}
+		if h.Heading != "" {
+			sb.WriteString(fmt.Sprintf("   ## %s\n", h.Heading))
+		}
+		snippet := strings.ReplaceAll(strings.TrimSpace(h.Text), "\n", "\n   ")
+		sb.WriteString(fmt.Sprintf("   %s\n   (lines %d–%d)\n", snippet, h.LineStart, h.LineEnd))
+		shown++
+	}
+
 	if shown == 0 {
 		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("No results for \"%s\"", query)}}}
 	}
