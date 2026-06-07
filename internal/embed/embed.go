@@ -43,8 +43,14 @@ type Client struct {
 	enabled  bool
 }
 
-// New resolves the endpoint and applies the cloud gate.
+// New resolves the endpoint and applies the cloud gate. When the per-process
+// circuit breaker is open it returns a disabled client immediately, skipping the
+// (potentially 800ms) endpoint probe in llm.ResolveEndpoint entirely.
 func New() *Client {
+	if breakerOpen() {
+		return &Client{enabled: false}
+	}
+
 	endpoint := llm.ResolveEndpoint()
 
 	model := os.Getenv("AUXLY_EMBED_MODEL")
@@ -104,6 +110,11 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 		return nil, fmt.Errorf("embedding disabled (cloud endpoint without opt-in): %w", ErrUnavailable)
 	}
 
+	// Fail fast while the breaker is open: skip the HTTP attempt entirely.
+	if breakerOpen() {
+		return nil, fmt.Errorf("embedding circuit breaker open: %w", ErrUnavailable)
+	}
+
 	body, err := json.Marshal(embedRequest{Model: c.model, Input: texts})
 	if err != nil {
 		return nil, fmt.Errorf("marshal embed request: %w: %w", err, ErrUnavailable)
@@ -124,19 +135,23 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 	client := &http.Client{Timeout: requestTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
+		breakerRecordFailure()
 		return nil, fmt.Errorf("embed request failed: %w: %w", err, ErrUnavailable)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		breakerRecordFailure()
 		return nil, fmt.Errorf("embed request status %d: %w", resp.StatusCode, ErrUnavailable)
 	}
 
 	var parsed embedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		breakerRecordFailure()
 		return nil, fmt.Errorf("decode embed response: %w: %w", err, ErrUnavailable)
 	}
 	if len(parsed.Data) == 0 {
+		breakerRecordFailure()
 		return nil, fmt.Errorf("embed response had no data: %w", ErrUnavailable)
 	}
 
@@ -154,5 +169,6 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 		}
 		vectors[i] = vec
 	}
+	breakerRecordSuccess()
 	return vectors, nil
 }

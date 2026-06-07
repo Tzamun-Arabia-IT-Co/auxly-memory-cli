@@ -29,6 +29,8 @@ func clearEnv(t *testing.T) {
 }
 
 func TestNewModelAndEnabled(t *testing.T) {
+	resetBreaker()
+	t.Cleanup(resetBreaker)
 	tests := []struct {
 		name        string
 		env         map[string]string
@@ -86,6 +88,8 @@ func TestNewModelAndEnabled(t *testing.T) {
 }
 
 func TestProviderLocalDefault(t *testing.T) {
+	resetBreaker()
+	t.Cleanup(resetBreaker)
 	clearEnv(t)
 	c := New()
 	if got := c.Provider(); got != "ollama_default" {
@@ -97,6 +101,8 @@ func TestProviderLocalDefault(t *testing.T) {
 // the explicit opt-in must NOT embed (would upload the vault). Embed must report
 // ErrUnavailable and return no vectors.
 func TestCloudBlockedPrivacy(t *testing.T) {
+	resetBreaker()
+	t.Cleanup(resetBreaker)
 	clearEnv(t)
 	t.Setenv("OPENAI_API_KEY", "sk-x")
 
@@ -115,6 +121,8 @@ func TestCloudBlockedPrivacy(t *testing.T) {
 }
 
 func TestEmbedSuccess(t *testing.T) {
+	resetBreaker()
+	t.Cleanup(resetBreaker)
 	clearEnv(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -174,6 +182,8 @@ func TestEmbedUnreachableNon200Empty(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			resetBreaker()
+			t.Cleanup(resetBreaker)
 			clearEnv(t)
 
 			var url string
@@ -202,6 +212,8 @@ func TestEmbedUnreachableNon200Empty(t *testing.T) {
 }
 
 func TestEmbedTimeout(t *testing.T) {
+	resetBreaker()
+	t.Cleanup(resetBreaker)
 	clearEnv(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
