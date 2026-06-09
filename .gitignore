@@ -81,3 +81,7 @@ __pycache__/
 .index/
 **/.index/
 *.embeddings.db
+
+# Local planning/ops scratch — not shipped
+PROPOSALS.md
+scripts/auxly-installs.sh
