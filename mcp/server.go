@@ -701,7 +701,7 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 		if s.logger != nil {
 			s.logger.LogWithSource(agentID, provider, "write", file, diff, reason, level, s.sourceMeta)
 		}
-		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(fmt.Sprintf("⏳ Change queued for approval: .pending/%s\nHuman must run 'auxly approve %s' to apply.", pendingName, pendingName))}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(fmt.Sprintf("⏳ Change queued for approval: .pending/%s\nHuman must run 'auxly approve %s' to apply.", pendingName, pendingName))}}}
 	}
 
 	// Auto trust: write directly
@@ -719,12 +719,8 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 		s.logger.LogWithSource(agentID, provider, "write", file, diff, reason, level, s.sourceMeta)
 	}
 
-	msgText := fmt.Sprintf("✅ Your Auxly memory has been updated! Written to %s.\n\nAuxly Unified Memory has been re-compiled in the background.", file)
-	if data, err := s.store.View("unified_memory.md"); err == nil {
-		msgText += "\n\nHere is the updated global memory summary for your context sync:\n---\n" + data
-	}
-
-	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(msgText)}}}
+	msgText := fmt.Sprintf("✅ Synced → %s.", file)
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(msgText)}}}
 }
 
 func (s *Server) toolSearch(query string) toolResult {
@@ -863,6 +859,16 @@ func describeRemote(meta audit.SourceMeta) string {
 	return strings.Join(parts, ", ")
 }
 
+// withSyncFooter is the compact footer for write-confirmation responses. It omits
+// the full taxonomy (already loaded via auxly_skill_init) to keep tool responses
+// small and avoid bloating the model's context window on every auxly_skill_sync call.
+func (s *Server) withSyncFooter(text string) string {
+	if s.isRemote {
+		return text + s.remoteScopeFooter()
+	}
+	return text + "\n\n---\n🧠 **Auxly Agent Sync Active:** Proactively call `auxly_skill_sync` when you learn new facts."
+}
+
 // withFooter appends the standard Auxly sync reminder + category guide to a tool
 // reply. For a LOCAL session it shows the full taxonomy. For an SSH-REMOTE peer it
 // renders an ACL-scoped footer that lists ONLY the files that remote may read or
@@ -987,10 +993,10 @@ func (s *Server) toolSkillMemory() toolResult {
 	}
 
 	if !readAny {
-		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter("⚠️ No memory files populated yet. Type `/auxly-sync [content]` or paste your onboarding prompt to save your first memory!")}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter("⚠️ No memory files populated yet. Type `/auxly-sync [content]` or paste your onboarding prompt to save your first memory!")}}}
 	}
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(sb.String())}}}
 }
 
 func (s *Server) toolSkillMax() toolResult {
@@ -1032,7 +1038,8 @@ the correct files.
 
 ` + memory.RenderForPrompt()
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(prompt)}}}
+	// withSyncFooter: taxonomy is already in the body above; no need to repeat it.
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(prompt)}}}
 }
 
 func (s *Server) toolSkillSync(content, category, scope string) toolResult {
@@ -1068,7 +1075,7 @@ func (s *Server) toolSkillPending(action, targetID string) toolResult {
 	if action == "" || action == "list" {
 		res := s.toolPendingList()
 		if !res.IsError && len(res.Content) > 0 {
-			res.Content[0].Text = s.withFooter(res.Content[0].Text)
+			res.Content[0].Text = s.withSyncFooter(res.Content[0].Text)
 		}
 		return res
 	}
@@ -1087,7 +1094,7 @@ func (s *Server) toolSkillPending(action, targetID string) toolResult {
 			"  • the Auxly dashboard → Approvals tab, or\n"+
 			"  • their terminal:  auxly %s %s\n\n"+
 			"Over MCP this tool only LISTS pending entries.", action, targetID, action, targetID)
-		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(msg)}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(msg)}}}
 	}
 
 	return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: action %q is not available over MCP. The only MCP action is 'list'; approve/reject are human-only (run 'auxly approve <id>' / 'auxly reject <id>' locally).", action)}}, IsError: true}
@@ -1114,7 +1121,7 @@ func (s *Server) toolSkillStatus() toolResult {
 		sb.WriteString(fmt.Sprintf("• **Total Memory Entries:** %d\n", stats.TotalEntries))
 	}
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(sb.String())}}}
 }
 
 func (s *Server) toolSkillRemoteConnect() toolResult {
@@ -1141,7 +1148,7 @@ func (s *Server) toolSkillRemoteConnect() toolResult {
 		sb.WriteString(fmt.Sprintf("• **Memory host (vault lives here):** %s\n", memHost))
 		sb.WriteString(fmt.Sprintf("• **This machine (connected client):** %s (%s)\n", client, remoteOS))
 		sb.WriteString(fmt.Sprintf("\nReads and writes are centralized and audited on **%s**'s Auxly vault, which may be shared with other agents. No memory is stored locally on this machine.", memHost))
-		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(sb.String())}}}
 	}
 
 	sb.WriteString("• **Source:** local vault\n\n")
@@ -1160,12 +1167,12 @@ func (s *Server) toolSkillRemoteConnect() toolResult {
 			sb.WriteString(fmt.Sprintf("```\nauxly connect auto %s\n```\n", offers[0]))
 		}
 		sb.WriteString("\nAfter the agent restarts, reads/writes go to the host's central, audited vault.")
-		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(sb.String())}}}
 	}
 
 	sb.WriteString("This session is using a LOCAL Auxly vault, and no remote host is offered on this machine.\n")
 	sb.WriteString("To link one, run `auxly host setup` on the memory host (it publishes an offer here), then `auxly connect auto`.")
-	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(sb.String())}}}
 }
 
 // detectRelayOfferNames lists the names of relay offers published in
@@ -1258,11 +1265,11 @@ func (s *Server) toolSkillForget(query string) toolResult {
 	}
 
 	if deletedCount == 0 {
-		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(fmt.Sprintf("No matching facts or bullets found in memory for query: \"%s\"", query))}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(fmt.Sprintf("No matching facts or bullets found in memory for query: \"%s\"", query))}}}
 	}
 
 	sb.WriteString(fmt.Sprintf("✓ Successfully pruned %d obsolete statement(s) from memory vault.", deletedCount))
-	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(sb.String())}}}
 }
 
 // toolSkillLearn is the inbound "read & internalize" directive. It loads vault
@@ -1307,7 +1314,7 @@ func (s *Server) toolSkillLearn(folder, topic string) toolResult {
 		sb.WriteString("ABSORB this memory and operate from it for the rest of the session. Internalize these facts and behave as if you already knew them — do not ask the user to repeat what is below.\n\n")
 		sb.WriteString(fmt.Sprintf("### 📄 %s\n\n", fileName))
 		sb.WriteString(content)
-		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(sb.String())}}}
 	}
 
 	// Whole-vault internalize: read every populated file in canonical order.
@@ -1357,10 +1364,10 @@ func (s *Server) toolSkillLearn(folder, topic string) toolResult {
 	}
 
 	if !readAny {
-		return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter("⚠️ No memory files populated yet. Use `/auxly-sync [content]` to save your first memory.")}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter("⚠️ No memory files populated yet. Use `/auxly-sync [content]` to save your first memory.")}}}
 	}
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(sb.String())}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(sb.String())}}}
 }
 
 // toolSkillBootstrap generates a copyable onboarding block to PASTE INTO ANOTHER

@@ -25,20 +25,26 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.0.20
+## 🆕 What's New in Version 1.1.0
 
-**Security hardening — the whole codebase audited, every Critical / High / Medium finding closed.** An independent security audit hardened the MCP trust boundary, path handling, remote/SSH execution, software distribution, and on-disk permissions — with **no change to how Auxly works for you**, verified by a live functional smoke test and multiple independent regression reviews.
+**Semantic Recall — find relevant memory by meaning, not keyword.**
 
-### 🔒 What changed
-- **Trust boundary tightened.** A connected agent can no longer spoof another provider's identity to escape its `trust.yaml` level, and **agents can't approve their own pending writes** — approval is human-only (CLI/TUI).
-- **Path & symlink escapes blocked.** A shared `safepath` guard refuses any vault/workspace path that climbs out of its root or follows a symlink outside the vault; legitimate relative subpaths still work.
-- **Remote SSH execution hardened.** `ssh_args` and the host-binary path are validated against config-loading / command-executing options (`ProxyCommand`, `Include`, `Control*`, `-F`/`-S`, …) and shell-metacharacter injection. Your normal profiles — and Windows binary paths — are unaffected.
-- **Signed, verifiable releases.** Release checksums are signed with **minisign**; `auxly update` and both install scripts verify the downloaded binary against the signed manifest (public key pinned into the binary) before trusting it. Rolled out in stages so existing installs keep working; enforce strictly with `AUXLY_REQUIRE_SIGNATURE=1`.
+A new `auxly_memory_recall` MCP tool searches your vault by semantic similarity. Ask "when did I last work on the payment flow?" or "what do I know about my staging server?" and Auxly surfaces the most relevant snippets with file + line provenance — not just exact-match keyword hits.
 
-### ✨ Also fixed
-- **The statusline usage meter no longer freezes at "⧗ as of HH:MM".** The post-429 back-off is now persisted across refreshes, so a rate-limited provider self-heals instead of getting stuck on last-good — and Auxly stops re-probing your token while it's throttled.
+### 🔍 How it works
 
-See the [CHANGELOG](CHANGELOG.md) for the full list — including 1.0.19's one-click Windows boxes (add a Windows machine from the TUI and it installs + wires itself over SSH).
+- **Local vector index.** Memory is chunked by heading, embedded into vectors, and stored in a local `semantic.db` alongside your audit log. Built lazily on first use; rebuild explicitly with `auxly index rebuild`.
+- **Local embedding by default.** Runs against a local model (Ollama `nomic-embed-text`) with a 500 ms timeout and a per-process circuit breaker — if the model is offline, recall falls back to substring search instantly with no latency penalty.
+- **Cloud embedding opt-in.** Set `AUXLY_EMBED_ALLOW_CLOUD=1` to route embeddings to an OpenAI-compatible cloud endpoint. Off by default — your memory never leaves your machine unless you explicitly enable it.
+- **ACL-enforced.** The same per-file sharing rules that govern keyword search filter the vector index at load time *and* at render time — remote/shared sessions can never surface files they're not allowed to read.
+
+### 🛠️ Also in this release
+
+- **`auxly index rebuild` / `auxly index status`** — inspect or rebuild the semantic index from the CLI without triggering a recall.
+- **SSH connect-wizard no longer blanks out** — the form repaints correctly on keypress; a stray `tea.ClearScreen` was firing on every input event.
+- **MCP sync responses ~100 k tokens leaner per session** — write confirmations no longer echo the full vault back to the agent; non-onboarding tool responses use a compact footer instead of the full taxonomy table.
+
+See the [CHANGELOG](CHANGELOG.md) for the full list — including 1.0.22's scrollable Active Connections panel and 1.0.20's security hardening and signed releases.
 
 ---
 
@@ -126,7 +132,7 @@ flowchart LR
 3. **Memory vault** — accepted writes land as Markdown in `~/.auxly/memory/`, optionally auto-committed to Git.
 4. **Audit** — every access is recorded to an append-only JSON Lines log and indexed in SQLite for instant querying in the dashboard.
 
-The only "database" anywhere is a local SQLite file used purely to index the audit log. There are **no embeddings, no background daemon, and no network calls** in normal operation.
+The only persistent files are Markdown in `~/.auxly/memory/` and two local SQLite indexes — the audit log and (optionally) the semantic index. There are **no background daemons** and **no mandatory network calls** — semantic recall uses a local embedding model by default and cloud is opt-in.
 
 ---
 
@@ -355,7 +361,7 @@ Pending writes show up as reviewable diffs in the dashboard's **Approvals** tab 
 | `/auxly-bootstrap` | Generates a copyable onboarding block to paste into a tool that doesn't have Auxly installed (e.g. ChatGPT). |
 | `/auxly-remote-connect` | Detects and connects this machine to a remote Auxly memory host (or reports the active link). |
 
-Under the hood these map to MCP tools (`auxly_skill_sync`, `auxly_memory_read`, `auxly_memory_write`, `auxly_memory_search`, `auxly_pending_list`, …) that any MCP client can call directly.
+Under the hood these map to MCP tools (`auxly_skill_sync`, `auxly_memory_read`, `auxly_memory_write`, `auxly_memory_search`, `auxly_memory_recall`, `auxly_pending_list`, …) that any MCP client can call directly. `auxly_memory_recall` is the semantic search tool — call it directly from any MCP client for meaning-based lookup without running a skill.
 
 ### Keeping your memory in sync — run these yourself
 
@@ -698,6 +704,8 @@ Auxly is a standard **stdio MCP server**, so *any* MCP-capable tool can share th
 | `auxly connect …` | Link this machine to a remote memory host |
 | `auxly host …` | Serve this machine's memory to other boxes |
 | `auxly usage show \| auth` | Live agent quota (opt-in) |
+| `auxly index rebuild` | Wipe and rebuild the semantic recall index from the vault |
+| `auxly index status` | Show semantic index stats (provider, model, chunk count) |
 | `auxly mcp-server` | Run the MCP server (invoked by agents) |
 | `auxly update` | Self-update to the latest release |
 
@@ -728,6 +736,8 @@ All optional — Auxly creates and manages these for you; edit them by hand any 
 | `AUXLY_INSTALL_BASE` | Override the download/update base (default `https://auxly.io`) |
 | `AUXLY_PROVIDER` | Override the provider id for a write |
 | `AUXLY_LLM_BASE` | Override the LLM endpoint used by smart sync |
+| `AUXLY_EMBED_BASE` | Override the embedding endpoint for semantic recall |
+| `AUXLY_EMBED_ALLOW_CLOUD` | Set to `1` to allow a cloud embedding endpoint (off by default) |
 
 Auto-update polls `auxly.io/version` and, when a newer release exists, prints a one-line notice; `auxly update` performs a one-click self-update from the official release channel.
 

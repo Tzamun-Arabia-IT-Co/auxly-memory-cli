@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-09
+
+**Semantic Recall — find relevant memory by meaning, not keyword.**
+
+### Added
+
+- **`auxly_memory_recall` MCP tool.** A new tool that surfaces the most relevant
+  memory snippets for a natural-language query using cosine similarity over a local
+  vector index — ask "what do I remember about my staging server?" and Auxly returns
+  attributed chunks (file + line range), not just exact keyword hits. When no embedding
+  model is available the tool falls back to substring search so it always returns
+  something useful, even fully offline.
+
+- **Local SQLite BLOB vector index.** Memory is chunked by heading, content-hashed, and
+  stored as embedding vectors in `semantic.db` alongside the audit log. The index is
+  built lazily on first recall call — no setup required. Explicit rebuild:
+  `auxly index rebuild`. Inspect with `auxly index status` (provider, model, dim,
+  chunk count).
+
+- **Markdown chunker.** Splits memory files into heading-delimited chunks with content
+  hashing and line-range provenance, so recall results can be attributed back to their
+  exact location in the source file.
+
+- **Embedding client — local-first with cloud opt-in.** Runs against a local embedding
+  model (Ollama `nomic-embed-text` by default) with a 500 ms timeout. Cloud endpoint
+  requires explicit opt-in (`AUXLY_EMBED_ALLOW_CLOUD=1`). Off by default — memory never
+  leaves your machine unless you enable it.
+
+- **Per-process circuit breaker.** If the embedding model is slow or offline the circuit
+  breaker opens after the first timeout and recall falls back to substring search for the
+  rest of the process lifetime — no latency penalty on subsequent calls.
+
+- **`auxly index rebuild` / `auxly index status`.** CLI commands to wipe-and-rebuild the
+  semantic index from scratch, or to inspect the current index (provider, model, dimension,
+  chunk count) without triggering a rebuild.
+
+- **ACL on recall.** The same per-file `canRead` guard that governs keyword search
+  pre-filters the vector index at load time *and* at render time — remote/shared sessions
+  can never surface files they aren't allowed to read; `unified_memory.md` is
+  hard-excluded at both layers.
+
+### Fixed
+
+- **Orphaned and shadowed chunks pruned on write.** When a memory file is updated, stale
+  vectors for overwritten or removed content are removed in the same transaction.
+  WAL mode is now enabled on the semantic index for better concurrent read throughput.
+
+- **Cloud embed calls gated on effective URL host.** The circuit breaker no longer trips
+  on localhost overrides (`AUXLY_LLM_BASE=http://localhost/…`); prevents accidental
+  cloud calls in dev/test environments.
+
+- **SSH connect-wizard viewport repaints on keypress.** The connect form no longer blanks
+  out while the user types — a `tea.ClearScreen` was firing on every input event, now it
+  only fires when the wizard mode changes.
+
+- **MCP sync responses are ~100 k tokens leaner per session.** Write confirmations no
+  longer echo the full `unified_memory.md` (47 KB / ~12 k tokens) back to the agent on
+  every write. All non-onboarding, non-bootstrap tool responses now use a compact
+  one-line footer instead of the full taxonomy table (~225 tokens), cutting token
+  accumulation by ~100 k tokens across a typical `/auxly-max` session.
+
 ## [1.0.22] - 2026-06-07
 
 **Dashboard: the Active Connections list no longer hides the rich panels — it scrolls in place.**
