@@ -1491,17 +1491,15 @@ func runConnectAuto(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("🔗 Connecting this machine to %s's memory (via the relay tunnel)...\n", offer.Name)
 
-	// Reachability + key check — never prompt. If auth fails, guide and stop.
+	// Reachability + key check. If auth fails, warn but wire anyway — on a
+	// reconnect the tunnel may be temporarily down; the profile/skills/statusline
+	// are all local writes that activate once the tunnel comes back up.
 	if !sshKeyAuthOK(p) {
-		pub, perr := localPubKey()
-		if perr != nil {
-			return fmt.Errorf("can't reach the host and couldn't read this box's public key: %w", perr)
+		fmt.Printf("   ⚠ Can't reach %s via tunnel yet — wiring anyway (will connect once the tunnel is back up).\n", offer.Name)
+		if pub, perr := localPubKey(); perr == nil && pub != "" {
+			fmt.Println("   (First time? Add this box's public key to the host's ~/.ssh/authorized_keys:)")
+			fmt.Printf("   %s\n", pub)
 		}
-		fmt.Println("⚠️  This machine isn't authorized on the host yet (one-time step).")
-		fmt.Println("   Add this box's public key to the host's ~/.ssh/authorized_keys:")
-		fmt.Printf("   %s\n", pub)
-		fmt.Println("   Then run `auxly connect auto` again.")
-		return fmt.Errorf("ssh key not yet authorized on the host")
 	}
 
 	// Retry across the tunnel-startup window; wire even if it never answers (the

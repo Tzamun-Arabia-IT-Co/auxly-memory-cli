@@ -255,6 +255,21 @@ type hostInfo struct {
 	ReversePort    int    `yaml:"reverse_port"`
 	HostUser       string `yaml:"host_user"`
 	RelayCount     int    `yaml:"-"` // number of relays served (1 unless multi-relay)
+	TunnelUp       bool   `yaml:"-"` // a reverse-tunnel process is actually running
+}
+
+// hostTunnelsLive reports whether at least one reverse-tunnel process
+// (`ssh … -R <port>:localhost:…`) is currently running on this machine. host.yaml
+// existing only means this box is CONFIGURED as a relay host — the tunnels are a
+// separate keep-alive process that can be down (crashed, never started, killed on
+// logout). Checking the live process avoids the TUI showing "● serving" while every
+// box is actually cut off.
+func hostTunnelsLive() bool {
+	out, err := exec.Command("pgrep", "-f", "ssh.*-R [0-9].*:localhost:").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
 }
 
 // clientRow mirrors an entry in ~/.auxly/clients.yaml — a remote box this machine
@@ -313,6 +328,7 @@ func readHostInfo() (hostInfo, bool) {
 	if yaml.Unmarshal(data, &list) == nil && len(list.Relays) > 0 {
 		h := list.Relays[0]
 		h.RelayCount = len(list.Relays)
+		h.TunnelUp = hostTunnelsLive()
 		return h, true
 	}
 	// Legacy single-relay form.
@@ -321,6 +337,7 @@ func readHostInfo() (hostInfo, bool) {
 		return hostInfo{}, false
 	}
 	h.RelayCount = 1
+	h.TunnelUp = hostTunnelsLive()
 	return h, true
 }
 
@@ -1662,15 +1679,23 @@ func (m sshModel) View() string {
 	if m.hostOK {
 		// ── This machine as a HOST + the boxes connected to it ───────
 		ok := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess)
+		warn := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning)
 		relay := m.host.Rendezvous
 		if m.host.RendezvousPort != 0 && m.host.RendezvousPort != 22 {
 			relay = fmt.Sprintf("%s:%d", relay, m.host.RendezvousPort)
 		}
-		lines = append(lines, cyan.Render("THIS MACHINE IS A MEMORY HOST")+"  "+ok.Render("● serving"))
+		status := ok.Render("● serving")
+		if !m.host.TunnelUp {
+			status = warn.Render("● tunnels down")
+		}
+		lines = append(lines, cyan.Render("THIS MACHINE IS A MEMORY HOST")+"  "+status)
 		if m.host.RelayCount > 1 {
 			lines = append(lines, "  "+dim.Render(fmt.Sprintf("Relays  %d boxes", m.host.RelayCount))+dim.Render("   each tunnels back to this machine (independent)"))
 		} else {
 			lines = append(lines, "  "+dim.Render("Relay   ")+relay+dim.Render(fmt.Sprintf("   reverse port %d → local :22", m.host.ReversePort)))
+		}
+		if !m.host.TunnelUp {
+			lines = append(lines, "  "+warn.Render("⚠ no reverse tunnel running")+dim.Render(" — boxes can't reach your memory. Start it with ")+accent.Render("auxly host up"))
 		}
 		lines = append(lines, "  "+dim.Render("Boxes below use your memory through it.  Down it with ")+accent.Render("auxly host down"))
 		lines = append(lines, "")

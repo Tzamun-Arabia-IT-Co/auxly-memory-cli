@@ -244,6 +244,11 @@ func runHostReconnect(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The box reaches this machine's memory THROUGH this machine's reverse tunnel.
+	// If that tunnel is down, the box's `connect auto` can't reach localhost:2222 and
+	// reconnect fails — so bring the host keep-alive up first. This makes `[r]`
+	// self-healing instead of failing precisely when the tunnel is what's broken.
+	ensureHostTunnelUp()
 	fmt.Printf("🔗 Reconnecting %s (%s)...\n", c.Name, c.Target)
 	// Fresh connection (withoutMux): never reuse a ControlMaster that may have been
 	// opened before auxly was installed on the box (its session carries the stale
@@ -256,6 +261,26 @@ func runHostReconnect(cmd *cobra.Command, args []string) error {
 	fmt.Printf("   ✓ Re-wired %s to this machine's memory\n", c.Name)
 	fmt.Println("   👉 Restart the agent on that box to load the link.")
 	return nil
+}
+
+// ensureHostTunnelUp brings this machine's reverse-tunnel keep-alive online if it
+// isn't already, so a box being reconnected can actually reach the memory through
+// it. Best-effort: it only acts when this machine is configured as a host, and never
+// blocks the reconnect — a failure here is reported but the wiring proceeds (the
+// tunnel may come back on its own / via `auxly host up`).
+func ensureHostTunnelUp() {
+	if _, ok, err := loadHostConfig(); err != nil || !ok {
+		return // not a host — nothing to keep alive
+	}
+	if live, _ := keepAliveStatus(); live {
+		return // service already loaded; launchd/systemd respawns the tunnel itself
+	}
+	fmt.Println("🛰️  Host tunnel was down — starting the keep-alive so the box can reach your memory...")
+	if err := installKeepAlive(); err != nil {
+		fmt.Printf("   ⚠ Couldn't start the host tunnel automatically (%v) — run `auxly host up` once.\n", err)
+		return
+	}
+	fmt.Println("   ✓ Host tunnel keep-alive started")
 }
 
 // forgetDisconnectTimeout bounds the best-effort remote disconnect so a slow or
