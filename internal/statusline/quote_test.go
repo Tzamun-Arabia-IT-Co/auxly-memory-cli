@@ -18,11 +18,11 @@ func TestQuoteIfNeeded(t *testing.T) {
 	}
 
 	quoted := []string{
-		`/opt/my apps/auxly`,                              // space (old trigger, still works)
-		`C:\Users\R&D\auxly.exe`,                          // cmd.exe '&'
-		`C:\Users\a(b)\auxly.exe`,                         // parens
-		`C:\Users\x^y\auxly.exe`,                          // caret
-		`C:\Users\100%\auxly.exe`,                         // percent
+		`/opt/my apps/auxly`,      // space (old trigger, still works)
+		`C:\Users\R&D\auxly.exe`,  // cmd.exe '&'
+		`C:\Users\a(b)\auxly.exe`, // parens
+		`C:\Users\x^y\auxly.exe`,  // caret
+		`C:\Users\100%\auxly.exe`, // percent
 	}
 	for _, s := range quoted {
 		got := quoteIfNeeded(s)
