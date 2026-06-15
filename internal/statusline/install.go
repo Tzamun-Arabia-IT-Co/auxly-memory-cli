@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -102,6 +103,15 @@ func (t Target) selfCommand(wrap bool) string {
 	exe, err := os.Executable()
 	if err != nil || exe == "" {
 		exe = "auxly"
+	}
+	if runtime.GOOS == "windows" {
+		// The agent runs statusLine.command through a shell. Claude Code on Windows
+		// uses a POSIX shell (sh/bash via Git Bash), where backslashes are escape
+		// characters that mangle a Windows path (C:\Users\… → C:Users…) so the
+		// command silently fails and the statusline renders BLANK — even though the
+		// exe runs fine when invoked directly. Forward slashes are accepted by
+		// cmd.exe, PowerShell, AND sh, so normalize them for a shell-agnostic command.
+		exe = strings.ReplaceAll(exe, "\\", "/")
 	}
 	provider := t.providerFlag
 	if provider == "" {
