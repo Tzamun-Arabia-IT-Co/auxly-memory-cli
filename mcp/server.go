@@ -590,11 +590,25 @@ func (s *Server) handleToolCall(req *jsonRPCRequest) {
 	s.sendResult(req.ID, result)
 }
 
+var (
+	providerOnce   sync.Once
+	cachedProvider string
+)
+
 // getProviderFromParent infers this server's provider from its own process
 // ancestry, delegating to the shared session attribution helpers so the server
 // and the dashboard always agree on which agent a process belongs to.
+//
+// The result is invariant for the process lifetime (own PID + ancestry never
+// change), so it is computed exactly once. This is critical on Windows, where
+// session.AncestorCommands cold-starts a PowerShell + CIM query on every call —
+// previously hit on startup, on every logActivity, and 3× per skill_sync,
+// stalling strict MCP clients into closing the connection.
 func getProviderFromParent() string {
-	return session.InferProvider(session.AncestorCommands(os.Getpid()))
+	providerOnce.Do(func() {
+		cachedProvider = session.InferProvider(session.AncestorCommands(os.Getpid()))
+	})
+	return cachedProvider
 }
 
 // resolveProvider determines this server's provider from its own environment

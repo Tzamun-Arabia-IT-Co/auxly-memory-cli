@@ -277,10 +277,32 @@ func SelfUpdate() (string, error) {
 		os.Remove(tmpPath)
 		return "", err
 	}
+	if runtime.GOOS == "windows" {
+		// A running .exe is locked on Windows: you cannot rename another file OVER
+		// it (ERROR_ACCESS_DENIED / sharing violation), but you CAN rename the live
+		// image itself out of the way — the same trick install.ps1 uses. Move it
+		// aside under a unique name (so a still-locked .old from a prior update can't
+		// block the move), drop the new binary into the freed name, and roll back if
+		// the install fails so the box is never left with no binary.
+		old := fmt.Sprintf("%s.old-%d", exe, time.Now().UnixNano())
+		if err := os.Rename(exe, old); err != nil {
+			os.Remove(tmpPath)
+			return "", fmt.Errorf("could not move aside %s (close any agent using it, then retry): %w", exe, err)
+		}
+		if err := os.Rename(tmpPath, exe); err != nil {
+			_ = os.Rename(old, exe) // roll back so the box keeps a working auxly
+			os.Remove(tmpPath)
+			return "", fmt.Errorf("could not install update to %s: %w", exe, err)
+		}
+		_ = os.Remove(old) // best-effort; stays locked until this process exits, harmless
+		return exe, nil
+	}
 	if err := os.Rename(tmpPath, exe); err != nil {
 		os.Remove(tmpPath)
 		return "", fmt.Errorf("could not replace %s (try re-running with sudo): %w", exe, err)
 	}
-	_ = exec.Command("xattr", "-c", exe).Run() // best-effort: clear macOS quarantine
+	if runtime.GOOS == "darwin" {
+		_ = exec.Command("xattr", "-c", exe).Run() // best-effort: clear macOS quarantine
+	}
 	return exe, nil
 }

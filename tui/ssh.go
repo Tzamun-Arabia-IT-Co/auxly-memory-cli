@@ -258,19 +258,14 @@ type hostInfo struct {
 	TunnelUp       bool   `yaml:"-"` // a reverse-tunnel process is actually running
 }
 
-// hostTunnelsLive reports whether at least one reverse-tunnel process
-// (`ssh … -R <port>:localhost:…`) is currently running on this machine. host.yaml
-// existing only means this box is CONFIGURED as a relay host — the tunnels are a
-// separate keep-alive process that can be down (crashed, never started, killed on
-// logout). Checking the live process avoids the TUI showing "● serving" while every
-// box is actually cut off.
-func hostTunnelsLive() bool {
-	out, err := exec.Command("pgrep", "-f", "ssh.*-R [0-9].*:localhost:").Output()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) != ""
-}
+// hostTunnelsLive (defined per-OS in ssh_tunnels_unix.go / ssh_tunnels_windows.go)
+// reports whether at least one reverse-tunnel process (`ssh … -R <port>:localhost:…`)
+// is currently running on this machine. host.yaml existing only means this box is
+// CONFIGURED as a relay host — the tunnels are a separate keep-alive process that can
+// be down (crashed, never started, killed on logout). Checking the live process avoids
+// the TUI showing "● serving" while every box is actually cut off. It is split per-OS
+// because Windows has no pgrep (the old single impl always returned false there, so a
+// Windows host's TUI permanently — and falsely — showed "● tunnels down").
 
 // clientRow mirrors an entry in ~/.auxly/clients.yaml — a remote box this machine
 // (as a host) has wired to use its memory. These are the managed connections.

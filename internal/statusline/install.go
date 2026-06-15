@@ -115,7 +115,13 @@ func (t Target) selfCommand(wrap bool) string {
 }
 
 func quoteIfNeeded(s string) string {
-	if strings.ContainsAny(s, " \t") {
+	// Quote on spaces/tabs AND on shell metacharacters. The command is run by the
+	// agent's shell — cmd.exe on Windows, where & ( ) ^ % ! < > | are special, so
+	// an exe path like C:\Users\R&D\...\auxly.exe would be split mid-command if
+	// left bare. Double-quoting is the canonical settings form and neutralizes
+	// these in both cmd.exe and POSIX sh, so it stays correct on macOS/Linux too.
+	// This is a strict superset of the old " \t" trigger — clean paths stay bare.
+	if strings.ContainsAny(s, " \t&()^%!<>|\"'`$") {
 		return `"` + s + `"`
 	}
 	return s

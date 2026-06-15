@@ -86,7 +86,11 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Print("\r\n")
 
-		buildCmd := exec.Command("go", "build", "-ldflags", "-s -w", "-o", "auxly", ".")
+		binName := "auxly"
+		if runtime.GOOS == "windows" {
+			binName += ".exe" // the running target is auxly.exe; keep build/read/install names consistent
+		}
+		buildCmd := exec.Command("go", "build", "-ldflags", "-s -w", "-o", binName, ".")
 		buildCmd.Dir = buildDir
 		buildCmd.Stdout = os.Stdout
 		buildCmd.Stderr = os.Stderr
@@ -109,21 +113,32 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 				targetBin = exe
 			}
 		}
-		sourceBin := filepath.Join(buildDir, "auxly")
+		sourceBin := filepath.Join(buildDir, binName)
 
 		fmt.Printf("🚚 Installing fresh binary globally to: %s...\r\n", targetBin)
 
-		// Remove existing to break locks
-		_ = os.Remove(targetBin)
-
-		// Copy binary
+		// Read the freshly built binary first, then install it.
 		data, err := os.ReadFile(sourceBin)
 		if err != nil {
 			return fmt.Errorf("failed to read built binary: %w", err)
 		}
-		err = os.WriteFile(targetBin, data, 0755)
-		if err != nil {
-			return fmt.Errorf("failed to write binary to target bin path: %w", err)
+		if runtime.GOOS == "windows" {
+			// A running .exe is locked: you cannot delete/overwrite it, but you CAN
+			// rename the live image aside, then write the new one into the freed name.
+			_ = os.Remove(targetBin + ".old") // clear any prior swap leftover
+			if rerr := os.Rename(targetBin, targetBin+".old"); rerr != nil {
+				return fmt.Errorf("failed to move running binary aside: %w", rerr)
+			}
+			if werr := os.WriteFile(targetBin, data, 0755); werr != nil {
+				_ = os.Rename(targetBin+".old", targetBin) // best-effort rollback
+				return fmt.Errorf("failed to write binary to target bin path: %w", werr)
+			}
+			_ = os.Remove(targetBin + ".old") // best-effort; locked .old clears on next run
+		} else {
+			_ = os.Remove(targetBin) // break Unix locks/symlinks
+			if werr := os.WriteFile(targetBin, data, 0755); werr != nil {
+				return fmt.Errorf("failed to write binary to target bin path: %w", werr)
+			}
 		}
 
 		// Clear quarantine markers

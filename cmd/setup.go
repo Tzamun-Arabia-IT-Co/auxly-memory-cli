@@ -9,8 +9,10 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/skills"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/statusline"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/tui"
 	"github.com/spf13/cobra"
 )
@@ -80,6 +82,19 @@ func getBinaryPath() string {
 	}
 
 	if runtime.GOOS == "windows" {
+		// Never hand Claude Desktop a bare "auxly.exe": it launches MCP servers
+		// without the interactive shell PATH, and the installer drops the binary
+		// in %LOCALAPPDATA%\Programs\auxly (not on the global PATH), so a bare
+		// name would fail to start. Return the canonical absolute install path.
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData == "" {
+			if home, err := os.UserHomeDir(); err == nil {
+				localAppData = filepath.Join(home, "AppData", "Local")
+			}
+		}
+		if localAppData != "" {
+			return filepath.Join(localAppData, "Programs", "auxly", "auxly.exe")
+		}
 		return "auxly.exe"
 	}
 	return "/usr/local/bin/auxly"
@@ -99,34 +114,21 @@ type ideTarget struct {
 func knownIDETargets(home string) []ideTarget {
 	var targets []ideTarget
 
-	// 1. Claude Desktop
-	var claudeConfigPath, claudeBaseDir string
-	switch runtime.GOOS {
-	case "darwin":
-		claudeBaseDir = filepath.Join(home, "Library/Application Support/Claude")
-		claudeConfigPath = filepath.Join(claudeBaseDir, "claude_desktop_config.json")
-	case "linux":
-		claudeBaseDir = filepath.Join(home, ".config/Claude")
-		claudeConfigPath = filepath.Join(claudeBaseDir, "claude_desktop_config.json")
-	default:
-		claudeBaseDir = filepath.Join(os.Getenv("APPDATA"), "Claude")
-		claudeConfigPath = filepath.Join(claudeBaseDir, "claude_desktop_config.json")
-	}
+	// 1. Claude Desktop. detect.AppSupportDir resolves the SAME darwin/linux
+	// paths and adds the Windows APPDATA-empty fallback (home\AppData\Roaming).
+	// Building Windows paths from a raw os.Getenv("APPDATA") that is empty —
+	// the case in non-interactive / SSH-spawned PowerShell sessions, which is
+	// auxly's main Windows wiring path — collapses to a bare relative "Claude"
+	// that writeMCPConfigEntry then os.Stat-skips, so the MCP entry is never
+	// written. Routing through AppSupportDir (which detect.InstalledAgents
+	// already uses) makes the WRITTEN path equal the DETECTED path.
+	claudeBaseDir := detect.AppSupportDir(home, "Claude")
+	claudeConfigPath := filepath.Join(claudeBaseDir, "claude_desktop_config.json")
 	targets = append(targets, ideTarget{claudeConfigPath, "Claude Desktop", claudeBaseDir, true, "claude"})
 
-	// 2. Cursor
-	var cursorConfigPath, cursorBaseDir string
-	switch runtime.GOOS {
-	case "darwin":
-		cursorBaseDir = filepath.Join(home, "Library/Application Support/Cursor")
-		cursorConfigPath = filepath.Join(cursorBaseDir, "User/globalStorage/co.heron.cursor/mcpServers.json")
-	case "linux":
-		cursorBaseDir = filepath.Join(home, ".config/Cursor")
-		cursorConfigPath = filepath.Join(cursorBaseDir, "User/globalStorage/co.heron.cursor/mcpServers.json")
-	default:
-		cursorBaseDir = filepath.Join(os.Getenv("APPDATA"), "Cursor")
-		cursorConfigPath = filepath.Join(cursorBaseDir, "User", "globalStorage", "co.heron.cursor", "mcpServers.json")
-	}
+	// 2. Cursor (same APPDATA-empty fallback as Claude Desktop above).
+	cursorBaseDir := detect.AppSupportDir(home, "Cursor")
+	cursorConfigPath := filepath.Join(cursorBaseDir, "User", "globalStorage", "co.heron.cursor", "mcpServers.json")
 	targets = append(targets, ideTarget{cursorConfigPath, "Cursor IDE", cursorBaseDir, false, "cursor"})
 
 	// 2b. Cursor CLI (cursor-agent) reads ~/.cursor/mcp.json (separate from the
@@ -140,33 +142,13 @@ func knownIDETargets(home string) []ideTarget {
 	targets = append(targets, ideTarget{filepath.Join(antigravityBaseDir, "mcp.json"), "Antigravity CLI", antigravityBaseDir, false, "antigravity-cli"})
 	targets = append(targets, ideTarget{filepath.Join(antigravityBaseDir, "mcp_config.json"), "Antigravity Agent (Config)", antigravityBaseDir, false, "antigravity-agent"})
 
-	// 4b. Antigravity IDE (Bundle Support Paths)
-	var antigravityIdeConfigPath, antigravityIdeBaseDir string
-	switch runtime.GOOS {
-	case "darwin":
-		antigravityIdeBaseDir = filepath.Join(home, "Library/Application Support/Antigravity")
-		antigravityIdeConfigPath = filepath.Join(antigravityIdeBaseDir, "User/settings.json")
-	case "linux":
-		antigravityIdeBaseDir = filepath.Join(home, ".config/Antigravity")
-		antigravityIdeConfigPath = filepath.Join(antigravityIdeBaseDir, "User/settings.json")
-	default:
-		antigravityIdeBaseDir = filepath.Join(os.Getenv("APPDATA"), "Antigravity")
-		antigravityIdeConfigPath = filepath.Join(antigravityIdeBaseDir, "User", "settings.json")
-	}
+	// 4b. Antigravity IDE (Bundle Support Paths) — same APPDATA-empty fallback.
+	antigravityIdeBaseDir := detect.AppSupportDir(home, "Antigravity")
+	antigravityIdeConfigPath := filepath.Join(antigravityIdeBaseDir, "User", "settings.json")
 	targets = append(targets, ideTarget{antigravityIdeConfigPath, "Antigravity Agent (settings)", antigravityIdeBaseDir, false, "antigravity-agent"})
 
-	var antigravityIdeConfigPath2, antigravityIdeBaseDir2 string
-	switch runtime.GOOS {
-	case "darwin":
-		antigravityIdeBaseDir2 = filepath.Join(home, "Library/Application Support/Antigravity IDE")
-		antigravityIdeConfigPath2 = filepath.Join(antigravityIdeBaseDir2, "User/settings.json")
-	case "linux":
-		antigravityIdeBaseDir2 = filepath.Join(home, ".config/Antigravity IDE")
-		antigravityIdeConfigPath2 = filepath.Join(antigravityIdeBaseDir2, "User", "settings.json")
-	default:
-		antigravityIdeBaseDir2 = filepath.Join(os.Getenv("APPDATA"), "Antigravity IDE")
-		antigravityIdeConfigPath2 = filepath.Join(antigravityIdeBaseDir2, "User", "settings.json")
-	}
+	antigravityIdeBaseDir2 := detect.AppSupportDir(home, "Antigravity IDE")
+	antigravityIdeConfigPath2 := filepath.Join(antigravityIdeBaseDir2, "User", "settings.json")
 	targets = append(targets, ideTarget{antigravityIdeConfigPath2, "Antigravity IDE (Bundle)", antigravityIdeBaseDir2, false, "antigravity-ide"})
 
 	// 4c. Antigravity IDE (True Gemini Config Directories)
@@ -549,6 +531,15 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	printAl("✅ Successfully registered Antigravity slash commands and cleaned up Gemini TOMLs!")
 	printAl("✅ Automatically synchronized `.cursorrules`, `.antigravityrules`, and all workspace rules!")
 	printAl("")
+
+	// Wire the Auxly statusline for any detected agent that has none yet.
+	// Idempotent + non-destructive: a user's own statusline (or an already-Auxly
+	// one) is left untouched. Without this, a fresh LOCAL `auxly setup` — the
+	// canonical Windows onboarding path — never configured a statusline; only
+	// `auxly connect` did. Now both do.
+	if wired := statusline.AutoInstallMissing(); len(wired) > 0 {
+		printAlf("✅ Installed the Auxly statusline for: %s\r\n\r\n", strings.Join(wired, ", "))
+	}
 
 	printAl("🚀 Onboard your AI Agents instantly:")
 	printAl("   Simply type `/auxly-init` (or 'auxly init') inside your agent's active chat panel")

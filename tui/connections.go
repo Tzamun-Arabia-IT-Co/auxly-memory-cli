@@ -39,11 +39,17 @@ func gatherSessions() []agentSession {
 	records := session.List()
 	clients := readClients() // name -> target lookup for real box IPs
 
+	// One cached process snapshot serves liveness, the live-server list, AND all
+	// ancestry. On Windows this collapses the previous N+1 PowerShell cold-starts
+	// (one tasklist + one CIM for the list + one CIM per unregistered server) into
+	// a single CIM query, cached across the 1s dashboard tick and SSH repaints.
+	snap := session.CurrentSnapshot()
+
 	registeredPIDs := make([]int, 0, len(records))
 	for _, r := range records {
 		registeredPIDs = append(registeredPIDs, r.PID)
 	}
-	alive := session.PidsAlive(registeredPIDs)
+	alive := snap.PidsAlive(registeredPIDs)
 
 	registered := make(map[int]bool, len(records))
 	seen := make(map[int]bool, len(records)) // guard against a PID recorded twice
@@ -62,12 +68,12 @@ func gatherSessions() []agentSession {
 	}
 
 	// Surface live servers that never registered (version skew / stale binary).
-	for _, pid := range session.LiveServerPIDs() {
+	for _, pid := range snap.LiveServerPIDs() {
 		if registered[pid] || seen[pid] {
 			continue
 		}
 		seen[pid] = true
-		provider := session.InferProvider(session.AncestorCommands(pid))
+		provider := session.InferProvider(snap.AncestorCommands(pid))
 		if provider == "" {
 			provider = "claude" // matches the server's own resolveProvider default
 		}

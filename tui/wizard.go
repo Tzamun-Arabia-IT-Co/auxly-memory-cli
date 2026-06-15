@@ -1163,20 +1163,19 @@ func IsInitialized(memoryPath string) bool {
 }
 
 func lookPath(binary string) (string, error) {
-	checkPath := filepath.Join("/opt/homebrew/bin", binary)
-	if _, err := os.Stat(checkPath); err == nil {
-		return checkPath, nil
-	}
-	checkPath = filepath.Join("/usr/local/bin", binary)
-	if _, err := os.Stat(checkPath); err == nil {
-		return checkPath, nil
-	}
-	pathDirs := strings.Split(os.Getenv("PATH"), ":")
-	for _, dir := range pathDirs {
-		p := filepath.Join(dir, binary)
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
+	// Prefer Homebrew locations on macOS (they may be absent from a GUI-launched
+	// PATH). Then defer to the stdlib resolver, which splits PATH on the correct
+	// per-OS separator (';' on Windows) AND honors PATHEXT (.exe/.cmd/.bat) — the
+	// old manual ':'-split + no-extension walk found NOTHING on Windows, so every
+	// CLI agent (claude, gemini, codex, copilot, agy, cursor-agent) read as
+	// "not installed" during onboarding even when on PATH.
+	if runtime.GOOS == "darwin" {
+		for _, d := range []string{"/opt/homebrew/bin", "/usr/local/bin"} {
+			p := filepath.Join(d, binary)
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
 		}
 	}
-	return "", fmt.Errorf("not found: %s", binary)
+	return exec.LookPath(binary)
 }
