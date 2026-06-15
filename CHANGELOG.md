@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-06-15
+
+**Windows support, fixed end-to-end** — the full setup → MCP → statusline → dashboard
+flow now matches macOS/Linux. Every change is `GOOS`-gated or reuses an existing
+cross-platform helper, so macOS/Linux behavior is unchanged.
+
+### Fixed
+
+- **Claude Desktop / IDE MCP config now written on Windows.** `knownIDETargets` built
+  config paths from a raw `%APPDATA%` with no fallback; when `APPDATA` was empty
+  (non-interactive / SSH-provisioned sessions) the paths collapsed to bare relative
+  strings that `writeMCPConfigEntry` silently skipped. Paths now route through
+  `detect.AppSupportDir` (which falls back to `…\AppData\Roaming`), so the written path
+  matches the detected one for Claude Desktop, Cursor, and Antigravity.
+- **Statusline renders on Windows.** The installed `statusLine.command` used a backslash
+  Windows path that the agent's POSIX shell (sh/bash via Git Bash) mangled into a broken
+  path, so the statusline showed blank even though the exe ran fine directly. The path is
+  now normalized to forward slashes, which cmd.exe, PowerShell, and sh all accept.
+- **MCP stability for env-less servers.** Provider attribution cold-started a PowerShell
+  CIM query on every logged request when `AUXLY_PROVIDER` was unset (e.g. Claude Code CLI),
+  stalling strict clients into closing. It is now memoized once per process.
+- **Self-update on Windows.** `SelfUpdate` (and dev-mode `auxly update`) renamed a file
+  *over* the running, locked `.exe` and failed; they now rename the live image aside
+  first, with rollback on error.
+- **Host tunnel status on Windows.** `hostTunnelsLive` used the Unix-only `pgrep`, so a
+  Windows host always showed "tunnels down"; it now enumerates `ssh.exe` via CIM.
+- **Agent auto-detection on Windows.** The onboarding wizard split `PATH` on `:` and never
+  appended `.exe`, so it found no installed CLIs; it now uses `exec.LookPath` (correct `;`
+  separator + `PATHEXT`).
+- **`quoteIfNeeded`** now also quotes cmd.exe / POSIX shell metacharacters in the
+  statusline command path.
+
+### Changed
+
+- **`auxly setup` now auto-installs the statusline** for any detected agent that has none
+  (idempotent, non-destructive — a user's own statusline is left alone). Previously only
+  `auxly connect` wired it, so a fresh local setup — the canonical Windows onboarding path
+  — never configured one.
+- **Faster dashboard on Windows.** Live-session discovery, attribution, and liveness now
+  come from a single cached process snapshot per refresh, replacing the previous
+  one-PowerShell-per-connection storm on every 1-second tick.
+
+## [1.1.1] - 2026-06-10
+
+### Fixed
+
+- **Reconnect self-heals a downed host tunnel.** Pressing `[r]` Reconnect in the TUI now
+  brings the host keep-alive online first, so re-wiring a box succeeds even when the
+  reverse tunnel was the very thing that was down. `connect` now warns instead of
+  hard-failing when the tunnel is temporarily unreachable, and the TUI shows an honest
+  `● tunnels down` indicator.
+
 ## [1.1.0] - 2026-06-09
 
 **Semantic Recall — find relevant memory by meaning, not keyword.**

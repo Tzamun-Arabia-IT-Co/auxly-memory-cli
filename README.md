@@ -25,26 +25,19 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.1.0
+## 🆕 What's New in Version 1.1.2
 
-**Semantic Recall — find relevant memory by meaning, not keyword.**
+**Windows, fixed end-to-end.** The full Windows experience now matches macOS/Linux — one installer command wires MCP, the statusline, and skills, with no manual steps. All changes are OS-gated, so macOS and Linux behavior is unchanged.
 
-A new `auxly_memory_recall` MCP tool searches your vault by semantic similarity. Ask "when did I last work on the payment flow?" or "what do I know about my staging server?" and Auxly surfaces the most relevant snippets with file + line provenance — not just exact-match keyword hits.
+### 🪟 Windows fixes
 
-### 🔍 How it works
+- **MCP config now lands for Claude Desktop & every IDE.** Config paths resolve through the same detection helper with an `%APPDATA%`-empty fallback, so non-interactive / SSH-provisioned setups no longer silently skip Claude Desktop, Cursor, and Antigravity.
+- **The statusline now installs *and* renders.** `auxly setup` auto-installs the statusline (previously only `auxly connect` did), and the command is written with a forward-slash path so the agent's shell can actually launch it — a Windows backslash path was silently failing and rendering blank.
+- **Stable MCP for every provider.** Provider attribution is computed once per process instead of cold-starting PowerShell on every request, so strict clients no longer stall and drop the connection.
+- **Faster dashboard.** The TUI takes a single cached process snapshot per refresh instead of spawning one PowerShell per connection every second.
+- **Self-update, host-tunnel status, and agent detection** all work on Windows now (rename-aside over the locked `.exe`; `ssh.exe` tunnel detection instead of the Unix-only `pgrep`; `PATH`/`PATHEXT`-aware CLI discovery during onboarding).
 
-- **Local vector index.** Memory is chunked by heading, embedded into vectors, and stored in a local `semantic.db` alongside your audit log. Built lazily on first use; rebuild explicitly with `auxly index rebuild`.
-- **Local embedding by default.** Runs against a local model (Ollama `nomic-embed-text`) with a 500 ms timeout and a per-process circuit breaker — if the model is offline, recall falls back to substring search instantly with no latency penalty.
-- **Cloud embedding opt-in.** Set `AUXLY_EMBED_ALLOW_CLOUD=1` to route embeddings to an OpenAI-compatible cloud endpoint. Off by default — your memory never leaves your machine unless you explicitly enable it.
-- **ACL-enforced.** The same per-file sharing rules that govern keyword search filter the vector index at load time *and* at render time — remote/shared sessions can never surface files they're not allowed to read.
-
-### 🛠️ Also in this release
-
-- **`auxly index rebuild` / `auxly index status`** — inspect or rebuild the semantic index from the CLI without triggering a recall.
-- **SSH connect-wizard no longer blanks out** — the form repaints correctly on keypress; a stray `tea.ClearScreen` was firing on every input event.
-- **MCP sync responses ~100 k tokens leaner per session** — write confirmations no longer echo the full vault back to the agent; non-onboarding tool responses use a compact footer instead of the full taxonomy table.
-
-See the [CHANGELOG](CHANGELOG.md) for the full list — including 1.0.22's scrollable Active Connections panel and 1.0.20's security hardening and signed releases.
+Looking for **Semantic Recall** (the `auxly_memory_recall` tool from 1.1.0) or the reconnect self-heal from 1.1.1? See the [CHANGELOG](CHANGELOG.md) for the full history — including 1.0.20's security hardening and signed releases.
 
 ---
 
