@@ -306,3 +306,54 @@ func SelfUpdate() (string, error) {
 	}
 	return exe, nil
 }
+
+// InstallMethod classifies how the running binary was installed, so `update` can
+// route the user to the package manager that owns it instead of self-replacing a
+// vendored binary the manager would clobber on its next update anyway. Returns
+// "npm", "pip", or "" (a plain binary install that self-updates normally).
+func InstallMethod() string {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		return ""
+	}
+	if real, e := filepath.EvalSymlinks(exe); e == nil && real != "" {
+		exe = real
+	}
+	return classifyInstallPath(exe)
+}
+
+// classifyInstallPath is the pure, testable core of InstallMethod. It normalizes
+// backslashes explicitly (filepath.ToSlash only converts the host OS's separator,
+// so it wouldn't touch a Windows path inspected on another OS).
+func classifyInstallPath(exe string) string {
+	p := strings.ReplaceAll(strings.ToLower(exe), "\\", "/")
+	switch {
+	case strings.Contains(p, "/node_modules/auxly-cli/"):
+		return "npm" // npm/install.js vendors the binary under node_modules/auxly-cli/vendor/
+	case strings.Contains(p, "/.cache/auxly/"):
+		return "pip" // pip/_runner.py caches it under <XDG_CACHE_HOME|~/.cache>/auxly/
+	}
+	return ""
+}
+
+// ManagedUpdateHint returns the package-manager command that updates a managed
+// install, or "" for a plain binary install.
+func ManagedUpdateHint(method string) string {
+	switch method {
+	case "npm":
+		return "npm install -g auxly-cli@latest"
+	case "pip":
+		return "pip install -U auxly-cli"
+	}
+	return ""
+}
+
+// InstallerCommand returns the OS-appropriate one-line (re)install command — the
+// PowerShell installer on Windows, the curl|sh installer elsewhere. Used as the
+// fallback hint when a self-update can't proceed.
+func InstallerCommand() string {
+	if runtime.GOOS == "windows" {
+		return "irm " + BaseURL() + "/cli.ps1 | iex"
+	}
+	return "curl -sSL " + BaseURL() + "/cli | sh"
+}

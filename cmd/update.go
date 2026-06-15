@@ -161,12 +161,23 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		// Production/Release mode — download the latest binary from the
 		// distribution host and atomically replace this executable.
 		fmt.Print("🌐 " + bold + cyan + "Release Mode" + reset + "\r\n")
+
+		// A package-manager-vendored binary must update through its manager: a
+		// self-replace would be clobbered on the next `npm`/`pip` update (and on
+		// Windows the npm-vendored copy can be locked while running). Redirect to
+		// the right command instead of attempting — and failing — a self-replace.
+		if method := update.InstallMethod(); method != "" {
+			fmt.Printf("📦 Auxly was installed via %s — update it through %s:\r\n\r\n", method, method)
+			fmt.Printf("   %s%s%s\r\n\r\n", bold, update.ManagedUpdateHint(method), reset)
+			return nil
+		}
+
 		fmt.Printf("👉 Fetching the latest auxly for %s/%s...\r\n\r\n", runtime.GOOS, runtime.GOARCH)
 
 		path, err := update.SelfUpdate()
 		if err != nil {
 			fmt.Printf("✗ Update failed: %v\r\n", err)
-			fmt.Printf("   You can also run: curl -sSL %s/cli | sh\r\n\r\n", update.BaseURL())
+			fmt.Printf("   You can also run: %s\r\n\r\n", update.InstallerCommand())
 			return err
 		}
 		fmt.Print("🎉 " + bold + green + "Updated to the latest release!" + reset + "\r\n")

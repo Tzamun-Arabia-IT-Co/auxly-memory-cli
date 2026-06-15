@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-06-15
+
+Follow-up to 1.1.2 — smoother updates for package-manager installs and on Windows.
+
+### Fixed
+
+- **`auxly update` on npm/pip installs.** It now detects a package-manager-vendored
+  binary (npm under `node_modules/auxly-cli/`, pip under `~/.cache/auxly/`) and
+  directs you to the owning manager (`npm install -g auxly-cli@latest` /
+  `pip install -U auxly-cli`) instead of attempting an in-place self-replace — which
+  the manager would clobber anyway, and which failed with "Access is denied" on a
+  locked Windows `.exe`. The dashboard `[U]` update applies the same redirect.
+- **OS-aware install hint.** When a self-update can't proceed, the fallback hint now
+  shows the Windows PowerShell installer (`irm https://auxly.io/cli.ps1 | iex`)
+  instead of the Unix `curl … | sh` line.
+
 ## [1.1.2] - 2026-06-15
 
 **Windows support, fixed end-to-end** — the full setup → MCP → statusline → dashboard

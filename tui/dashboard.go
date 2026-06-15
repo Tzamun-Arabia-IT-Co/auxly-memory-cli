@@ -597,6 +597,12 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		case "U":
 			// One-click self-update when a newer release is available.
 			if m.updateAvail && !m.updating {
+				// A package-manager install updates through its manager, not a
+				// self-replace — surface the right command instead of attempting it.
+				if method := update.InstallMethod(); method != "" {
+					m.updateResult = "ℹ Installed via " + method + " — update with:  " + update.ManagedUpdateHint(method)
+					return m, nil
+				}
 				m.updating = true
 				m.updateResult = ""
 				return m, func() tea.Msg {

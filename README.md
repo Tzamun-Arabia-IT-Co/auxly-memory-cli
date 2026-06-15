@@ -25,7 +25,7 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.1.2
+## 🆕 What's New in Version 1.1.3
 
 **Windows, fixed end-to-end.** The full Windows experience now matches macOS/Linux — one installer command wires MCP, the statusline, and skills, with no manual steps. All changes are OS-gated, so macOS and Linux behavior is unchanged.
 
@@ -36,6 +36,7 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 - **Stable MCP for every provider.** Provider attribution is computed once per process instead of cold-starting PowerShell on every request, so strict clients no longer stall and drop the connection.
 - **Faster dashboard.** The TUI takes a single cached process snapshot per refresh instead of spawning one PowerShell per connection every second.
 - **Self-update, host-tunnel status, and agent detection** all work on Windows now (rename-aside over the locked `.exe`; `ssh.exe` tunnel detection instead of the Unix-only `pgrep`; `PATH`/`PATHEXT`-aware CLI discovery during onboarding).
+- **Cleaner updates (1.1.3).** `auxly update` now updates **npm/pip** installs through their package manager instead of a self-replace that fails on a locked binary, shows the Windows installer in its hints, and the dashboard `[U]` update works on Windows just like macOS.
 
 Looking for **Semantic Recall** (the `auxly_memory_recall` tool from 1.1.0) or the reconnect self-heal from 1.1.1? See the [CHANGELOG](CHANGELOG.md) for the full history — including 1.0.20's security hardening and signed releases.
 
