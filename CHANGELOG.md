@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-06-16
+
+Adds Auxly slash-command **skills** to the Kimi Code CLI. The MCP server already
+auto-configured for Kimi; this completes the experience so `/auxly-init`,
+`/auxly-sync`, `/auxly-memory`, and the rest are available there too — no manual
+steps, exactly like Claude and Cursor.
+
+### Fixed
+
+- **Kimi Code CLI skills now auto-install.** `installAuxlySkills` only wrote
+  `SKILL.md` folders for Claude/Codex/Gemini, so Kimi got the MCP server but none
+  of the slash commands. Kimi also requires the skills directory to be **registered**
+  (dropping files in a conventional folder isn't enough). Setup now writes all Auxly
+  skills to `<kimiHome>/auxly-skills/<name>/SKILL.md` and registers that path in
+  `extra_skill_dirs` of Kimi's `config.toml` via an idempotent in-place edit (handles
+  both the current `~/.kimi-code` and legacy `~/.kimi` homes). Runs on both
+  `auxly setup` and `auxly connect`, so new installs are wired automatically.
+
 ## [1.1.3] - 2026-06-15
 
 Follow-up to 1.1.2 — smoother updates for package-manager installs and on Windows.

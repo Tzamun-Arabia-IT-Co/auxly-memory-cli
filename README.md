@@ -25,11 +25,14 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.1.3
+## 🆕 What's New in Version 1.1.4
+
+**Kimi Code CLI now gets skills too.** Kimi already auto-configured the Auxly MCP server; now `auxly setup`/`auxly connect` also install the Auxly slash-command skills (`/auxly-init`, `/auxly-sync`, `/auxly-memory`, …) and register them in Kimi's `config.toml` (`extra_skill_dirs`) — fully automatic, no manual steps, the same one-command experience as Claude and Cursor. Works on both the current `~/.kimi-code` and legacy `~/.kimi` installs.
+
+### 🪟 Windows fixes (1.1.2 – 1.1.3)
 
 **Windows, fixed end-to-end.** The full Windows experience now matches macOS/Linux — one installer command wires MCP, the statusline, and skills, with no manual steps. All changes are OS-gated, so macOS and Linux behavior is unchanged.
 
-### 🪟 Windows fixes
 
 - **MCP config now lands for Claude Desktop & every IDE.** Config paths resolve through the same detection helper with an `%APPDATA%`-empty fallback, so non-interactive / SSH-provisioned setups no longer silently skip Claude Desktop, Cursor, and Antigravity.
 - **The statusline now installs *and* renders.** `auxly setup` auto-installs the statusline (previously only `auxly connect` did), and the command is written with a forward-slash path so the agent's shell can actually launch it — a Windows backslash path was silently failing and rendering blank.

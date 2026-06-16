@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
@@ -599,6 +600,73 @@ func installAuxlySkills(extraBanner string) {
 			_ = os.WriteFile(skillFilePath, []byte(content+updateReminder+extraBanner), 0644)
 		}
 	}
+
+	// Kimi Code CLI uses a plugin/skill system: a skill is a <name>/SKILL.md
+	// directory, and Kimi only loads skills from registered locations (its plugins
+	// plus the extra_skill_dirs list in config.toml). Unlike Claude/Codex/Gemini,
+	// dropping SKILL.md files into a conventional folder is NOT enough — the
+	// containing dir must be added to extra_skill_dirs. So we write the Auxly
+	// skills under <kimiHome>/auxly-skills and register that path. Both the current
+	// (~/.kimi-code) and legacy (~/.kimi) homes are handled when present.
+	for _, kimiHome := range []string{
+		filepath.Join(home, ".kimi-code"),
+		filepath.Join(home, ".kimi"),
+	} {
+		if fi, err := os.Stat(kimiHome); err != nil || !fi.IsDir() {
+			continue // Kimi not installed at this location
+		}
+		skillsRoot := filepath.Join(kimiHome, "auxly-skills")
+		for skillName, content := range commands {
+			skillDir := filepath.Join(skillsRoot, skillName)
+			_ = os.MkdirAll(skillDir, 0755)
+			skillFilePath := filepath.Join(skillDir, "SKILL.md")
+			_ = os.WriteFile(skillFilePath, []byte(content+updateReminder+extraBanner), 0644)
+		}
+		registerKimiSkillDir(filepath.Join(kimiHome, "config.toml"), skillsRoot)
+	}
+}
+
+// registerKimiSkillDir adds skillsRoot to the extra_skill_dirs array in Kimi's
+// config.toml so the CLI discovers the Auxly skills (merge_all_available_skills
+// defaults to true). It edits the single extra_skill_dirs line in place — no TOML
+// dependency — and is idempotent: a path already present is left untouched. If the
+// key is missing it is appended. If the config file doesn't exist yet (Kimi writes
+// it on first run) it is left alone; a later `auxly setup` will register it.
+func registerKimiSkillDir(configPath, skillsRoot string) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return
+	}
+	text := string(data)
+	quoted := strconv.Quote(skillsRoot) // TOML basic string; backslashes escaped on Windows
+	if strings.Contains(text, quoted) {
+		return // already registered
+	}
+
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "extra_skill_dirs") {
+			continue
+		}
+		open := strings.Index(line, "[")
+		closeIdx := strings.LastIndex(line, "]")
+		if open < 0 || closeIdx < 0 || closeIdx < open {
+			return // not a single-line array we can safely edit; leave as-is
+		}
+		inner := strings.TrimSpace(line[open+1 : closeIdx])
+		if inner == "" {
+			inner = quoted
+		} else {
+			inner = inner + ", " + quoted
+		}
+		lines[i] = line[:open+1] + inner + line[closeIdx:]
+		_ = os.WriteFile(configPath, []byte(strings.Join(lines, "\n")), 0644)
+		return
+	}
+
+	// Key absent — append it.
+	lines = append(lines, "extra_skill_dirs = ["+quoted+"]")
+	_ = os.WriteFile(configPath, []byte(strings.Join(lines, "\n")), 0644)
 }
 
 func ensureClaudeAndCodexSkills(memPath string) {
