@@ -55,7 +55,7 @@ func scrubbedOrganizeEnv() []string {
 // defaultOrganizeTimeout bounds a single CLI-agent consolidation run. A full-vault
 // re-file is a large prompt, so this is generous; override with the env var
 // AUXLY_ORGANIZE_TIMEOUT (whole seconds) for slow models or big vaults.
-const defaultOrganizeTimeout = 600 * time.Second
+const defaultOrganizeTimeout = 900 * time.Second
 
 // organizeTimeout returns the CLI-agent execution timeout, honoring
 // AUXLY_ORGANIZE_TIMEOUT (seconds) when set to a positive integer.
@@ -129,7 +129,17 @@ func buildAgentArgs(agentName, model, prompt string) []string {
 		}
 		return append(args, prompt)
 	case strings.Contains(p, "cursor"):
-		args := []string{"-p", "--output-format", "text"}
+		// SECURITY-CRITICAL flag pairing:
+		//   --mode ask  → read-only Q&A mode: the agent can NOT run shell commands or
+		//                 edit files, so a prompt-injection planted in the vault content
+		//                 has no tools to abuse. This is what keeps cursor safe here,
+		//                 since cursor's headless `-p` otherwise "has access to all tools".
+		//   --trust     → cursor-agent blocks on a "Workspace Trust Required" prompt in
+		//                 the fresh empty temp dir (exit 1, no output) and never emits
+		//                 JSON without it. Safe ONLY because --mode ask already removed
+		//                 every tool — trust over an empty, scrubbed throwaway dir grants
+		//                 nothing. Never pass --trust WITHOUT --mode ask.
+		args := []string{"-p", "--output-format", "text", "--mode", "ask", "--trust"}
 		if model != "" {
 			args = append(args, "--model", model)
 		}
@@ -247,7 +257,19 @@ func (s *Store) ApplyOrganizeChanges(changes []ProposedChange) string {
 // source of truth) rather than hardcoded, so the file list never drifts. Used
 // identically by every organize execution path (direct LLM, CLI agent, custom).
 func organizeSystemPrompt() string {
-	return fmt.Sprintf(`You are an expert Auxly Memory Architect. Your job is to RE-FILE and tidy the user's memory vault so every fact lives in the right file — WITHOUT EVER LOSING A SINGLE FACT.
+	return fmt.Sprintf(`═══ RESPONSE CONTRACT — READ FIRST, OBEY ABSOLUTELY ═══
+You are a NON-INTERACTIVE text→JSON transformer, NOT an interactive agent.
+- The COMPLETE memory vault is included verbatim in this prompt below. NOTHING is
+  truncated, cut off, or stored elsewhere. There are NO files on disk to open and
+  you have NO tools — any attempt to read files or call tools will find nothing.
+- Do NOT narrate, plan, think out loud, or explain. Do NOT write sentences like
+  "Let me read…", "The input was truncated", "I'll use the MCP tools", or any
+  analysis. Such output BREAKS the caller and fails the task.
+- Your ENTIRE response MUST be exactly ONE JSON object and nothing else: the FIRST
+  character you emit is `+"`{`"+` and the LAST is `+"`}`"+`. No prose before it, no prose
+  after it, no markdown fences. Begin your reply with `+"`{`"+` immediately.
+
+You are an expert Auxly Memory Architect. Your job is to RE-FILE and tidy the user's memory vault so every fact lives in the right file — WITHOUT EVER LOSING A SINGLE FACT.
 
 ═══ RULE 0 — ZERO LOSS (ABSOLUTE, OVERRIDES EVERYTHING) ═══
 Every distinct fact, name, number, date, ID, decision, server, IP, case number,
@@ -401,47 +423,74 @@ func (s *Store) runOrganizeModel(ctx context.Context, agentName string, agentPat
 		// timeout is layered on the caller's context so either the deadline OR a user
 		// cancel (esc on the running screen) tears the subprocess down.
 		timeout := organizeTimeout()
-		runCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
 
-		cmd := exec.CommandContext(runCtx, agentPath, buildAgentArgs(agentName, model, fullPrompt)...)
+		// Modern agentic CLIs (Claude Code, Antigravity, …) tend to IGNORE a buried
+		// "output JSON only" rule and instead narrate ("Let me read the files…",
+		// "input was truncated", "I'll use the MCP tools"). That prose has no JSON
+		// object, so extractJSON yields garbage and the parse fails. The hardened
+		// RESPONSE CONTRACT at the top of the prompt suppresses most of it; this loop
+		// is the safety net: if the first reply still isn't a JSON object, retry ONCE
+		// with a blunt corrective prepended. A timeout / user-cancel / exec failure is
+		// fatal and never retried.
+		var output string
+		for attempt := 1; attempt <= 2; attempt++ {
+			runCtx, cancel := context.WithTimeout(ctx, timeout)
 
-		// ISOLATION: empty stdin (no TTY hang), a scrubbed env with no AUXLY_* (so the
-		// agent can't locate the real vault), and an empty working directory (so any
-		// relative file read finds nothing). Combined with the per-agent no-tools flags
-		// this keeps the child to a pure text→JSON transform.
-		cmd.Stdin = strings.NewReader("")
-		cmd.Env = scrubbedOrganizeEnv()
-		if workDir, err := os.MkdirTemp("", "auxly-organize-"); err == nil {
-			defer os.RemoveAll(workDir)
-			cmd.Dir = workDir
-		}
-		// Give a killed process a moment to flush before its pipes are closed.
-		cmd.WaitDelay = 5 * time.Second
+			prompt := fullPrompt
+			if attempt > 1 {
+				prompt = "YOUR PREVIOUS REPLY WAS REJECTED: it contained prose/narration, not JSON. " +
+					"Do NOT explain, do NOT narrate, do NOT mention reading files or tools. " +
+					"Reply with ONLY the single JSON object now — first character `{`, last character `}`.\n\n" + fullPrompt
+			}
 
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
+			cmd := exec.CommandContext(runCtx, agentPath, buildAgentArgs(agentName, model, prompt)...)
 
-		execErr := cmd.Run()
+			// ISOLATION: empty stdin (no TTY hang), a scrubbed env with no AUXLY_* (so the
+			// agent can't locate the real vault), and an empty working directory (so any
+			// relative file read finds nothing). Combined with the per-agent no-tools flags
+			// this keeps the child to a pure text→JSON transform.
+			cmd.Stdin = strings.NewReader("")
+			cmd.Env = scrubbedOrganizeEnv()
+			if workDir, err := os.MkdirTemp("", "auxly-organize-"); err == nil {
+				defer os.RemoveAll(workDir)
+				cmd.Dir = workDir
+			}
+			// Give a killed process a moment to flush before its pipes are closed.
+			cmd.WaitDelay = 5 * time.Second
 
-		// Distinguish a timeout (deadline on runCtx) and a user cancel (parent ctx
-		// cancelled via esc) from a genuine execution failure. Check runCtx — the
-		// parent ctx is never DeadlineExceeded since the deadline lives on the child.
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s execution timed out after %s. Stderr: %s", agentName, timeout, strings.TrimSpace(stderr.String()))}, false
-		}
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return organizeRun{}, OrganizeResult{Success: false, Message: "Run cancelled."}, false
-		}
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
 
-		if execErr != nil {
-			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s execution failed: %v\nStderr: %s\nStdout: %s", agentName, execErr, stderr.String(), stdout.String())}, false
-		}
+			execErr := cmd.Run()
 
-		output := stdout.String()
-		if strings.TrimSpace(output) == "" {
-			return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s returned empty output.", agentName)}, false
+			// Distinguish a timeout (deadline on runCtx) and a user cancel (parent ctx
+			// cancelled via esc) from a genuine execution failure. Check runCtx — the
+			// parent ctx is never DeadlineExceeded since the deadline lives on the child.
+			if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+				cancel()
+				return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s execution timed out after %s. Stderr: %s", agentName, timeout, strings.TrimSpace(stderr.String()))}, false
+			}
+			if errors.Is(ctx.Err(), context.Canceled) {
+				cancel()
+				return organizeRun{}, OrganizeResult{Success: false, Message: "Run cancelled."}, false
+			}
+			if execErr != nil {
+				cancel()
+				return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s execution failed: %v\nStderr: %s\nStdout: %s", agentName, execErr, stderr.String(), stdout.String())}, false
+			}
+			cancel()
+
+			output = stdout.String()
+			if strings.TrimSpace(output) == "" {
+				return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("CLI agent %s returned empty output.", agentName)}, false
+			}
+
+			// Accept as soon as we have a parseable JSON object; otherwise loop to retry.
+			if candidate := extractJSON(output); json.Valid([]byte(candidate)) {
+				output = candidate
+				break
+			}
 		}
 
 		jsonContent = extractJSON(output)

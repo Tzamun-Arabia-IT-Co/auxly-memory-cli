@@ -71,13 +71,25 @@ func TestBuildAgentArgs_HeadlessInvocationPerProvider(t *testing.T) {
 			}
 
 			// SECURITY: the consolidation embeds user-vault content (prompt-injection
-			// vector) and needs no tools — never pass a permission/sandbox-bypass flag.
+			// vector) and needs no tools — never pass a permission/sandbox-bypass flag
+			// that would let an injected instruction run commands or edit files.
 			for _, banned := range []string{
-				"--dangerously-skip-permissions", "--yolo", "-y", "--trust",
+				"--dangerously-skip-permissions", "--yolo", "-y", "--force",
 				"--dangerously-bypass-approvals-and-sandbox",
 			} {
 				if containsArg(args, banned) {
 					t.Errorf("SECURITY: bypass flag %q must not be passed; got: %s", banned, strings.Join(args[:len(args)-1], " "))
+				}
+			}
+
+			// cursor REQUIRES --trust to run headless (it otherwise blocks on a
+			// Workspace Trust prompt in the empty temp dir). --trust is acceptable
+			// ONLY because it is paired with read-only `--mode ask`, which strips every
+			// tool — so an injected instruction has nothing to abuse. Enforce the
+			// pairing: --trust without --mode ask is a security regression.
+			if containsArg(args, "--trust") {
+				if !containsArg(args, "ask") {
+					t.Errorf("SECURITY: --trust passed without read-only `--mode ask`; got: %s", strings.Join(args[:len(args)-1], " "))
 				}
 			}
 		})

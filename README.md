@@ -25,6 +25,10 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
+## 🆕 What's New in Version 1.1.5
+
+**Memory Organize works again across every CLI agent.** Newer agent CLIs had started *narrating* ("Let me read the files…", "the input was truncated") instead of returning the JSON the consolidation needs — so organize hung or failed with `invalid character 'L'`. Now a front-loaded **response contract** forces clean JSON-only output, a non-JSON reply **auto-retries once**, **Cursor** runs headless via read-only `--mode ask` + `--trust` (it was blocked on a workspace-trust prompt), and the default timeout is raised to **900s**. Verified end-to-end with **Claude, Codex, Gemini, Antigravity (agy), and Cursor**. Tip: for very large vaults, a direct-API provider (Gemini/OpenAI) is the fastest path.
+
 ## 🆕 What's New in Version 1.1.4
 
 **Kimi Code CLI now gets skills too.** Kimi already auto-configured the Auxly MCP server; now `auxly setup`/`auxly connect` also install the Auxly slash-command skills (`/auxly-init`, `/auxly-sync`, `/auxly-memory`, …) and register them in Kimi's `config.toml` (`extra_skill_dirs`) — fully automatic, no manual steps, the same one-command experience as Claude and Cursor. Works on both the current `~/.kimi-code` and legacy `~/.kimi` installs.

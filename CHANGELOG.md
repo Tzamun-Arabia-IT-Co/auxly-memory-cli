@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.5] - 2026-06-17
+
+Fixes Memory Organize hanging / failing with CLI agents. The organize code was
+unchanged since 1.1.2, but newer agent CLIs changed behavior — they narrate
+("Let me read the files…", "the input was truncated, I'll use the MCP tools")
+instead of emitting the JSON the consolidation expects, or they refuse to run
+headless at all. Verified working end-to-end with Claude, Codex, Gemini,
+Antigravity (agy), and Cursor.
+
+### Fixed
+
+- **Agents narrating instead of returning JSON.** A blunt RESPONSE CONTRACT is now
+  front-loaded at the top of the organize prompt: it tells the agent it is a
+  non-interactive text→JSON transformer, the vault is complete in the prompt
+  (nothing truncated, no files to read, no tools), and its entire reply must be one
+  JSON object. This stops the "Let me read… / input truncated / use MCP tools"
+  failure that produced `invalid character 'L' looking for beginning of value`.
+- **Auto-retry on a non-JSON reply.** If the first reply still isn't valid JSON, the
+  run retries once with a corrective ("your previous reply was prose, JSON only now")
+  before failing — a safety net for stubborn agents.
+- **Cursor never ran headless.** Cursor blocked on a "Workspace Trust Required" prompt
+  in organize's isolated temp dir and produced no output. It now runs with
+  `--mode ask` (read-only Q&A — no shell, no edits, so a prompt-injection in the vault
+  has no tools to abuse) paired with `--trust`. Security test enforces the pairing:
+  `--trust` is never allowed without read-only `--mode ask`.
+- **Larger vaults timing out.** Default organize timeout raised from 600s to 900s
+  (still overridable via `AUXLY_ORGANIZE_TIMEOUT`) so a full-vault consolidation has
+  room to finish. For very large vaults a fast direct-API provider (Gemini/OpenAI) or
+  trimming bloated files remains the quickest path.
+
 ## [1.1.4] - 2026-06-16
 
 Adds Auxly slash-command **skills** to the Kimi Code CLI. The MCP server already
