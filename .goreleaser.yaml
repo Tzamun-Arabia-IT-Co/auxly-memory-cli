@@ -5,6 +5,11 @@ project_name: auxly-cli
 before:
   hooks:
     - go mod download
+    # Embed Windows PE version-info (CompanyName/ProductName/version/copyright)
+    # into the .exe. An unsigned binary WITH version-info is flagged far less by
+    # Windows Defender/SmartScreen than an anonymous one. Generates the
+    # *_windows_<arch>.syso resources Go links into the windows builds below.
+    - sh scripts/gen-win-versioninfo.sh {{ .Version }}
 
 builds:
   # Single CGO-free build for every target. Auxly uses pure-Go SQLite
