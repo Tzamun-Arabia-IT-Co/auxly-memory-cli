@@ -13,6 +13,7 @@ type diffModel struct {
 	files   []pending.PendingFile
 	cursor  int
 	viewing string
+	status  string // last approve/reject outcome (e.g. a conflict) shown under the list
 }
 
 type diffRefreshMsg struct {
@@ -47,10 +48,12 @@ func (m diffModel) Update(msg tea.Msg) (diffModel, tea.Cmd) {
 			if m.cursor < len(m.files)-1 {
 				m.cursor++
 			}
+			m.status = "" // status describes the item it happened on — don't let it stick to another
 		case "k", "up":
 			if m.cursor > 0 {
 				m.cursor--
 			}
+			m.status = ""
 		case "enter":
 			if m.cursor < len(m.files) {
 				content, _ := m.mgr.ViewDiff(m.files[m.cursor].Name)
@@ -58,12 +61,22 @@ func (m diffModel) Update(msg tea.Msg) (diffModel, tea.Cmd) {
 			}
 		case "a":
 			if m.cursor < len(m.files) {
-				m.mgr.Approve(m.files[m.cursor].Name)
+				// Conflicts (target edited since the pending was created) must be
+				// visible, not silently swallowed — the item stays queued.
+				if err := m.mgr.Approve(m.files[m.cursor].Name); err != nil {
+					m.status = err.Error()
+				} else {
+					m.status = ""
+				}
 				return m, m.Refresh()
 			}
 		case "r":
 			if m.cursor < len(m.files) {
-				m.mgr.Reject(m.files[m.cursor].Name)
+				if err := m.mgr.Reject(m.files[m.cursor].Name); err != nil {
+					m.status = err.Error()
+				} else {
+					m.status = ""
+				}
 				return m, m.Refresh()
 			}
 		case "esc":
@@ -103,6 +116,10 @@ func (m diffModel) View() string {
 			line = StyleSelectedRow.Render(line)
 		}
 		content += line + "\n"
+	}
+
+	if m.status != "" {
+		content += "\n" + lipgloss.NewStyle().Foreground(ColorWarning).Render("⚠ "+m.status) + "\n"
 	}
 
 	return fmt.Sprintf("%s\n\n%s", title, content)

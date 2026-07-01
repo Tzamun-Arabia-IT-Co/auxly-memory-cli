@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
@@ -8,6 +9,8 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/spf13/cobra"
 )
+
+var approveForce bool
 
 var approveCmd = &cobra.Command{
 	Use:   "approve <pending_file>",
@@ -17,6 +20,7 @@ var approveCmd = &cobra.Command{
 }
 
 func init() {
+	approveCmd.Flags().BoolVar(&approveForce, "force", false, "apply even if the target file changed since the pending was created (conflict)")
 	rootCmd.AddCommand(approveCmd)
 }
 
@@ -33,8 +37,12 @@ func runApprove(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("📄 Approving: %s\n\n%s\n\n", pendingName, content)
 
-	if err := mgr.Approve(pendingName); err != nil {
-		return err
+	applyErr := mgr.Approve(pendingName)
+	if approveForce && errors.Is(applyErr, pending.ErrConflict) {
+		applyErr = mgr.ForceApprove(pendingName)
+	}
+	if applyErr != nil {
+		return applyErr
 	}
 
 	// Log audit entry

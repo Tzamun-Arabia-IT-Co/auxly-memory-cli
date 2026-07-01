@@ -535,6 +535,12 @@ func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
 		m.fileCursor = 0
 		m.mode = orgReview
 		m.status = ""
+		// Fact-loss validator fired (RULE 0 safety net): surface it for the whole
+		// review via the existing status banner — first line only, the panels show
+		// the detail. A shrinking organize is never applied without this visible.
+		if msg.prop.Warning != "" {
+			m.status = strings.SplitN(msg.prop.Warning, "\n", 2)[0]
+		}
 		m.errMsg = ""
 		m.loadCurrentChange()
 		return m, nil

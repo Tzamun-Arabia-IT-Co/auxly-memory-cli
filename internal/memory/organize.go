@@ -157,6 +157,10 @@ type OrganizeResult struct {
 	Message    string
 	Diff       string
 	TokensUsed int
+	// Warning carries the fact-loss validator's finding (see
+	// OrganizeProposal.Warning). Headless organize paths refuse to apply while
+	// it is set; the TUI shows it during review.
+	Warning string
 }
 
 // ProposedChange is one file's pending edit from an organize run — computed but
@@ -179,6 +183,11 @@ type OrganizeProposal struct {
 	Changes    []ProposedChange
 	ModelUsed  string
 	TokensUsed int
+	// Warning is set when the proposal appears to LOSE facts — the output has
+	// >5% fewer bullet lines than the input (RULE 0 violation candidate; the
+	// prompt promises zero loss but a weak model can drop facts silently).
+	// Review UIs MUST show it before the user applies anything.
+	Warning string
 }
 
 // buildProposalFromJSON parses an organize model's JSON output into a set of
@@ -232,22 +241,131 @@ func (s *Store) buildProposalFromJSON(jsonContent, modelUsed string, tokensUsed 
 			IsNew:      viewErr != nil,
 		})
 	}
+	prop.Warning = factLossWarning(prop.Changes)
 	return prop, OrganizeResult{Success: true}
+}
+
+// factLossWarning validates RULE 0 (zero fact loss) mechanically: counts bullet
+// facts across the proposal's inputs vs outputs. Two triggers, either fires:
+//   - aggregate: output has >5% fewer bullets than input (legitimate dedup
+//     removes a few, so small shrinkage passes);
+//   - per-file: one file lost >80% of its (≥3) facts with no trace anywhere in
+//     the output — growth elsewhere must never mask a file being gutted.
+//
+// Facts are re-filed across files by design, so "missing" always means "in NO
+// output file" (normalized). Rewording beyond case/whitespace can false-positive
+// the per-file check — acceptable: this warns, humans decide.
+func factLossWarning(changes []ProposedChange) string {
+	before, after := 0, 0
+	newSet := make(map[string]bool)
+	for _, c := range changes {
+		before += len(bulletLines(c.OldContent))
+		newBullets := bulletLines(c.NewContent)
+		after += len(newBullets)
+		for _, b := range newBullets {
+			newSet[normalizeFact(b)] = true
+		}
+	}
+	if before == 0 {
+		return ""
+	}
+
+	var missing []string
+	guttedFile := ""
+	for _, c := range changes {
+		oldBullets := bulletLines(c.OldContent)
+		fileMissing := 0
+		for _, b := range oldBullets {
+			if !newSet[normalizeFact(b)] {
+				fileMissing++
+				if len(missing) < 10 {
+					missing = append(missing, b)
+				}
+			}
+		}
+		if len(oldBullets) >= 3 && fileMissing*100 > len(oldBullets)*80 && guttedFile == "" {
+			guttedFile = c.Name
+		}
+	}
+
+	aggregateShrink := after*100 < before*95
+	if !aggregateShrink && guttedFile == "" {
+		return ""
+	}
+
+	w := fmt.Sprintf("⚠ Possible fact loss: output has %d facts vs %d input (%d missing from the output entirely). Review carefully before applying.", after, before, len(missing))
+	if guttedFile != "" {
+		w = fmt.Sprintf("⚠ Possible fact loss: %s lost almost all of its facts with no trace elsewhere in the output (input %d facts → output %d). Review carefully before applying.", guttedFile, before, after)
+	}
+	if len(missing) > 0 {
+		w += "\nMissing-fact candidates:\n  " + strings.Join(missing, "\n  ")
+	}
+	return w
+}
+
+// bulletLines returns the trimmed "- " / "* " bullet lines of a memory file —
+// the unit RULE 0 counts as one fact.
+func bulletLines(content string) []string {
+	var out []string
+	for _, l := range strings.Split(content, "\n") {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "* ") {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// normalizeFact makes bullet comparison robust to the cosmetic rewording an
+// organize legitimately performs: bullet marker, case, and whitespace runs.
+func normalizeFact(b string) string {
+	b = strings.TrimPrefix(b, "- ")
+	b = strings.TrimPrefix(b, "* ")
+	return strings.Join(strings.Fields(strings.ToLower(b)), " ")
 }
 
 // ApplyOrganizeChanges writes the given (approved, possibly user-edited) changes to
 // disk and returns a combined diff. This is the ONLY place an organize run writes —
 // callers gather explicit approval first. Files whose content is unchanged are skipped.
+//
+// The whole batch runs under ONE vault lock so other writers can't interleave
+// mid-apply, and each file is checked against its plan-time snapshot first: the
+// LLM planning round-trip takes minutes, and a file edited meanwhile must not be
+// silently overwritten with a proposal computed from its old content — it is
+// skipped with a note in the returned diff instead.
 func (s *Store) ApplyOrganizeChanges(changes []ProposedChange) string {
 	var diffBuilder strings.Builder
+
+	unlock, err := LockVault(s.Root)
+	if err != nil {
+		return fmt.Sprintf("⚠ nothing applied: %v\n", err)
+	}
+	defer unlock()
+
+	wrote := false
 	for _, c := range changes {
 		if !c.Changed() {
 			continue
 		}
-		_ = s.WriteScoped(c.Name, c.NewContent, c.Scope)
+		current, viewErr := s.View(c.Name)
+		if viewErr != nil {
+			current = ""
+		}
+		if current != c.OldContent {
+			diffBuilder.WriteString(fmt.Sprintf("⚠ skipped %s: file changed while organize was planning — re-run organize\n", c.Name))
+			continue
+		}
+		if werr := s.writeScopedNoLock(c.Name, c.NewContent, c.Scope); werr != nil {
+			diffBuilder.WriteString(fmt.Sprintf("⚠ failed %s: %v\n", c.Name, werr))
+			continue
+		}
+		wrote = true
 		if d := generateDiff(c.Name, c.OldContent, c.NewContent); d != "" {
 			diffBuilder.WriteString(d + "\n")
 		}
+	}
+	if wrote {
+		_ = s.CompileUnified() // once for the batch, while still holding the lock
 	}
 	return diffBuilder.String()
 }
@@ -609,8 +727,27 @@ func (s *Store) OrganizeVaultWithAgent(agentName, agentPath string) OrganizeResu
 	if len(prop.Changes) == 0 {
 		return res
 	}
+	if blocked, br := blockOnFactLoss(prop); blocked {
+		return br
+	}
 	diff := s.ApplyOrganizeChanges(prop.Changes)
-	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using %s!", prop.ModelUsed), Diff: diff, TokensUsed: prop.TokensUsed}
+	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using %s!", prop.ModelUsed), Diff: diff, TokensUsed: prop.TokensUsed, Warning: prop.Warning}
+}
+
+// blockOnFactLoss enforces RULE 0 on the HEADLESS organize paths: these apply
+// without a human review step, so a proposal flagged by the fact-loss validator
+// must never be written blind. The interactive TUI path is exempt — it shows
+// the warning and lets the user decide per file. AUXLY_ORGANIZE_FORCE=1
+// overrides after the user has seen the warning once.
+func blockOnFactLoss(prop OrganizeProposal) (bool, OrganizeResult) {
+	if prop.Warning == "" || os.Getenv("AUXLY_ORGANIZE_FORCE") == "1" {
+		return false, OrganizeResult{}
+	}
+	return true, OrganizeResult{
+		Success: false,
+		Warning: prop.Warning,
+		Message: prop.Warning + "\n\nNothing was written. Review the proposal in the dashboard (auxly → Memory Org), or re-run with AUXLY_ORGANIZE_FORCE=1 to apply anyway.",
+	}
 }
 
 // extractJSON isolates the JSON object from any markdown code fences or surrounding
@@ -936,8 +1073,11 @@ func (s *Store) OrganizeVaultWithCustom(endpoint string, model string) OrganizeR
 	if len(prop.Changes) == 0 {
 		return res
 	}
+	if blocked, br := blockOnFactLoss(prop); blocked {
+		return br
+	}
 	diff := s.ApplyOrganizeChanges(prop.Changes)
-	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using custom model %s!", prop.ModelUsed), Diff: diff, TokensUsed: prop.TokensUsed}
+	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using custom model %s!", prop.ModelUsed), Diff: diff, TokensUsed: prop.TokensUsed, Warning: prop.Warning}
 }
 
 // generateDiff creates a clean line-by-line de-duplication diff showing exactly which lines were removed (-) and added (+).

@@ -153,6 +153,29 @@ func (s *Store) Write(filename string, content string) error {
 
 // WriteScoped writes content to either "workspace" or "global" memory directories.
 func (s *Store) WriteScoped(filename string, content string, scope string) error {
+	// Serialize with every other writer (other MCP server processes, CLI, TUI)
+	// — concurrent approves/writes must never corrupt or truncate a memory file.
+	unlock, err := LockVault(s.Root)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	if err := s.writeScopedNoLock(filename, content, scope); err != nil {
+		return err
+	}
+
+	// Trigger auto-compilation of unified memory
+	if filename != "unified_memory.md" {
+		_ = s.CompileUnified()
+	}
+	return nil
+}
+
+// writeScopedNoLock is WriteScoped's body without lock acquisition or the
+// unified recompile — for batch callers (ApplyOrganizeChanges) that hold the
+// vault lock across many files and compile once at the end.
+func (s *Store) writeScopedNoLock(filename string, content string, scope string) error {
 	var path string
 	var err error
 
@@ -175,15 +198,7 @@ func (s *Store) WriteScoped(filename string, content string, scope string) error
 		}
 	}
 
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-		return err
-	}
-
-	// Trigger auto-compilation of unified memory
-	if filename != "unified_memory.md" {
-		_ = s.CompileUnified()
-	}
-	return nil
+	return AtomicWriteFile(path, []byte(content), 0644)
 }
 
 // CompileUnified compiles all memory files into a single unified_memory.md file.
@@ -212,9 +227,12 @@ func (s *Store) CompileUnified() error {
 		b.WriteString("\n\n---\n\n")
 	}
 
-	// Write directly without resolvePath recursion checks
+	// Write directly without resolvePath recursion checks. Atomic write, but NO
+	// vault lock here: callers (WriteScoped, pending.Approve) already hold it and
+	// re-acquiring would deadlock; unified_memory.md is a derived rollup, so a
+	// standalone call racing a writer is at worst one compile stale.
 	path := filepath.Join(s.Root, "unified_memory.md")
-	return os.WriteFile(path, []byte(b.String()), 0644)
+	return AtomicWriteFile(path, []byte(b.String()), 0644)
 }
 
 // Search performs a case-insensitive substring search across all .md files.
@@ -275,6 +293,12 @@ func (s *Store) PendingDir() string {
 // The `path` argument selects which root to operate on; pass the store Root (or a
 // workspace memory dir). Both files are read/written within that directory.
 func (s *Store) MigratePersonal(path string) error {
+	unlock, lockErr := LockVault(s.Root)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
+
 	identityPath := filepath.Join(path, "identity.md")
 	identityRaw, err := os.ReadFile(identityPath)
 	if err != nil {
@@ -303,10 +327,10 @@ func (s *Store) MigratePersonal(path string) error {
 	personalBuf.WriteString(strings.TrimRight(section, "\n"))
 	personalBuf.WriteString("\n")
 
-	if err := os.WriteFile(personalPath, []byte(personalBuf.String()), 0644); err != nil {
+	if err := AtomicWriteFile(personalPath, []byte(personalBuf.String()), 0644); err != nil {
 		return fmt.Errorf("write personal.md: %w", err)
 	}
-	if err := os.WriteFile(identityPath, []byte(remaining), 0644); err != nil {
+	if err := AtomicWriteFile(identityPath, []byte(remaining), 0644); err != nil {
 		return fmt.Errorf("write identity.md: %w", err)
 	}
 	return nil
