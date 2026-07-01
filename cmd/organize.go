@@ -19,6 +19,11 @@ func init() {
 
 func runOrganize(cmd *cobra.Command, args []string) error {
 	store := memory.NewStore(getMemoryPath())
+	// Chunked organize (large vaults) runs one model call per file and can take
+	// minutes each — show progress so a headless run never looks hung.
+	store.OrganizeProgress = func(current, total int, file string) {
+		fmt.Printf("📂 Organizing %s (%d/%d)…\n", file, current, total)
+	}
 
 	estTokens := store.GetEstimatedTokens()
 	fmt.Printf("🧠 Starting On-Demand Memory Organize...\n")

@@ -6,6 +6,7 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/git"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/spf13/cobra"
 )
@@ -55,6 +56,9 @@ func runApprove(cmd *cobra.Command, args []string) error {
 	// Auto-commit if configured
 	gitCfg, _ := git.LoadConfig(memPath)
 	if gitCfg != nil && gitCfg.AutoCommit {
+		// git stages the whole vault dir — refresh the lazily-compiled rollup
+		// first so the commit never snapshots a stale unified_memory.md.
+		memory.NewStore(memPath).EnsureUnified()
 		git.AutoCommit(memPath, pendingName, "Approved pending change")
 	}
 

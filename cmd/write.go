@@ -9,6 +9,7 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/git"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 	"github.com/spf13/cobra"
@@ -104,7 +105,12 @@ func runWrite(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Apply diff using the centralized ApplyDiff helper
+	// Read→merge→write under the vault lock (concurrent auto-trust agents must
+	// serialize) with an atomic write — same guarantees as the approve path.
+	unlock, err := memory.LockVault(memPath)
+	if err != nil {
+		return err
+	}
 	var existing string
 	if data, err := os.ReadFile(targetPath); err == nil {
 		existing = string(data)
@@ -114,9 +120,11 @@ func runWrite(cmd *cobra.Command, args []string) error {
 	// Update "Last Updated" field
 	content = updateLastUpdated(content)
 
-	if err := os.WriteFile(targetPath, []byte(content), 0644); err != nil {
+	if err := memory.AtomicWriteFile(targetPath, []byte(content), 0644); err != nil {
+		unlock()
 		return fmt.Errorf("failed to write file: %w", err)
 	}
+	unlock()
 
 	// Log audit entry
 	logger.Log(writeAgent, writeProvider, "write", writeFile, writeDiff, writeReason, level)
@@ -124,6 +132,9 @@ func runWrite(cmd *cobra.Command, args []string) error {
 	// Auto-commit if configured
 	gitCfg, _ := git.LoadConfig(memPath)
 	if gitCfg != nil && gitCfg.AutoCommit {
+		// git stages the whole vault dir — refresh the lazily-compiled rollup
+		// first so the commit never snapshots a stale unified_memory.md.
+		memory.NewStore(memPath).EnsureUnified()
 		git.AutoCommit(memPath, writeFile, writeReason)
 	}
 

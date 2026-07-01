@@ -959,6 +959,25 @@ func (m organizeModel) submit() (organizeModel, tea.Cmd) {
 		m.status = "No files approved - nothing applied."
 		return m, nil
 	}
+	// RULE 0 guard on the APPROVED SUBSET: a cross-file move is TWO changes —
+	// source (fact removed) and target (fact added). Approving the source while
+	// rejecting/skipping the target would silently delete the fact. Validate what
+	// will ACTUALLY be written: approved changes as-is, everything else pinned to
+	// its on-disk content. Block only when the subset INTRODUCES loss the full
+	// proposal didn't have — a proposal the validator already flagged stays
+	// approvable (this review screen IS the human override for that).
+	effective := make([]memory.ProposedChange, 0, len(m.changes))
+	for i, c := range m.changes {
+		if i < len(m.decisions) && m.decisions[i] == decApproved {
+			effective = append(effective, c)
+		} else {
+			effective = append(effective, memory.ProposedChange{Name: c.Name, OldContent: c.OldContent, NewContent: c.OldContent, Scope: c.Scope})
+		}
+	}
+	if w := memory.FactLossWarning(effective); w != "" && m.proposal.Warning == "" {
+		m.status = "Blocked: this approve/reject combination would LOSE facts (approved a move's source but not its target?). Approve the paired file(s) too, or reject the source. " + strings.SplitN(w, "\n", 2)[0]
+		return m, nil
+	}
 	// Apply the approved subset, then record each file that actually changed to the
 	// audit log so the write shows up as durable history in the Audit Trail tab. The
 	// per-file diff is logged too, so the user can inspect exactly what was written.

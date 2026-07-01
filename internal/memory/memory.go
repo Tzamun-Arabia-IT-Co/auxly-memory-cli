@@ -24,6 +24,10 @@ type FileInfo struct {
 type Store struct {
 	Root          string
 	WorkspaceRoot string
+	// OrganizeProgress, when set, receives per-file progress during a CHUNKED
+	// organize (one model call per file can take minutes each — without this a
+	// headless `auxly organize` looks hung). Nil-safe: unset means silent.
+	OrganizeProgress func(current, total int, file string)
 }
 
 // NewStore creates a new memory store, dynamically detecting any local workspace.
@@ -124,6 +128,12 @@ func (s *Store) List() ([]FileInfo, error) {
 
 // View reads and returns the contents of a memory file, prioritizing local workspace overrides.
 func (s *Store) View(filename string) (string, error) {
+	// The unified rollup is compiled lazily: writes no longer regenerate it
+	// (that was O(vault) I/O on EVERY fact write) — the first read after any
+	// source change does, via an mtime check.
+	if filename == "unified_memory.md" {
+		s.ensureUnifiedFresh()
+	}
 	if s.WorkspaceRoot != "" {
 		if localPath, perr := safepath.ResolveSafe(s.WorkspaceRoot, filename); perr == nil {
 			if _, err := os.Stat(localPath); err == nil {
@@ -161,15 +171,41 @@ func (s *Store) WriteScoped(filename string, content string, scope string) error
 	}
 	defer unlock()
 
-	if err := s.writeScopedNoLock(filename, content, scope); err != nil {
-		return err
-	}
+	return s.writeScopedNoLock(filename, content, scope)
+}
 
-	// Trigger auto-compilation of unified memory
-	if filename != "unified_memory.md" {
+// ensureUnifiedFresh recompiles unified_memory.md iff any source file is newer
+// than the current rollup (or the rollup is missing). Cheap on the steady
+// state: one stat per file, no writes.
+func (s *Store) ensureUnifiedFresh() {
+	files, err := s.List()
+	if err != nil {
+		return
+	}
+	unifiedStat, statErr := os.Stat(filepath.Join(s.Root, "unified_memory.md"))
+	stale := statErr != nil
+	if !stale {
+		for _, f := range files {
+			// !Before (i.e. >=), not After: on coarse-mtime filesystems (FAT/exFAT
+			// ~2s, some network mounts) a write landing in the same tick as the
+			// last compile must still count as newer — an extra compile is cheap,
+			// a stale rollup is wrong.
+			if f.Name != "unified_memory.md" && !f.ModTime.Before(unifiedStat.ModTime()) {
+				stale = true
+				break
+			}
+		}
+	}
+	if stale {
 		_ = s.CompileUnified()
 	}
-	return nil
+}
+
+// EnsureUnified refreshes the unified rollup if any source file changed —
+// for callers that hand the vault DIRECTORY to something that bypasses
+// Store.View (git auto-commit, external sync).
+func (s *Store) EnsureUnified() {
+	s.ensureUnifiedFresh()
 }
 
 // writeScopedNoLock is WriteScoped's body without lock acquisition or the
@@ -228,9 +264,9 @@ func (s *Store) CompileUnified() error {
 	}
 
 	// Write directly without resolvePath recursion checks. Atomic write, but NO
-	// vault lock here: callers (WriteScoped, pending.Approve) already hold it and
-	// re-acquiring would deadlock; unified_memory.md is a derived rollup, so a
-	// standalone call racing a writer is at worst one compile stale.
+	// vault lock here: some callers already hold it and re-acquiring would
+	// deadlock; unified_memory.md is a derived rollup, so a standalone call
+	// racing a writer is at worst one compile stale.
 	path := filepath.Join(s.Root, "unified_memory.md")
 	return AtomicWriteFile(path, []byte(b.String()), 0644)
 }

@@ -213,12 +213,8 @@ func (m *Manager) approve(pendingName string, force bool) error {
 	if err := memory.AtomicWriteFile(targetPath, []byte(mergedContent), 0644); err != nil {
 		return fmt.Errorf("failed to write to %s: %w", target, err)
 	}
-
-	// Trigger re-compilation of unified memory
-	if target != "unified_memory.md" {
-		store := memory.NewStore(m.memoryRoot)
-		_ = store.CompileUnified()
-	}
+	// unified_memory.md is now compiled lazily on read (mtime check in
+	// Store.View) — no eager recompile per approve.
 
 	// Remove pending file
 	return os.Remove(pendingPath)
@@ -290,21 +286,31 @@ func ApplyDiff(existing, diff string) string {
 	lines := strings.Split(existing, "\n")
 	diffLines := strings.Split(diff, "\n")
 
+	// Normalize existing lines ONCE — the dedup check below is existing×additions
+	// and re-normalizing (plus rebuilding trigram sets) per pair was quadratic
+	// waste on large files.
+	norm := make([]string, len(lines))
+	for i, l := range lines {
+		norm[i] = normalizeLine(l)
+	}
+
 	for _, dl := range diffLines {
 		if strings.HasPrefix(dl, "---") || strings.HasPrefix(dl, "+++") || strings.HasPrefix(dl, "@@") {
 			continue
 		}
 		if strings.HasPrefix(dl, "+") {
 			addition := strings.TrimPrefix(dl, "+")
+			nAdd := normalizeLine(addition)
 			alreadyExists := false
-			for _, el := range lines {
-				if strings.TrimSpace(el) == strings.TrimSpace(addition) {
+			for _, n := range norm {
+				if normLinesEquivalent(n, nAdd) {
 					alreadyExists = true
 					break
 				}
 			}
 			if !alreadyExists {
 				lines = append(lines, addition)
+				norm = append(norm, nAdd)
 			}
 		} else if strings.HasPrefix(dl, "-") {
 			deletion := strings.TrimPrefix(dl, "-")
@@ -314,13 +320,14 @@ func ApplyDiff(existing, diff string) string {
 			if strings.TrimSpace(deletion) == "" {
 				continue
 			}
-			var newLines []string
-			for _, el := range lines {
+			var newLines, newNorm []string
+			for i, el := range lines {
 				if strings.TrimSpace(el) != strings.TrimSpace(deletion) {
 					newLines = append(newLines, el)
+					newNorm = append(newNorm, norm[i])
 				}
 			}
-			lines = newLines
+			lines, norm = newLines, newNorm
 		}
 	}
 

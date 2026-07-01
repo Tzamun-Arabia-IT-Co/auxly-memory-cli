@@ -241,8 +241,49 @@ func (s *Store) buildProposalFromJSON(jsonContent, modelUsed string, tokensUsed 
 			IsNew:      viewErr != nil,
 		})
 	}
+	prop.Changes = s.stripPersonalLeaks(prop.Changes)
 	prop.Warning = factLossWarning(prop.Changes)
 	return prop, OrganizeResult{Success: true}
+}
+
+// stripPersonalLeaks mechanically enforces the personal one-way privacy sink on
+// a parsed proposal, whatever the model emitted: any bullet in a NON-personal
+// file's proposed content that matches a bullet of the ORIGINAL personal.md is
+// removed (the fact still lives in personal.md, so nothing is lost). Prompt
+// rules alone can't be trusted — a confused or prompt-injected model could copy
+// personal facts into a shared file, which factLossWarning can't see (it only
+// detects MISSING facts, never leaked duplicates).
+func (s *Store) stripPersonalLeaks(changes []ProposedChange) []ProposedChange {
+	original, err := s.View("personal.md")
+	if err != nil {
+		return changes
+	}
+	personal := make(map[string]bool)
+	for _, b := range bulletLines(original) {
+		personal[normalizeFact(b)] = true
+	}
+	if len(personal) == 0 {
+		return changes
+	}
+	for i, c := range changes {
+		if IsPersonalFile(c.Name) {
+			continue
+		}
+		var kept []string
+		removed := false
+		for _, l := range strings.Split(c.NewContent, "\n") {
+			t := strings.TrimSpace(l)
+			if (strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "* ")) && personal[normalizeFact(t)] {
+				removed = true
+				continue
+			}
+			kept = append(kept, l)
+		}
+		if removed {
+			changes[i].NewContent = strings.Join(kept, "\n")
+		}
+	}
+	return changes
 }
 
 // factLossWarning validates RULE 0 (zero fact loss) mechanically: counts bullet
@@ -303,6 +344,13 @@ func factLossWarning(changes []ProposedChange) string {
 	return w
 }
 
+// FactLossWarning exposes the RULE 0 validator for callers that must re-check a
+// SUBSET of a proposal (the TUI validates the user's approved selection before
+// applying — approving a move's source without its target would lose the fact).
+func FactLossWarning(changes []ProposedChange) string {
+	return factLossWarning(changes)
+}
+
 // bulletLines returns the trimmed "- " / "* " bullet lines of a memory file —
 // the unit RULE 0 counts as one fact.
 func bulletLines(content string) []string {
@@ -342,7 +390,6 @@ func (s *Store) ApplyOrganizeChanges(changes []ProposedChange) string {
 	}
 	defer unlock()
 
-	wrote := false
 	for _, c := range changes {
 		if !c.Changed() {
 			continue
@@ -359,14 +406,11 @@ func (s *Store) ApplyOrganizeChanges(changes []ProposedChange) string {
 			diffBuilder.WriteString(fmt.Sprintf("⚠ failed %s: %v\n", c.Name, werr))
 			continue
 		}
-		wrote = true
 		if d := generateDiff(c.Name, c.OldContent, c.NewContent); d != "" {
 			diffBuilder.WriteString(d + "\n")
 		}
 	}
-	if wrote {
-		_ = s.CompileUnified() // once for the batch, while still holding the lock
-	}
+	// unified_memory.md recompiles lazily on next read (Store.View mtime check).
 	return diffBuilder.String()
 }
 
@@ -485,24 +529,23 @@ type organizeRun struct {
 	tokensUsed  int
 }
 
-// runOrganizeModel gathers the vault, builds the prompt, and runs the chosen
-// model (CLI agent when agentPath != "", else a direct LLM API). It performs NO
-// disk writes. The returned bool `proceed` reports whether a model output is
-// ready to be parsed into a proposal: it is false both on error (res.Success
-// false) and on the benign empty-vault case (res.Success true with a message),
-// so callers can short-circuit on either without parsing.
-func (s *Store) runOrganizeModel(ctx context.Context, agentName string, agentPath string, model string) (organizeRun, OrganizeResult, bool) {
-	// 1. Gather all files and compile them into a unified payload
+// organizeFile is one organizable vault file's snapshot taken at plan time.
+type organizeFile struct {
+	Name    string
+	Content string
+}
+
+// gatherOrganizeFiles snapshots every USER-MEMORY taxonomy file. Setup/
+// instruction files (CLAUDE.md, AGENTS.md, providers.md, …), the generated
+// aggregate, and the agent-activity log (agents.md) are never read or
+// reorganized.
+func (s *Store) gatherOrganizeFiles() ([]organizeFile, error) {
 	files, err := s.List()
 	if err != nil {
-		return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to list files: %v", err)}, false
+		return nil, err
 	}
-
-	var vaultPayload strings.Builder
+	var out []organizeFile
 	for _, f := range files {
-		// Only send USER-MEMORY taxonomy files. Setup/instruction files
-		// (CLAUDE.md, AGENTS.md, providers.md, …), the generated aggregate, and the
-		// agent-activity log (agents.md) are never read or reorganized.
 		if !IsOrganizableFile(f.Name) {
 			continue
 		}
@@ -510,16 +553,24 @@ func (s *Store) runOrganizeModel(ctx context.Context, agentName string, agentPat
 		if err != nil {
 			continue
 		}
-		vaultPayload.WriteString(fmt.Sprintf("=== FILE: %s ===\n%s\n=== END ===\n\n", f.Name, content))
+		out = append(out, organizeFile{Name: f.Name, Content: content})
 	}
+	return out, nil
+}
 
-	if vaultPayload.Len() == 0 {
-		return organizeRun{}, OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}, false
+func vaultUserPrompt(files []organizeFile) string {
+	var vaultPayload strings.Builder
+	for _, f := range files {
+		vaultPayload.WriteString(fmt.Sprintf("=== FILE: %s ===\n%s\n=== END ===\n\n", f.Name, f.Content))
 	}
+	return fmt.Sprintf("Here is the current memory vault contents to organize:\n\n%s", vaultPayload.String())
+}
 
-	systemPrompt := organizeSystemPrompt()
-
-	userPrompt := fmt.Sprintf("Here is the current memory vault contents to organize:\n\n%s", vaultPayload.String())
+// runOrganizeModel runs the chosen model (CLI agent when agentPath != "", else
+// a direct LLM API) over the given prompts. It performs NO disk writes. The
+// returned bool `proceed` reports whether a model output is ready to be parsed
+// into a proposal.
+func (s *Store) runOrganizeModel(ctx context.Context, agentName string, agentPath string, model string, systemPrompt, userPrompt string) (organizeRun, OrganizeResult, bool) {
 	fullPrompt := fmt.Sprintf("%s\n\n%s", systemPrompt, userPrompt)
 
 	var jsonContent string
@@ -711,12 +762,59 @@ func (s *Store) runOrganizeModel(ctx context.Context, agentName string, agentPat
 	return organizeRun{jsonContent: jsonContent, modelUsed: modelUsed, tokensUsed: tokensUsed}, OrganizeResult{}, true
 }
 
-func (s *Store) PlanOrganizeWithAgent(ctx context.Context, agentName, agentPath, model string) (OrganizeProposal, OrganizeResult) {
-	run, res, proceed := s.runOrganizeModel(ctx, agentName, agentPath, model)
+// organizeExecutor runs ONE model call over the given prompts — the transport
+// (CLI agent, provider chat API, custom endpoint) is the closure's business.
+type organizeExecutor func(ctx context.Context, systemPrompt, userPrompt string) (organizeRun, OrganizeResult, bool)
+
+// planOrganize is the shared organize planner: snapshot the vault, then either
+// one whole-vault model call (small vaults — existing behavior) or one call PER
+// FILE when the payload exceeds the chunk threshold, so organize scales to any
+// vault size instead of hitting model context limits.
+func (s *Store) planOrganize(ctx context.Context, exec organizeExecutor) (OrganizeProposal, OrganizeResult) {
+	files, err := s.gatherOrganizeFiles()
+	if err != nil {
+		return OrganizeProposal{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to list files: %v", err)}
+	}
+	if len(files) == 0 {
+		return OrganizeProposal{}, OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}
+	}
+
+	if len(files) > 1 && estimateVaultTokens(files) > organizeChunkThreshold() {
+		return s.planOrganizeChunked(ctx, exec, files)
+	}
+
+	run, res, proceed := exec(ctx, organizeSystemPrompt(), vaultUserPrompt(files))
 	if !proceed {
 		return OrganizeProposal{}, res
 	}
 	return s.buildProposalFromJSON(run.jsonContent, run.modelUsed, run.tokensUsed)
+}
+
+func estimateVaultTokens(files []organizeFile) int {
+	total := 0
+	for _, f := range files {
+		total += len(f.Content)
+	}
+	return total/4 + 800
+}
+
+// organizeChunkThreshold is the estimated-token size above which organize
+// switches from one whole-vault model call to one call per file. Large vaults
+// in a single payload risk model context limits and degrade output quality
+// (the v1.1.5 field lesson). Override with AUXLY_ORGANIZE_CHUNK_TOKENS.
+func organizeChunkThreshold() int {
+	if v := os.Getenv("AUXLY_ORGANIZE_CHUNK_TOKENS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 12000
+}
+
+func (s *Store) PlanOrganizeWithAgent(ctx context.Context, agentName, agentPath, model string) (OrganizeProposal, OrganizeResult) {
+	return s.planOrganize(ctx, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+		return s.runOrganizeModel(c, agentName, agentPath, model, sys, user)
+	})
 }
 
 func (s *Store) OrganizeVaultWithAgent(agentName, agentPath string) OrganizeResult {
@@ -926,34 +1024,7 @@ func resolveOrganizeProvider(provider, customURL string) (baseURL, apiKey string
 	}
 }
 
-func (s *Store) runOrganizeChat(ctx context.Context, apiURL, model, apiKey string) (organizeRun, OrganizeResult, bool) {
-	files, err := s.List()
-	if err != nil {
-		return organizeRun{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to list files: %v", err)}, false
-	}
-
-	var vaultPayload strings.Builder
-	for _, f := range files {
-		// Only send USER-MEMORY taxonomy files. Setup/instruction files
-		// (CLAUDE.md, AGENTS.md, providers.md, …), the generated aggregate, and the
-		// agent-activity log (agents.md) are never read or reorganized.
-		if !IsOrganizableFile(f.Name) {
-			continue
-		}
-		content, err := s.View(f.Name)
-		if err != nil {
-			continue
-		}
-		vaultPayload.WriteString(fmt.Sprintf("=== FILE: %s ===\n%s\n=== END ===\n\n", f.Name, content))
-	}
-
-	if vaultPayload.Len() == 0 {
-		return organizeRun{}, OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}, false
-	}
-
-	systemPrompt := organizeSystemPrompt()
-
-	userPrompt := fmt.Sprintf("Here is the current memory vault contents to organize:\n\n%s", vaultPayload.String())
+func (s *Store) runOrganizeChat(ctx context.Context, apiURL, model, apiKey string, systemPrompt, userPrompt string) (organizeRun, OrganizeResult, bool) {
 	fullPrompt := fmt.Sprintf("%s\n\n%s", systemPrompt, userPrompt)
 
 	type msg struct {
@@ -1040,28 +1111,20 @@ func (s *Store) runOrganizeChat(ctx context.Context, apiURL, model, apiKey strin
 	return organizeRun{jsonContent: jsonContent, modelUsed: model, tokensUsed: tokensUsed}, OrganizeResult{}, true
 }
 
-func (s *Store) runOrganizeModelCustom(ctx context.Context, endpoint string, model string) (organizeRun, OrganizeResult, bool) {
-	return s.runOrganizeChat(ctx, normalizeOrganizeChatURL(endpoint), model, os.Getenv("AUXLY_LLM_KEY"))
-}
-
 func (s *Store) PlanOrganizeWithProvider(ctx context.Context, provider, customURL, model string) (OrganizeProposal, OrganizeResult) {
 	baseURL, apiKey, res, ok := resolveOrganizeProvider(provider, customURL)
 	if !ok {
 		return OrganizeProposal{}, res
 	}
-	run, res, proceed := s.runOrganizeChat(ctx, strings.TrimRight(baseURL, "/")+"/v1/chat/completions", model, apiKey)
-	if !proceed {
-		return OrganizeProposal{}, res
-	}
-	return s.buildProposalFromJSON(run.jsonContent, run.modelUsed, run.tokensUsed)
+	return s.planOrganize(ctx, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+		return s.runOrganizeChat(c, strings.TrimRight(baseURL, "/")+"/v1/chat/completions", model, apiKey, sys, user)
+	})
 }
 
 func (s *Store) PlanOrganizeWithCustom(ctx context.Context, endpoint, model string) (OrganizeProposal, OrganizeResult) {
-	run, res, proceed := s.runOrganizeModelCustom(ctx, endpoint, model)
-	if !proceed {
-		return OrganizeProposal{}, res
-	}
-	return s.buildProposalFromJSON(run.jsonContent, run.modelUsed, run.tokensUsed)
+	return s.planOrganize(ctx, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+		return s.runOrganizeChat(c, normalizeOrganizeChatURL(endpoint), model, os.Getenv("AUXLY_LLM_KEY"), sys, user)
+	})
 }
 
 // OrganizeVaultWithCustom performs memory vault consolidation against a custom HTTP LLM API (like local Ollama, LM Studio, etc.).
