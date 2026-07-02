@@ -632,6 +632,32 @@ Each agent is wired in its own config file, and the installed command carries a 
 
 ---
 
+## Auto-capture (opt-in)
+
+Let sessions teach your memory without lifting a finger. `auxly capture`
+extracts durable facts from a session transcript with your configured LLM,
+dedups them against the vault, and queues them as **pending changes** — it
+never writes memory directly, so you review everything with `auxly pending`.
+
+```bash
+auxly hooks install     # Claude Code: adds a Stop hook running `auxly capture`
+auxly hooks uninstall   # removes exactly that hook, touching nothing else
+```
+
+Throttled by design: sessions under ~2K tokens are skipped, at most one
+capture per 10 minutes, at most 10 facts per run.
+
+Other agents (fast-follow — wire them manually today by piping a transcript):
+
+| Agent | Hook point | Status |
+|-------|-----------|--------|
+| Claude Code | `Stop` hook (`auxly hooks install`) | ✅ built-in |
+| Codex CLI | `notify` program in `~/.codex/config.toml` → `auxly capture --transcript <file>` | manual |
+| Gemini CLI | no session-end hook yet — pipe a saved chat: `gemini ... \| auxly capture` | manual |
+| Kimi CLI | shell wrapper around the session, then `auxly capture --transcript` | manual |
+
+---
+
 ## Git sync
 
 Your memory is a folder — so version it. Auxly auto-commits on write and pushes only when you ask:

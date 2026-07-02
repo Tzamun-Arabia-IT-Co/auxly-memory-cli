@@ -171,6 +171,8 @@ func helpText() string {
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"stats"+reset, "Show agent usage metrics from audit.db"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"usage"+reset, "Live provider usage/quota meters"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"tail"+reset, "Live stream the .audit.log"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"capture"+reset, "Extract session facts into the pending queue (LLM, never direct writes)"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"hooks"+reset, "Install/remove the Claude Code auto-capture Stop hook (opt-in)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"pending"+reset, "List memory changes waiting for approval (agent, target, age)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"approve"+reset, "Approve pending changes (--force, or bulk --all/--agent/--file)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"reject"+reset, "Reject pending changes (one, or bulk --all/--agent/--file)"))
