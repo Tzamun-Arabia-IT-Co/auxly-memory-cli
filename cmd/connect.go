@@ -644,25 +644,26 @@ func runDoctor(p remoteProfile) error {
 	}
 }
 
-// checkTwoWay verifies the HOST can reach THIS machine back over SSH. When this
-// machine is the memory host, the remote must be able to SSH in to it at runtime
-// (that's how its mcp-server launches). If the return path is missing, we stop
-// with a clear explanation + alternatives instead of leaving a dead config.
-func checkTwoWay(p remoteProfile) error {
-	fmt.Println("🔁 Checking two-way connectivity (the host must reach this machine back)...")
+// checkTwoWay verifies the box can reach THIS machine back over SSH — that is
+// the memory link's runtime path (the box's agents SSH here to read the vault).
+// It returns the address the box proved reachable, which provisionRemote then
+// wires, so the check validates the exact route that will be used. If the
+// return path is missing, we stop with real fixes instead of a dead config.
+func checkTwoWay(p remoteProfile) (string, error) {
+	fmt.Println("🔁 Checking the memory-link return path (the box must reach this machine)...")
 	addrs := localCandidateAddrs()
 	if len(addrs) == 0 {
-		fmt.Println("   ⚠ Could not determine this machine's IP addresses — skipping two-way check.")
-		return nil
+		fmt.Println("   ⚠ Could not determine this machine's IP addresses — skipping the return-path check.")
+		return "", nil
 	}
 	if reachAddr, ok := hostCanReachBack(p, addrs); ok {
-		fmt.Printf("   ✓ Two-way OK — %s can reach this machine at %s:22\n", p.Host, reachAddr)
-		return nil
+		fmt.Printf("   ✓ Return path OK — %s can reach this machine at %s:22\n", p.Host, reachAddr)
+		return reachAddr, nil
 	}
 	printTwoWayFailureGuidance(p, addrs)
 	// Machine-readable token so the TUI can offer the relay ([h]) / method-retry ([m]).
 	fmt.Println("AUXLY_TWOWAY_FAILED:" + p.Name)
-	return fmt.Errorf("no direct return path on '%s' — set up the relay tunnel with `auxly host setup` (recommended)", p.Method)
+	return "", fmt.Errorf("no return path on '%s' — enable Remote Login/sshd on THIS machine, or set up the relay with `auxly host setup`", p.Method)
 }
 
 // localCandidateAddrs returns this machine's non-loopback IPv4 addresses — the
@@ -795,6 +796,10 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 
 	if err := validateForExec(p); err != nil {
 		return err
+	}
+
+	if connectMCPSelftest {
+		return runConnectSelftest(p)
 	}
 
 	provider := connectMCPProvider
@@ -1052,6 +1057,9 @@ var (
 	addJump    string
 	addMemPath string
 	addBatch   bool
+	// addStandalone preserves the pre-v1.2 behavior: give the box its own local
+	// vault instead of wiring it to this machine's memory.
+	addStandalone bool
 )
 
 // normalizeOS maps user input to the canonical target OS, defaulting to linux.
@@ -1082,6 +1090,7 @@ var connectAddCmd = &cobra.Command{
 
 func init() {
 	connectMCPCmd.Flags().StringVar(&connectMCPProvider, "provider", "", "provider id used for attribution (default: claude-code)")
+	connectMCPCmd.Flags().BoolVar(&connectMCPSelftest, "selftest", false, "probe the end-to-end memory link and exit")
 
 	connectAddCmd.Flags().StringVar(&addName, "name", "", "profile name (defaults to host)")
 	connectAddCmd.Flags().StringVar(&addMethod, "method", "", "reachability: lan|vpn|bastion|public")
@@ -1090,6 +1099,8 @@ func init() {
 	connectAddCmd.Flags().StringVar(&addJump, "jump", "", "jump host ([user@]host) for the bastion method")
 	connectAddCmd.Flags().StringVar(&addMemPath, "mem-path", "", "host memory folder to serve (passed as --path; default: host's ~/.auxly/memory)")
 	connectAddCmd.Flags().BoolVar(&addBatch, "batch", false, "non-interactive: never prompt for an SSH password (fail fast if key auth is missing)")
+	connectAddCmd.Flags().BoolVar(&addStandalone, "standalone", false, "give the box its own local vault instead of wiring it to this machine's memory")
+	connectCmd.Flags().BoolVar(&addStandalone, "standalone", false, "give the box its own local vault instead of wiring it to this machine's memory")
 
 	connectUseCmd.Flags().StringVar(&useHost, "host", "", "[user@]host[:port] to create the profile if it doesn't exist yet")
 	connectUseCmd.Flags().StringVar(&useJump, "jump", "", "jump/relay host ([user@]host) — for rendezvous reachability through a relay")
@@ -1166,10 +1177,11 @@ func runConnectAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("💾 Saved remote profile %q (%s)\n", p.Name, p.Method)
-	if err := checkTwoWay(p); err != nil {
+	backAddr, err := checkTwoWay(p)
+	if err != nil {
 		return err
 	}
-	_ = provisionRemote(p)
+	_ = provisionRemote(p, backAddr)
 	printConnectSummary(p)
 	return nil
 }
@@ -1250,10 +1262,11 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("💾 Saved remote profile %q (%s)\n", p.Name, p.Method)
-	if err := checkTwoWay(p); err != nil {
+	backAddr, err := checkTwoWay(p)
+	if err != nil {
 		return err
 	}
-	_ = provisionRemote(p)
+	_ = provisionRemote(p, backAddr)
 	printConnectSummary(p)
 	return nil
 }
@@ -1356,7 +1369,7 @@ func runConnectTest(cmd *cobra.Command, args []string) error {
 	if err := runDoctor(p); err != nil {
 		return err
 	}
-	if err := checkTwoWay(p); err != nil {
+	if _, err := checkTwoWay(p); err != nil {
 		return err
 	}
 	fmt.Printf("✅ Remote %q passed all checks.\n", name)
@@ -1872,7 +1885,77 @@ func injectRemoteConfigs(name string) {
 // config and installs the skills into every agent it detects — correctly for
 // the host's own OS and home dir. Honors p.MemPath via the global --path flag
 // so the host serves a specific vault folder. (runSSH validates the profile.)
-func provisionRemote(p remoteProfile) error {
+// provisionRemote is the last step of `auxly connect <box>`: it makes the box's
+// agents READ THIS MACHINE'S memory over the direct route (defect D1 fix — the
+// old behavior gave the box its own standalone vault, which is now opt-in via
+// --standalone). backAddr is the address the box proved it can reach us at
+// (from checkTwoWay).
+func provisionRemote(p remoteProfile, backAddr string) error {
+	if addStandalone {
+		return provisionStandalone(p)
+	}
+	if backAddr == "" {
+		// No proven return path — direct wiring cannot work; say so rather than
+		// silently falling back to a standalone vault the user didn't ask for.
+		return fmt.Errorf("no return path for the memory link — use the relay (`auxly host setup`) or `--standalone` for a local-only setup on the box")
+	}
+
+	fmt.Println("🔗 Wiring the box's agents to THIS machine's memory...")
+
+	// The box reaches back here at runtime as this login, key-authenticated:
+	// fetch (or create) the box's key and authorize it locally.
+	if kerr := authorizeRemoteKeyLocally(p); kerr != nil {
+		fmt.Printf("   ⚠ could not authorize the box's key on this machine: %v\n", kerr)
+	} else {
+		fmt.Println("   ✓ Authorized the box's SSH key on this machine")
+	}
+
+	hostBin := "auxly"
+	if exe, e := os.Executable(); e == nil && exe != "" {
+		hostBin = exe
+	}
+	boxHostname := ""
+	if out, herr := runSSH(p, "hostname"); herr == nil {
+		boxHostname = strings.TrimSpace(firstLine(out))
+	}
+
+	// Record the connection BEFORE wiring (same rationale as the relay flow: a
+	// stalled wire must not leave an unmanaged box) — this also puts direct
+	// boxes into clients.yaml so the hourly reconciler covers them.
+	if err := upsertClient(clientEntry{Name: p.Name, Target: connTarget(p), Method: "direct", Hostname: boxHostname}); err == nil {
+		fmt.Printf("   ✓ Saved connection %q (manage with `auxly host clients`)\n", p.Name)
+	}
+
+	// Wire on a FRESH connection: the shared ControlMaster may predate the
+	// auxly install on the box (stale PATH).
+	target := currentLogin() + "@" + backAddr
+	wireArgs := []string{"auxly", "connect", "use", offerName(), "--method", "public", "--host", target, "--host-bin", hostBin}
+	if p.MemPath != "" {
+		wireArgs = append(wireArgs, "--mem-path", p.MemPath)
+	}
+	if out, werr := runSSH(withoutMux(p), wireArgs...); werr != nil {
+		fmt.Printf("   ⚠ box wiring failed: %v\n   %s\n", werr, firstLine(out))
+		return fmt.Errorf("memory-link wiring failed on %s (connection saved — retry from `auxly host clients`): %w", p.Name, werr)
+	}
+	fmt.Println("   ✓ Box agents wired — they now read this machine's memory")
+
+	// Success is PROVEN by a real read, never claimed from config writes: run
+	// the end-to-end selftest on the box (it execs the exact launcher the
+	// agents will use and calls auxly_memory_list through it).
+	fmt.Println("🔎 Verifying the box can actually read this memory...")
+	if out, serr := runSSH(withoutMux(p), "auxly", "connect-mcp", offerName(), "--selftest"); serr == nil {
+		fmt.Printf("   ✅ box read this machine's memory: %s\n", firstLine(out))
+	} else {
+		fmt.Printf("   ⚠ link selftest failed: %s — fix and re-run from `auxly host clients`\n", firstLine(out))
+		return fmt.Errorf("memory link wired but the proving read failed on %s: %s", p.Name, firstLine(out))
+	}
+	fmt.Println("👉 RESTART the agent on the box to load its memory link.")
+	return nil
+}
+
+// provisionStandalone is the pre-v1.2 behavior: give the box its own local
+// Auxly vault (bare `auxly setup` there). Explicit opt-in via --standalone.
+func provisionStandalone(p remoteProfile) error {
 	fmt.Println("📦 Provisioning the host (installing MCP + skills for its agents)...")
 	remoteCmd := []string{"auxly"}
 	if p.MemPath != "" {
@@ -1990,13 +2073,14 @@ func runConnectWizard() error {
 	}
 	fmt.Printf("💾 Saved remote profile %q\n", p.Name)
 
-	// Step 5b: two-way connectivity (host must reach this machine back).
-	if err := checkTwoWay(p); err != nil {
+	// Step 5b: return path (the box must reach this machine back).
+	backAddr, err := checkTwoWay(p)
+	if err != nil {
 		return err
 	}
 
-	// Step 6: provision the remote host (install skills + MCP on the host itself).
-	_ = provisionRemote(p)
+	// Step 6: wire the box's agents to this machine's memory (or --standalone).
+	_ = provisionRemote(p, backAddr)
 
 	// Step 7: summary.
 	printConnectSummary(p)

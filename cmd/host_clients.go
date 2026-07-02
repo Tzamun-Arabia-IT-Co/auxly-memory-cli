@@ -210,6 +210,7 @@ type clientHealth struct {
 	version      string
 	wired        bool
 	remoteEntry  *remoteProfile // the box's remotes.yaml entry for THIS host (nil if none)
+	link         string         // selftest verdict: OK (N files) / SLOW … / FAIL <class>
 	lastActivity string
 	detail       string // failure detail when unreachable/unwired
 }
@@ -251,6 +252,17 @@ func probeClient(ctx context.Context, c clientEntry) clientHealth {
 	}
 	if !h.wired {
 		h.detail = "remotes.yaml has no entry for this host — `auxly host reconnect " + c.Name + "`"
+		return h
+	}
+	// End-to-end truth signal: the selftest execs the exact launcher the box's
+	// agents use and performs a real memory read through it.
+	if out, serr := runSSHCtx(ctx, p, "auxly", "connect-mcp", offerName(), "--selftest"); serr == nil {
+		h.link = strings.TrimSpace(firstLine(out))
+	} else {
+		h.link = strings.TrimSpace(firstLine(out))
+		if h.link == "" {
+			h.link = "FAIL probe: " + serr.Error()
+		}
 	}
 	return h
 }
@@ -272,7 +284,7 @@ func runHostClients(cmd *cobra.Command, args []string) error {
 		wg.Add(1)
 		go func(i int, c clientEntry) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second) // probe + 10s-capped selftest
 			defer cancel()
 			rows[i] = probeClient(ctx, c)
 		}(i, c)
@@ -288,10 +300,10 @@ func runHostClients(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "BOX\tTARGET\tREACHABLE\tAUXLY\tWIRED\tLAST ACTIVITY\n")
+	fmt.Fprintf(w, "BOX\tTARGET\tREACHABLE\tAUXLY\tWIRED\tLINK\tLAST ACTIVITY\n")
 	problems := 0
 	for _, r := range rows {
-		reach, wired, version, last := "✗", "✗", "-", "-"
+		reach, wired, version, link, last := "✗", "✗", "-", "-", "-"
 		if r.reachable {
 			reach = "✓"
 			if r.version != "" {
@@ -300,6 +312,9 @@ func runHostClients(cmd *cobra.Command, args []string) error {
 		}
 		if r.wired {
 			wired = "✓"
+		}
+		if r.link != "" {
+			link = r.link
 		}
 		if logger != nil {
 			hostKey := r.entry.Hostname
@@ -312,8 +327,8 @@ func runHostClients(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", r.entry.Name, r.entry.Target, reach, version, wired, last)
-		if !r.reachable || !r.wired {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.entry.Name, r.entry.Target, reach, version, wired, link, last)
+		if !r.reachable || !r.wired || strings.HasPrefix(r.link, "FAIL") {
 			problems++
 		}
 	}

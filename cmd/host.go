@@ -439,6 +439,15 @@ func provisionConsumer(hc hostConfig) error {
 		return fmt.Errorf("remote agent wiring failed (connection %q saved, retry with [r] reconnect): %w", clientName, werr)
 	}
 	fmt.Println("   ✓ MCP launcher + skills wired on the box")
+
+	// Prove the link with a real read before claiming success (same truth
+	// signal as the health table and doctor).
+	fmt.Println("🔎 Verifying the box can actually read this memory...")
+	if out, serr := runSSH(withoutMux(relay), hostAuxlyBin(relay), "connect-mcp", name, "--selftest"); serr == nil {
+		fmt.Printf("   ✅ box read this machine's memory: %s\n", firstLine(out))
+	} else {
+		fmt.Printf("   ⚠ link selftest failed: %s — retry with [r] reconnect\n", firstLine(out))
+	}
 	fmt.Println("👉 RESTART the agent on the box to load its memory link.")
 	return nil
 }

@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,7 +24,7 @@ var doctorCmd = &cobra.Command{
 	// Diagnostic: always exits 0 — problems are named in the output, and a
 	// broken setup shouldn't ALSO fail the very command that explains it.
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Print(doctorReport(getMemoryPath()))
+		fmt.Print(doctorReport(getMemoryPath(), true))
 		return nil
 	},
 }
@@ -32,9 +33,10 @@ func init() {
 	rootCmd.AddCommand(doctorCmd)
 }
 
-// doctorReport builds the full health report for the given memory root. Pure
-// function of on-disk state — testable without a cobra invocation.
-func doctorReport(memPath string) string {
+// doctorReport builds the full health report for the given memory root.
+// probeLinks additionally runs the live memory-link selftest per remote profile
+// (real SSH, 10s cap each) — callers that must stay offline (tests) pass false.
+func doctorReport(memPath string, probeLinks bool) string {
 	var b strings.Builder
 	line := func(mark, text, hint string) {
 		b.WriteString("   " + mark + " " + text + "\n")
@@ -140,7 +142,32 @@ func doctorReport(memPath string) string {
 		line("✓", fmt.Sprintf("trust: default %q · %s", cfg.Default, strings.Join(parts, " · ")), "")
 	}
 
-	// 7. Host keep-alive — only when this machine serves its memory to remote
+	// 7. Remote memory links — only when this box reads another machine's
+	// vault. The selftest execs the exact launcher the agents use and does a
+	// real read (10s cap each), so a green line here means the link truly works.
+	if remotes, rerr := loadRemotes(); probeLinks && rerr == nil && len(remotes.Remotes) > 0 {
+		exe, eerr := os.Executable()
+		for _, r := range remotes.Remotes {
+			if eerr != nil {
+				break
+			}
+			out, serr := exec.Command(exe, "connect-mcp", r.Name, "--selftest").Output()
+			verdict := strings.TrimSpace(firstLine(string(out)))
+			switch {
+			case serr == nil && strings.HasPrefix(verdict, "OK"):
+				line("✓", fmt.Sprintf("memory link %q: %s", r.Name, verdict), "")
+			case serr == nil && strings.HasPrefix(verdict, "SLOW"):
+				line("⚠", fmt.Sprintf("memory link %q: %s", r.Name, verdict), "link works but is slow — check the tunnel/relay latency")
+			default:
+				if verdict == "" {
+					verdict = "probe failed"
+				}
+				line("✗", fmt.Sprintf("memory link %q: %s", r.Name, verdict), "re-wire from the host (`auxly host reconnect`) or here via `auxly connect auto`")
+			}
+		}
+	}
+
+	// 8. Host keep-alive — only when this machine serves its memory to remote
 	// boxes. An unloaded service means every remote tunnel is down (the July
 	// 2026 incident); selfHealKeepAlive repairs it on the next long-lived launch.
 	if relays, ok, herr := loadHostConfigs(); herr == nil && ok && len(relays) > 0 {

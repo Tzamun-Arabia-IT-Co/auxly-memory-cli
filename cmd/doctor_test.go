@@ -10,7 +10,7 @@ import (
 // Doctor must diagnose an uninitialized vault (not panic, not lie) and flag an
 // initialized-but-empty state sensibly.
 func TestDoctorReportUninitialized(t *testing.T) {
-	out := doctorReport(t.TempDir())
+	out := doctorReport(t.TempDir(), false)
 	if !strings.Contains(out, "NOT initialized") {
 		t.Fatalf("doctor missed the uninitialized state:\n%s", out)
 	}
@@ -24,7 +24,7 @@ func TestDoctorReportInitializedVault(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, ".initialized"), []byte("1"), 0644)
 	os.WriteFile(filepath.Join(dir, "identity.md"), []byte("- name wael\n"), 0644)
 
-	out := doctorReport(dir)
+	out := doctorReport(dir, false)
 	if !strings.Contains(out, "✓ memory initialized") {
 		t.Fatalf("doctor missed init marker:\n%s", out)
 	}
