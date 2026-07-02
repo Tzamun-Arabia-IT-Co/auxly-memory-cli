@@ -5,6 +5,7 @@ import (
 	"os"
 	"text/tabwriter"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 	"github.com/spf13/cobra"
 )
@@ -60,6 +61,7 @@ func runTrustSet(cmd *cobra.Command, args []string) error {
 
 	provider := args[0]
 	level := args[1]
+	oldLevel := cfg.GetTrustLevel(provider)
 
 	if err := cfg.SetTrustLevel(provider, level); err != nil {
 		return err
@@ -69,6 +71,14 @@ func runTrustSet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Printf("✅ Set %s trust level to: %s\n", provider, level)
+	// Trust changes gate every future write — they belong in the same audit
+	// trail as the writes they authorize.
+	if logger, err := audit.NewLogger(memPath); err == nil {
+		defer logger.Close()
+		logger.Log("human", "user", "trust_change", "trust.yaml", "",
+			fmt.Sprintf("%s: %s → %s", provider, oldLevel, level), level)
+	}
+
+	fmt.Printf("✅ Set %s trust level to: %s (was %s)\n", provider, level, oldLevel)
 	return nil
 }

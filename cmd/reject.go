@@ -8,14 +8,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	rejectAll   bool
+	rejectAgent string
+	rejectFile  string
+)
+
 var rejectCmd = &cobra.Command{
-	Use:   "reject <pending_file>",
-	Short: "Reject and delete a pending change",
-	Args:  cobra.ExactArgs(1),
+	Use:   "reject [pending_file]",
+	Short: "Reject pending changes (one by name, or in bulk with --all/--agent/--file)",
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runReject,
 }
 
 func init() {
+	rejectCmd.Flags().BoolVar(&rejectAll, "all", false, "reject every pending change")
+	rejectCmd.Flags().StringVar(&rejectAgent, "agent", "", "reject all pending changes queued by this agent/provider")
+	rejectCmd.Flags().StringVar(&rejectFile, "file", "", "reject all pending changes targeting this memory file")
 	rootCmd.AddCommand(rejectCmd)
 }
 
@@ -23,19 +32,46 @@ func runReject(cmd *cobra.Command, args []string) error {
 	memPath := getMemoryPath()
 	mgr := pending.NewManager(memPath)
 
-	pendingName := args[0]
-
-	if err := mgr.Reject(pendingName); err != nil {
-		return err
+	bulk := rejectAll || rejectAgent != "" || rejectFile != ""
+	if bulk == (len(args) == 1) {
+		return fmt.Errorf("pass exactly one of: a pending name, or --all/--agent/--file")
 	}
 
-	// Log audit entry
-	logger, err := audit.NewLogger(memPath)
-	if err == nil {
+	names := args
+	if bulk {
+		var err error
+		if names, err = selectPending(mgr, rejectAll, rejectAgent, rejectFile); err != nil {
+			return err
+		}
+		if len(names) == 0 {
+			fmt.Println("Nothing pending matches.")
+			return nil
+		}
+	}
+
+	logger, lerr := audit.NewLogger(memPath)
+	if lerr == nil {
 		defer logger.Close()
-		logger.Log("human", "user", "reject", pendingName, "", "Rejected pending change", "auto")
 	}
 
-	fmt.Printf("❌ Rejected: %s\n", pendingName)
-	return nil
+	var firstErr error
+	rejected := 0
+	for _, name := range names {
+		if err := mgr.Reject(name); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			fmt.Printf("❌ %s: %v\n", name, err)
+			continue
+		}
+		rejected++
+		if lerr == nil {
+			logger.Log("human", "user", "reject", name, "", "Rejected pending change", "auto")
+		}
+		fmt.Printf("❌ Rejected: %s\n", name)
+	}
+	if bulk {
+		fmt.Printf("\n%d rejected\n", rejected)
+	}
+	return firstErr
 }

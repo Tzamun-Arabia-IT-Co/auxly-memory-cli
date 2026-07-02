@@ -23,6 +23,7 @@ Supports Claude, Claude Code, Codex, Gemini, Copilot, Antigravity, and any CLI-b
 	Run: func(cmd *cobra.Command, args []string) {
 		memPath := getMemoryPath()
 		if tui.IsInitialized(memPath) {
+			go selfHealKeepAlive() // background: never delay the dashboard
 			tui.Run(memPath)
 		} else {
 			// Automatically check and install missing dependencies (Node.js)
@@ -170,8 +171,9 @@ func helpText() string {
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"stats"+reset, "Show agent usage metrics from audit.db"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"usage"+reset, "Live provider usage/quota meters"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"tail"+reset, "Live stream the .audit.log"))
-	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"approve"+reset, "Approve a pending memory change (--force on conflict)"))
-	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"reject"+reset, "Reject and delete a pending memory change"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"pending"+reset, "List memory changes waiting for approval (agent, target, age)"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"approve"+reset, "Approve pending changes (--force, or bulk --all/--agent/--file)"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"reject"+reset, "Reject pending changes (one, or bulk --all/--agent/--file)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"trust"+reset, "View/set per-agent trust levels (auto/approval/read-only)"))
 	sb.WriteString("\r\n")
 

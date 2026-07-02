@@ -74,7 +74,7 @@ func runWrite(cmd *cobra.Command, args []string) error {
 	if level == trust.LevelRequireApproval {
 		// Write to .pending/
 		mgr := pending.NewManager(memPath)
-		pendingName, err := mgr.Write(writeFile, writeDiff)
+		pendingName, err := mgr.WriteFrom(writeFile, writeDiff, writeProvider)
 		if err != nil {
 			return fmt.Errorf("failed to write pending: %w", err)
 		}

@@ -43,7 +43,10 @@ func NewManager(memoryRoot string) *Manager {
 	}
 }
 
-// List returns all files in .pending/.
+// List returns all files in .pending/. It never mutates the queue — the TTL
+// sweep is a separate, explicitly-invoked, vault-locked operation
+// (SweepExpired), because List is polled every second by the TUI and a sweep
+// racing an in-flight Approve could archive an entry mid-apply.
 func (m *Manager) List() ([]PendingFile, error) {
 	if err := os.MkdirAll(m.pendingDir, 0700); err != nil {
 		return nil, err
@@ -72,16 +75,23 @@ func (m *Manager) List() ([]PendingFile, error) {
 	return files, nil
 }
 
-// Write writes content to a pending file.
+// Write writes content to a pending file with no agent attribution (legacy
+// callers). Prefer WriteFrom.
+func (m *Manager) Write(targetFile, content string) (string, error) {
+	return m.WriteFrom(targetFile, content, "")
+}
+
+// WriteFrom writes content to a pending file, recording which agent queued it.
 // The filename carries a timestamp plus a random suffix so two agents queueing
 // the same target in the same millisecond can never collide.
-func (m *Manager) Write(targetFile, content string) (string, error) {
+func (m *Manager) WriteFrom(targetFile, content, agent string) (string, error) {
 	// The target name is caller/agent-controlled and gets interpolated into the
 	// frontmatter. An embedded newline could inject extra `key: value` lines
 	// (e.g. a decoy empty `basehash:`) that defeat conflict detection — reject
 	// control characters outright. Path traversal is separately caught by
-	// ResolveSafe at approve time.
-	for _, r := range targetFile {
+	// ResolveSafe at approve time. The agent string rides the same frontmatter,
+	// so it gets the same gate.
+	for _, r := range targetFile + agent {
 		if r < 0x20 || r == 0x7f {
 			return "", fmt.Errorf("invalid target filename: contains control character")
 		}
@@ -115,7 +125,11 @@ func (m *Manager) Write(targetFile, content string) (string, error) {
 	}
 
 	// Write metadata header + content (atomic rename over the reserved name).
-	header := fmt.Sprintf("---\ntarget: %s\ncreated: %s\nbasehash: %s\n---\n\n", targetFile, time.Now().UTC().Format(time.RFC3339), baseHash)
+	header := fmt.Sprintf("---\ntarget: %s\ncreated: %s\nbasehash: %s\n", targetFile, time.Now().UTC().Format(time.RFC3339), baseHash)
+	if agent != "" {
+		header += fmt.Sprintf("agent: %s\n", agent)
+	}
+	header += "---\n\n"
 	if err := memory.AtomicWriteFile(pendingPath, []byte(header+content), 0600); err != nil {
 		os.Remove(pendingPath)
 		return "", err
