@@ -176,6 +176,43 @@ func TestVaultSizeHistoryWindowAndOrdering(t *testing.T) {
 	}
 }
 
+func TestAgentWriteCountsWindowAndOrdering(t *testing.T) {
+	l := newTestActivityLogger(t)
+
+	// Two recent writes from codex, one from claude, plus a non-write action
+	// (must be excluded) and an old write outside the 7d window (must be excluded).
+	if _, err := l.Log("agent", "codex", "write", "one.md", "", "", "trusted"); err != nil {
+		t.Fatalf("Log failed: %v", err)
+	}
+	if _, err := l.Log("agent", "codex", "write", "two.md", "", "", "trusted"); err != nil {
+		t.Fatalf("Log failed: %v", err)
+	}
+	if _, err := l.Log("agent", "claude", "write", "three.md", "", "", "trusted"); err != nil {
+		t.Fatalf("Log failed: %v", err)
+	}
+	if _, err := l.Log("agent", "claude", "read", "three.md", "", "", "trusted"); err != nil {
+		t.Fatalf("Log failed: %v", err)
+	}
+	oldTS := time.Now().UTC().AddDate(0, 0, -30).Format(time.RFC3339)
+	if _, err := l.db.Exec(`INSERT INTO audit_entries (timestamp, agent_id, provider, action, file, trust_level, request_id) VALUES (?, 'agent', 'ancient', 'write', 'old.md', 'trusted', 'r1')`, oldTS); err != nil {
+		t.Fatalf("insert old row failed: %v", err)
+	}
+
+	counts, err := l.AgentWriteCounts(7)
+	if err != nil {
+		t.Fatalf("AgentWriteCounts failed: %v", err)
+	}
+	if len(counts) != 2 {
+		t.Fatalf("counts length = %d, want 2: %#v", len(counts), counts)
+	}
+	if counts[0].Provider != "codex" || counts[0].Count != 2 {
+		t.Fatalf("busiest provider = %#v, want codex/2", counts[0])
+	}
+	if counts[1].Provider != "claude" || counts[1].Count != 1 {
+		t.Fatalf("second provider = %#v, want claude/1 (read must not count)", counts[1])
+	}
+}
+
 func newTestActivityLogger(t *testing.T) *Logger {
 	t.Helper()
 

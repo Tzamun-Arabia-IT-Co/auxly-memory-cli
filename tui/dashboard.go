@@ -76,6 +76,31 @@ type dashboardModel struct {
 	// (category bars + recent feed) off the fold; instead the list scrolls in place
 	// (mouse wheel over the left box, or PgUp/PgDn).
 	connScroll int
+
+	// Live activity feed (Sprint 19): feedCursor is seeded from LatestEventID at
+	// construction (see newDashboardModel) so the feed starts at "now" — no
+	// history dump — then advances via EventsSince each 1s tick. activityFeed is
+	// kept newest-first, trimmed to the last 8.
+	feedCursor   int64
+	activityFeed []audit.ActivityEvent
+
+	// Charts (Sprint 19): vaultSizeHistory feeds the 30d sparkline (populated by
+	// RecordVaultSize on each Refresh — see below); agentWriteCounts feeds the
+	// per-agent 7d write bars. Both refreshed on the existing 1s tick, no new ticker.
+	vaultSizeHistory []audit.SizePoint
+	agentWriteCounts []audit.AgentWriteCount
+
+	// lastRecordedVaultBytes/Day cache the last snapshot actually written via
+	// RecordVaultSize, so Refresh (ticking every ~1s) only writes again when the
+	// byte count changed or the UTC day rolled over — not on every tick.
+	lastRecordedVaultBytes int64
+	lastRecordedVaultDay   string
+
+	// feedInFlight guards against overlapping EventsSince fetches: while one is
+	// still outstanding (e.g. under DB contention) the next tick skips dispatch
+	// instead of racing a second Cmd off the same stale cursor, which would
+	// double-count the same events into the feed.
+	feedInFlight bool
 }
 
 type dashboardRefreshMsg struct {
@@ -94,6 +119,84 @@ type dashboardRefreshMsg struct {
 	at              time.Time
 	mcpError        string
 	cards           []agentCard
+
+	vaultSizeHistory []audit.SizePoint
+	agentWriteCounts []audit.AgentWriteCount
+
+	lastRecordedVaultBytes int64
+	lastRecordedVaultDay   string
+}
+
+// dashboardFeedMsg carries one incremental EventsSince fetch for the live
+// activity feed: the newly-seen events (ascending id order, possibly empty)
+// and the cursor to advance to.
+type dashboardFeedMsg struct {
+	events []audit.ActivityEvent
+	cursor int64
+}
+
+// dashboardFeedCmd runs EventsSince(cursor, 50) off the UI thread — a single
+// indexed query (see internal/audit/activity.go), cheap enough to piggyback on
+// the existing 1s dashboard tick with no new ticker.
+func dashboardFeedCmd(logger *audit.Logger, cursor int64) tea.Cmd {
+	return func() tea.Msg {
+		if logger == nil {
+			return dashboardFeedMsg{cursor: cursor}
+		}
+		events, err := logger.EventsSince(cursor, 50)
+		if err != nil || len(events) == 0 {
+			return dashboardFeedMsg{cursor: cursor}
+		}
+		return dashboardFeedMsg{events: events, cursor: events[len(events)-1].ID}
+	}
+}
+
+// appendFeed merges newly-fetched events (ascending id, EventsSince' order)
+// into the existing newest-first feed and trims to maxLen. Pure so it's
+// unit-testable without a live audit.Logger. Deduplicates by event ID: two
+// overlapping EventsSince fetches (e.g. a stale cursor reused under DB
+// contention — see feedInFlight) can return the same event twice, and this is
+// the last line of defense against that showing up as a duplicate row.
+func appendFeed(feed, newEvents []audit.ActivityEvent, maxLen int) []audit.ActivityEvent {
+	merged := make([]audit.ActivityEvent, 0, len(newEvents)+len(feed))
+	seen := make(map[int64]bool, len(newEvents)+len(feed))
+	for i := len(newEvents) - 1; i >= 0; i-- {
+		e := newEvents[i]
+		if seen[e.ID] {
+			continue
+		}
+		seen[e.ID] = true
+		merged = append(merged, e)
+	}
+	for _, e := range feed {
+		if seen[e.ID] {
+			continue
+		}
+		seen[e.ID] = true
+		merged = append(merged, e)
+	}
+	if len(merged) > maxLen {
+		merged = merged[:maxLen]
+	}
+	return merged
+}
+
+// feedGlyph maps an audit action to a short glyph for the live activity feed.
+func feedGlyph(action string) string {
+	switch action {
+	case "write":
+		return "✎"
+	case "pending_approve":
+		return "✓"
+	case "pending_reject":
+		return "✗"
+	case "trust_change":
+		return "🛂"
+	case "review_keep", "review_archive":
+		return "♻"
+	default:
+		return "·"
+	}
 }
 
 // dashboardUpdateDoneMsg carries the result of a one-click [u] self-update.
@@ -157,6 +260,14 @@ func animationTickCmd() tea.Cmd {
 }
 
 func newDashboardModel(logger *audit.Logger, mgr *pending.Manager, memoryPath string, usageMgr *usage.Manager) dashboardModel {
+	// Seed the live-feed cursor at the current high-water mark — same
+	// construction-time synchronous read as initialActivity's Stats() call
+	// below, so the feed starts at "now" (no history dump) instead of an extra
+	// tick of latency before it shows anything.
+	var feedCursor int64
+	if logger != nil {
+		feedCursor, _ = logger.LatestEventID()
+	}
 	return dashboardModel{
 		logger:           logger,
 		pendingMgr:       mgr,
@@ -170,6 +281,7 @@ func newDashboardModel(logger *audit.Logger, mgr *pending.Manager, memoryPath st
 		usageReports:     map[string]usage.Report{},
 		liveUsage:        config.LoadSettings().LiveUsage,
 		cards:            agentCardOrder(initialActivity(logger)),
+		feedCursor:       feedCursor,
 	}
 }
 
@@ -185,6 +297,15 @@ func initialActivity(logger *audit.Logger) []string {
 		return nil
 	}
 	return providersWithActivity(s)
+}
+
+// shouldRecordVaultSize reports whether Refresh should call RecordVaultSize:
+// only when the byte count changed or the UTC day rolled over since the last
+// recorded snapshot. RecordVaultSize is itself idempotent (INSERT OR REPLACE
+// keyed by day), but Refresh runs on every ~1s dashboard tick — without this
+// gate every tick would re-write the same day's row for no reason.
+func shouldRecordVaultSize(lastBytes int64, lastDay string, bytes int64, today string) bool {
+	return today != lastDay || bytes != lastBytes
 }
 
 func (m dashboardModel) Refresh() tea.Cmd {
@@ -214,7 +335,26 @@ func (m dashboardModel) Refresh() tea.Cmd {
 			activeProviders, _ = m.logger.ActiveProviders(5 * time.Minute)
 			recentWrites, _ = m.logger.TailWrites(10)
 		}
-		composition := computeComposition(m.memoryPath)
+		composition, totalBytes := computeComposition(m.memoryPath)
+		var vaultSizeHistory []audit.SizePoint
+		var agentWriteCounts []audit.AgentWriteCount
+		recordedBytes, recordedDay := m.lastRecordedVaultBytes, m.lastRecordedVaultDay
+		if m.logger != nil {
+			// Opportunistic snapshot: this Refresh already scanned the vault for
+			// composition (no new scan), so recording today's total here means
+			// VaultSizeHistory accumulates real history purely from dashboard
+			// usage — no separate ticker or background scan. RecordVaultSize
+			// itself is idempotent (INSERT OR REPLACE keyed by day), but the
+			// dashboard ticks every ~1s — only actually write when the byte count
+			// changed or the UTC day rolled over, not on every tick.
+			today := time.Now().UTC().Format("2006-01-02")
+			if shouldRecordVaultSize(m.lastRecordedVaultBytes, m.lastRecordedVaultDay, totalBytes, today) {
+				m.logger.RecordVaultSize(totalBytes)
+				recordedBytes, recordedDay = totalBytes, today
+			}
+			vaultSizeHistory, _ = m.logger.VaultSizeHistory(30)
+			agentWriteCounts, _ = m.logger.AgentWriteCounts(7)
+		}
 		mcpError := getClaudeMCPError()
 		sessions := gatherSessions()
 		// gatherSessions already reconciles the registry against live servers;
@@ -246,6 +386,12 @@ func (m dashboardModel) Refresh() tea.Cmd {
 			at:              time.Now(),
 			mcpError:        mcpError,
 			cards:           agentCardOrder(providersWithActivity(stats)),
+
+			vaultSizeHistory: vaultSizeHistory,
+			agentWriteCounts: agentWriteCounts,
+
+			lastRecordedVaultBytes: recordedBytes,
+			lastRecordedVaultDay:   recordedDay,
 		}
 	}
 }
@@ -284,6 +430,10 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		if maxOff := m.connMaxScroll(m.bodyCompact()); m.connScroll > maxOff {
 			m.connScroll = maxOff
 		}
+		m.vaultSizeHistory = msg.vaultSizeHistory
+		m.agentWriteCounts = msg.agentWriteCounts
+		m.lastRecordedVaultBytes = msg.lastRecordedVaultBytes
+		m.lastRecordedVaultDay = msg.lastRecordedVaultDay
 		if m.reloaded && time.Since(m.reloadedAt) > 3*time.Second {
 			m.reloaded = false
 		}
@@ -308,7 +458,23 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			m.boxesProbedAt = time.Now()
 			cmds = append(cmds, probeRemoteVersionsCmd(false))
 		}
+		// Live activity feed: incremental, cursor-based (single indexed query),
+		// piggybacks on this existing tick instead of a new ticker. Skip
+		// dispatch while a fetch is still in flight — two overlapping fetches
+		// sharing the same stale cursor (e.g. under DB contention) would
+		// otherwise refetch and double-append the same events.
+		if !m.feedInFlight {
+			m.feedInFlight = true
+			cmds = append(cmds, dashboardFeedCmd(m.logger, m.feedCursor))
+		}
 		return m, tea.Batch(cmds...)
+	case dashboardFeedMsg:
+		m.feedInFlight = false
+		m.feedCursor = msg.cursor
+		if len(msg.events) > 0 {
+			m.activityFeed = appendFeed(m.activityFeed, msg.events, 8)
+		}
+		return m, nil
 	case remoteVersionsMsg:
 		m.boxesOutdated = outdatedCount(msg.statuses)
 		return m, nil
@@ -734,6 +900,23 @@ func (m dashboardModel) renderBody(compact bool) string {
 		if comp := m.renderComposition(enrichN); comp != "" {
 			diagContent += sep + comp
 		}
+		// The vault-size chart and write-count bars are the priciest rows in this
+		// column (the 30-day spark alone routinely wraps to 2 lines in this
+		// 44-wide box, and the bars add up to 5 more) — reserved for the tallest
+		// enrichment tier (enrichN==9, height>=64) so a borderline-tall terminal
+		// like the reported 198x53 (enrichN==4) still renders FULL, zero-spare-row
+		// mode with the rest of the enrichment intact instead of tipping into
+		// compact. Also gated the same way as the row below: only once there's a
+		// real snapshot to chart — an always-on "no history yet" placeholder would
+		// cost a row for nothing (see TestDashboardRichFitsTallWideTerminal).
+		if enrichN >= 9 {
+			if len(m.vaultSizeHistory) >= 2 {
+				diagContent += "\n" + m.renderVaultSizeChart()
+			}
+			if bars := renderAgentWriteBars(m.agentWriteCounts); bars != "" {
+				diagContent += "\n" + bars
+			}
+		}
 	}
 	diagContent += sep + fmt.Sprintf("🔌 %s\n%s",
 		bold.Render("Active Connections:"), m.renderConnectionsSummary(compact))
@@ -781,6 +964,13 @@ func (m dashboardModel) renderBody(compact bool) string {
 		}
 		if feed := m.renderRecentFeed(enrichN); feed != "" {
 			rightCol += "\n\n" + feed
+		}
+		// Same height-scaling budget as the other enrichment rows above — a
+		// fixed 8 rows regardless of terminal height was what pushed a fully
+		// populated body (all three chart sections + a full feed) out of the
+		// zero-spare-rows budget (see TestDashboardRichFitsTallWideTerminal).
+		if live := m.renderActivityFeed(enrichN); live != "" {
+			rightCol += "\n\n" + live
 		}
 	}
 
@@ -851,18 +1041,23 @@ type categoryStat struct {
 // computeComposition reads the vault and counts memory items per taxonomy category,
 // so the dashboard can show what KIND of memory the user has (not just a total).
 // Items are bullet lines ("- " / "* "); empty/heading/footer lines are ignored.
-func computeComposition(memoryPath string) []categoryStat {
+// It also returns the vault's total size in bytes (every listed file, not just
+// taxonomy categories) — computed from the SAME store.List() scan, so the
+// caller can record a vault-size snapshot without an extra directory read.
+func computeComposition(memoryPath string) ([]categoryStat, int64) {
 	if memoryPath == "" {
-		return nil
+		return nil, 0
 	}
 	store := memory.NewStore(memoryPath)
 	files, err := store.List()
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	sizeByFile := make(map[string]int64, len(files))
+	var totalBytes int64
 	for _, f := range files {
 		sizeByFile[f.Name] = f.Size
+		totalBytes += f.Size
 	}
 	var out []categoryStat
 	for _, c := range memory.Taxonomy {
@@ -884,7 +1079,7 @@ func computeComposition(memoryPath string) []categoryStat {
 			private: c.Tier == memory.TierPersonal,
 		})
 	}
-	return out
+	return out, totalBytes
 }
 
 // renderComposition draws the per-category breakdown with proportional bars, busiest
@@ -991,6 +1186,166 @@ func feedTimestamp(e audit.Entry) string {
 		return t.Format("15:04")
 	}
 	return t.Format("Jan 2")
+}
+
+// renderActivityFeed lists the live activity feed (Sprint 19): the last
+// maxRows audit events of ANY action, newest first, seeded at dashboard-init
+// "now" and advanced incrementally by EventsSince on the 1s tick — unlike
+// renderRecentFeed above (writes only, from the periodic TailWrites refresh).
+func (m dashboardModel) renderActivityFeed(maxRows int) string {
+	if len(m.activityFeed) == 0 {
+		return ""
+	}
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	var b strings.Builder
+	b.WriteString(StyleHeader.Render("⚡ Live Activity"))
+	n := len(m.activityFeed)
+	if n > maxRows {
+		n = maxRows
+	}
+	for i := 0; i < n; i++ {
+		e := m.activityFeed[i]
+		ts := dim.Render(e.TS.Local().Format("15:04"))
+		who := colorProvider(e.Provider)
+		file := truncate(e.File, 24)
+		if file == "" {
+			file = "—"
+		}
+		line := fmt.Sprintf("\n%s %s %s %s %s", ts, feedGlyph(e.Action), who, e.Action, file)
+		if e.Source == "ssh-remote" && e.RemoteHost != "" {
+			line += dim.Render(" (" + e.RemoteHost + ")")
+		}
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+// sparkGlyphs is the 8-level block ramp charts scale into (▁ lowest → █ highest).
+var sparkGlyphs = []rune("▁▂▃▄▅▆▇█")
+
+// renderSparkline maps values onto the sparkGlyphs ramp, scaled to the
+// series' own min/max. A flat series (min==max, incl. a single value) renders
+// the mid-level glyph throughout rather than dividing by zero.
+func renderSparkline(values []int64) string {
+	if len(values) == 0 {
+		return ""
+	}
+	lo, hi := values[0], values[0]
+	for _, v := range values {
+		if v < lo {
+			lo = v
+		}
+		if v > hi {
+			hi = v
+		}
+	}
+	span := hi - lo
+	var b strings.Builder
+	for _, v := range values {
+		if span == 0 {
+			b.WriteRune(sparkGlyphs[len(sparkGlyphs)/2])
+			continue
+		}
+		level := int((v - lo) * int64(len(sparkGlyphs)-1) / span)
+		b.WriteRune(sparkGlyphs[level])
+	}
+	return b.String()
+}
+
+// vaultSizeSparkline renders a `days`-wide sparkline from sparse
+// VaultSizeHistory samples: a day with no recorded snapshot carries forward
+// the last known value (VaultSizeHistory deliberately leaves gaps sparse
+// rather than zero-filling — see its doc comment). Returns "" when fewer than
+// 2 points have been recorded — the caller renders the "no history yet" copy.
+func vaultSizeSparkline(points []audit.SizePoint, days int) string {
+	if len(points) < 2 {
+		return ""
+	}
+	if days <= 0 {
+		days = 30
+	}
+	byDay := make(map[string]int64, len(points))
+	for _, p := range points {
+		byDay[p.Day] = p.Bytes
+	}
+	today := time.Now().UTC()
+	values := make([]int64, days)
+	var last int64
+	for i := 0; i < days; i++ {
+		day := today.AddDate(0, 0, -(days - 1 - i)).Format("2006-01-02")
+		if v, ok := byDay[day]; ok {
+			last = v
+		}
+		values[i] = last
+	}
+	return renderSparkline(values)
+}
+
+// humanBytes renders a byte count in the classic 1024-based short form (KiB,
+// MiB, …) — no library covers this in stdlib, and it's a one-off used only by
+// the vault-size chart below.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// renderVaultSizeChart draws the 30-day vault-size trend as a block-glyph
+// sparkline, sourced from vaultSizeHistory (populated by RecordVaultSize on
+// each Refresh — an opportunistic snapshot, not a new scan). Before 2
+// snapshots exist it renders the "no history yet" placeholder — the caller
+// (renderBody) only reserves a row for it once that copy would actually be
+// useful, same hide-when-nothing-to-show convention every other optional
+// dashboard section here already follows (composition/pending/recent feed):
+// TestDashboardRichFitsTallWideTerminal guards a full body with zero spare
+// rows, so an always-on placeholder row would silently force compact mode.
+func (m dashboardModel) renderVaultSizeChart() string {
+	label := lipgloss.NewStyle().Bold(true).Render("📈 Vault size (30d)")
+	spark := vaultSizeSparkline(m.vaultSizeHistory, 30)
+	if spark == "" {
+		return label + "  " + lipgloss.NewStyle().Foreground(ColorDim).Render("no history yet")
+	}
+	latest := m.vaultSizeHistory[len(m.vaultSizeHistory)-1].Bytes
+	return label + "  " + lipgloss.NewStyle().Foreground(ColorPrimary).Render(spark) +
+		"  " + lipgloss.NewStyle().Foreground(ColorDim).Render(humanBytes(latest))
+}
+
+// renderAgentWriteBars draws the top 4 agents' 7-day write counts as
+// proportional ▰/▱ bars (renderMeter — the shared bar look across the app),
+// busiest first.
+func renderAgentWriteBars(counts []audit.AgentWriteCount) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	top := counts
+	if len(top) > 4 {
+		top = top[:4]
+	}
+	max := top[0].Count
+	const barW = 4
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	var b strings.Builder
+	b.WriteString(lipgloss.NewStyle().Bold(true).Render("✎ Writes (7d)"))
+	for _, c := range top {
+		filled := 0
+		if max > 0 {
+			filled = c.Count * barW / max
+			if filled == 0 && c.Count > 0 {
+				filled = 1
+			}
+		}
+		bar := renderMeter(filled, barW, ColorSuccess)
+		name := truncate(c.Provider, 12)
+		b.WriteString(fmt.Sprintf("\n%-12s %s %s", name, bar, dim.Render(fmt.Sprintf("%d", c.Count))))
+	}
+	return b.String()
 }
 
 // computeRemoteScopes resolves, per connected remote host, what that box can reach:

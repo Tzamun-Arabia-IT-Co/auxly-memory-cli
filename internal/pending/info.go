@@ -59,6 +59,13 @@ func pendingTTL() time.Duration {
 	return 30 * 24 * time.Hour
 }
 
+// PendingTTL exposes the sweep TTL window so callers outside this package
+// (the TUI's "archives in Nd" badge) can share the exact same window
+// SweepExpired archives against, instead of re-parsing AUXLY_PENDING_TTL_DAYS.
+func PendingTTL() time.Duration {
+	return pendingTTL()
+}
+
 // SweepExpired moves pending entries older than the TTL into .pending/archive/
 // (nothing is deleted — stale queue noise disappears from the review list but
 // every queued change stays recoverable). Age comes from the frontmatter

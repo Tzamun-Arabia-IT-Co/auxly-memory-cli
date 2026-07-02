@@ -147,6 +147,50 @@ func (l *Logger) RecordVaultSize(bytes int64) error {
 	return nil
 }
 
+// AgentWriteCount is one provider's write tally within a lookback window.
+type AgentWriteCount struct {
+	Provider string
+	Count    int
+}
+
+// AgentWriteCounts returns each provider's write count within the last `days`
+// days, busiest first — one indexed query (mirrors ApprovalStats' shape), for
+// the dashboard's per-agent write bars.
+func (l *Logger) AgentWriteCounts(days int) ([]AgentWriteCount, error) {
+	if l == nil || l.db == nil {
+		return []AgentWriteCount{}, nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+
+	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
+	rows, err := l.db.Query(`
+		SELECT provider, COUNT(*) AS n
+		FROM audit_entries
+		WHERE action = 'write' AND timestamp >= ?
+		GROUP BY provider
+		ORDER BY n DESC, provider ASC
+	`, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query agent write counts: %w", err)
+	}
+	defer rows.Close()
+
+	counts := []AgentWriteCount{}
+	for rows.Next() {
+		var c AgentWriteCount
+		if err := rows.Scan(&c.Provider, &c.Count); err != nil {
+			return nil, fmt.Errorf("failed to scan agent write counts: %w", err)
+		}
+		counts = append(counts, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate agent write counts: %w", err)
+	}
+	return counts, nil
+}
+
 // VaultSizeHistory returns recorded samples within the last days in ascending
 // day order. Missing days are deliberately absent rather than zero-filled; the
 // renderer interpolates gaps so storage stays sparse.

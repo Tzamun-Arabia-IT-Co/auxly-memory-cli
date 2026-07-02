@@ -425,6 +425,22 @@ func TestDashboardRichFitsTallWideTerminal(t *testing.T) {
 	m.dashboard.remoteScope = map[string]string{
 		"node-a": "read/write · 8 file(s)", "host.example.net": "read/write · 8 file(s)", "erp.host.example.net": "read/write · 8 file(s)",
 	}
+	// The three chart/feed sections added after this test was first written
+	// (vault-size sparkline, per-agent write bars, live activity feed) must
+	// also be covered here — otherwise the zero-spare-rows contract this test
+	// guards is only verified with those sections dark.
+	m.dashboard.vaultSizeHistory = []audit.SizePoint{
+		{Day: time.Now().AddDate(0, 0, -1).UTC().Format("2006-01-02"), Bytes: 1000},
+		{Day: time.Now().UTC().Format("2006-01-02"), Bytes: 2000},
+	}
+	m.dashboard.agentWriteCounts = []audit.AgentWriteCount{
+		{Provider: "claude-code", Count: 40}, {Provider: "codex", Count: 20},
+		{Provider: "cursor", Count: 10}, {Provider: "gemini", Count: 4},
+	}
+	m.dashboard.activityFeed = make([]audit.ActivityEvent, 8)
+	for i := range m.dashboard.activityFeed {
+		m.dashboard.activityFeed[i] = audit.ActivityEvent{ID: int64(i + 1), TS: time.Now(), Provider: "claude-code", Action: "write", File: "projects.md"}
+	}
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 198, Height: 53})
 	m = updated.(model)
 	m.screen = screenDashboard

@@ -110,7 +110,7 @@ func NewApp(memoryPath string) *model {
 		activity:   newActivityModel(logger),
 		auditTrail: newAuditTrailModel(logger),
 		browser:    newBrowserModel(store),
-		diff:       newDiffModel(pendingMgr),
+		diff:       newDiffModel(pendingMgr, logger),
 		analytics:  newAnalyticsModel(logger, usageMgr),
 		search:     newSearchModel(store),
 		settings:   newSettingsModel(memoryPath, logger),
@@ -610,10 +610,13 @@ func (m model) renderFooter() string {
 			footerText = "j/k: Scroll • PgUp/PgDn: Page • g/G: Top/Bottom • d: Download • Esc: Back (read-only) • [ / ]: Tabs • q: Quit"
 		}
 	case screenDiff:
-		if m.diff.viewing != "" {
+		switch {
+		case m.diff.batchKind != "":
+			footerText = "y: Confirm • n/Esc: Cancel"
+		case m.diff.viewing != "":
 			footerText = "a: Approve • r: Reject • Esc: Back to queue • q: Quit"
-		} else {
-			footerText = "j/k: Navigate queue • Enter: View diff • a: Approve • r: Reject • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		default:
+			footerText = "j/k: Navigate queue • Enter: View diff • a: Approve • r: Reject • A: Approve by agent • F: Approve by file • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 		}
 	case screenAnalytics:
 		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
