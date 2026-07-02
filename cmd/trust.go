@@ -28,9 +28,16 @@ var trustSetCmd = &cobra.Command{
 	RunE:  runTrustSet,
 }
 
+var trustSuggestCmd = &cobra.Command{
+	Use:   "suggest",
+	Short: "Suggest trust-level changes from 90d approval history (never auto-applied)",
+	RunE:  runTrustSuggest,
+}
+
 func init() {
 	trustCmd.AddCommand(trustListCmd)
 	trustCmd.AddCommand(trustSetCmd)
+	trustCmd.AddCommand(trustSuggestCmd)
 	rootCmd.AddCommand(trustCmd)
 }
 
@@ -80,5 +87,45 @@ func runTrustSet(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("✅ Set %s trust level to: %s (was %s)\n", provider, level, oldLevel)
+	return nil
+}
+
+// runTrustSuggest evaluates 90-day approval history and prints suggested trust
+// changes. This is read-only by design: trust levels are a security boundary,
+// so a human always applies the change (`auxly trust set ...`), with the
+// evidence right in front of them — never a background auto-apply.
+func runTrustSuggest(cmd *cobra.Command, args []string) error {
+	memPath := getMemoryPath()
+	cfg, err := trust.Load(memPath)
+	if err != nil {
+		return err
+	}
+	if !cfg.TuningEnabled() {
+		fmt.Println("trust tuning is off (trust.yaml: tuning: off)")
+		return nil
+	}
+
+	logger, err := audit.NewLogger(memPath)
+	if err != nil {
+		return err
+	}
+	defer logger.Close()
+
+	stats, _ := logger.ApprovalStats(90)
+	suggestions := trust.SuggestChanges(cfg, stats)
+
+	if len(suggestions) == 0 {
+		fmt.Println("✅ No trust changes suggested — current levels match the evidence.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "PROVIDER\tCURRENT\tSUGGESTED\tEVIDENCE\n")
+	fmt.Fprintf(w, "────────\t───────\t─────────\t────────\n")
+	for _, s := range suggestions {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.Provider, s.Current, s.Suggested, s.Evidence)
+	}
+	w.Flush()
+	fmt.Println("\napply with: auxly trust set <provider> <level>   (suggestions are never auto-applied)")
 	return nil
 }

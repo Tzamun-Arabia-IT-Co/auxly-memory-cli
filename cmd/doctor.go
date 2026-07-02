@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
@@ -140,6 +141,26 @@ func doctorReport(memPath string, probeLinks bool) string {
 		}
 		sort.Strings(parts) // map order is random — keep the report deterministic
 		line("✓", fmt.Sprintf("trust: default %q · %s", cfg.Default, strings.Join(parts, " · ")), "")
+	}
+
+	// 6b. Trust tuning suggestions — SUGGESTIONS ONLY, never applied here or
+	// anywhere automatically (trust is a security boundary; a human judges the
+	// evidence via `auxly trust suggest`). Offline-safe: ApprovalStats on an
+	// empty/missing audit.db just returns no rows, and a nil logger is skipped.
+	if cfg, terr := trust.Load(memPath); terr == nil {
+		if logger, lerr := audit.NewLogger(memPath); lerr == nil {
+			stats, _ := logger.ApprovalStats(90)
+			logger.Close()
+			if suggestions := trust.SuggestChanges(cfg, stats); len(suggestions) > 0 {
+				s := suggestions[0]
+				verb := "demote"
+				if s.Suggested == trust.LevelAuto {
+					verb = "promote"
+				}
+				line("⚠", fmt.Sprintf("trust: %d tuning suggestion(s) — e.g. %s %s to %s (%s)",
+					len(suggestions), verb, s.Provider, s.Suggested, s.Evidence), "see `auxly trust suggest`")
+			}
+		}
 	}
 
 	// 7. Remote memory links — only when this box reads another machine's

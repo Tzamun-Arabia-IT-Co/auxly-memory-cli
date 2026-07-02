@@ -23,6 +23,17 @@ type ProviderConfig struct {
 type Config struct {
 	Default   string                    `yaml:"default"`
 	Providers map[string]ProviderConfig `yaml:"providers"`
+	// Tuning gates `auxly trust suggest` (and the doctor/TUI hints that surface
+	// it): "" or "on" = enabled (default ON), "off" = disabled. A human can turn
+	// off even the *suggestions* — trust is a security boundary, so silence is
+	// always the human's call, never ours.
+	Tuning string `yaml:"tuning,omitempty"`
+}
+
+// TuningEnabled reports whether trust auto-tuning suggestions are on. Default
+// ON when unset — only an explicit "off" disables it.
+func (c *Config) TuningEnabled() bool {
+	return c.Tuning != "off"
 }
 
 // Load reads and parses trust.yaml from the memory root.

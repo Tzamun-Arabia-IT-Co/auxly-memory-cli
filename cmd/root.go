@@ -177,7 +177,7 @@ func helpText() string {
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"pending"+reset, "List memory changes waiting for approval (agent, target, age)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"approve"+reset, "Approve pending changes (--force, or bulk --all/--agent/--file)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"reject"+reset, "Reject pending changes (one, or bulk --all/--agent/--file)"))
-	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"trust"+reset, "View/set per-agent trust levels (auto/approval/read-only)"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"trust"+reset, "View/set per-agent trust levels (auto/approval/read-only); `trust suggest` recommends changes"))
 	sb.WriteString("\r\n")
 
 	sb.WriteString(bold + "Flags:" + reset + "\r\n")

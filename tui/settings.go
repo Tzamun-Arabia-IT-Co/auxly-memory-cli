@@ -2,29 +2,23 @@ package tui
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
+	// Aliased: this file already has a local `trust` variable/field.
+	trustcfg "github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"gopkg.in/yaml.v3"
 )
-
-type trustConfig struct {
-	Default   string                       `yaml:"default"`
-	Providers map[string]map[string]string `yaml:"providers"`
-}
 
 type settingsModel struct {
 	memoryPath  string
 	cursor      int
 	agents      []detect.Agent
-	trust       trustConfig
+	trust       trustcfg.Config
 	trustLevels []string
 	width       int
 	height      int
@@ -48,12 +42,18 @@ type settingsModel struct {
 	agentBrands  []agentCard
 	agentCursor  int
 	hiddenAgents map[string]bool
+
+	// Trust auto-tuning hint (Sprint 16): count of pending `auxly trust suggest`
+	// recommendations, computed once per screen-enter (see Refresh) — never on
+	// a tick, since it costs an audit.db query.
+	tuningSuggestions int
 }
 
 type settingsRefreshMsg struct {
-	agents      []detect.Agent
-	trust       trustConfig
-	agentBrands []agentCard
+	agents            []detect.Agent
+	trust             trustcfg.Config
+	agentBrands       []agentCard
+	tuningSuggestions int
 }
 
 func newSettingsModel(memPath string, logger *audit.Logger) settingsModel {
@@ -97,19 +97,40 @@ func (m settingsModel) Refresh() tea.Cmd {
 	return func() tea.Msg {
 		agents := detect.InstalledAgents()
 
-		var trust trustConfig
-		trustPath := filepath.Join(memPath, "trust.yaml")
-		data, err := os.ReadFile(trustPath)
-		if err == nil {
-			yaml.Unmarshal(data, &trust)
+		// trust.Load is the real API (also used by `auxly trust ...` and
+		// countTuningSuggestions below) — no more shadow struct that silently
+		// drops fields (like `tuning: off`) the TUI doesn't know about.
+		trust, err := trustcfg.Load(memPath)
+		if err != nil || trust == nil {
+			trust = &trustcfg.Config{Default: trustcfg.LevelRequireApproval, Providers: map[string]trustcfg.ProviderConfig{}}
 		}
 
 		return settingsRefreshMsg{
-			agents:      agents,
-			trust:       trust,
-			agentBrands: buildAgentSettingsBrands(agents, logger),
+			agents:            agents,
+			trust:             *trust,
+			agentBrands:       buildAgentSettingsBrands(agents, logger),
+			tuningSuggestions: countTuningSuggestions(memPath, logger),
 		}
 	}
+}
+
+// countTuningSuggestions is the Settings screen's read for the trust
+// auto-tuning hint — reuses the same pure trust.SuggestChanges the CLI's
+// `auxly trust suggest` uses, so the hint and the command never disagree.
+// nil-safe: a nil logger (not yet connected) just means no hint.
+func countTuningSuggestions(memPath string, logger *audit.Logger) int {
+	if logger == nil {
+		return 0
+	}
+	cfg, err := trustcfg.Load(memPath)
+	if err != nil {
+		return 0
+	}
+	stats, err := logger.ApprovalStats(90)
+	if err != nil {
+		return 0
+	}
+	return len(trustcfg.SuggestChanges(cfg, stats))
 }
 
 // buildAgentSettingsBrands returns every brand the dashboard could show — the
@@ -140,6 +161,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		m.agents = msg.agents
 		m.trust = msg.trust
 		m.agentBrands = msg.agentBrands
+		m.tuningSuggestions = msg.tuningSuggestions
 		if m.agentCursor >= len(m.agentBrands) {
 			m.agentCursor = 0
 		}
@@ -255,17 +277,10 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 						}
 					}
 					if m.trust.Providers == nil {
-						m.trust.Providers = make(map[string]map[string]string)
+						m.trust.Providers = make(map[string]trustcfg.ProviderConfig)
 					}
-					current := ""
-					if p, ok := m.trust.Providers[provider]; ok {
-						current = p["trust_level"]
-					}
-					next := m.cycleTrust(current)
-					if m.trust.Providers[provider] == nil {
-						m.trust.Providers[provider] = make(map[string]string)
-					}
-					m.trust.Providers[provider]["trust_level"] = next
+					next := m.cycleTrust(m.trust.Providers[provider].TrustLevel)
+					m.trust.Providers[provider] = trustcfg.ProviderConfig{TrustLevel: next}
 					return m, m.saveTrust()
 				}
 			}
@@ -346,17 +361,10 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			} else if m.cursor-1 < len(uniqueAgents) {
 				provider := uniqueAgents[m.cursor-1].Provider
 				if m.trust.Providers == nil {
-					m.trust.Providers = make(map[string]map[string]string)
+					m.trust.Providers = make(map[string]trustcfg.ProviderConfig)
 				}
-				current := ""
-				if p, ok := m.trust.Providers[provider]; ok {
-					current = p["trust_level"]
-				}
-				next := m.cycleTrust(current)
-				if m.trust.Providers[provider] == nil {
-					m.trust.Providers[provider] = make(map[string]string)
-				}
-				m.trust.Providers[provider]["trust_level"] = next
+				next := m.cycleTrust(m.trust.Providers[provider].TrustLevel)
+				m.trust.Providers[provider] = trustcfg.ProviderConfig{TrustLevel: next}
 				return m, m.saveTrust()
 			} else if m.cursor == len(uniqueAgents)+1 {
 				return m, m.toggleLiveUsage()
@@ -428,11 +436,10 @@ func (m settingsModel) saveTrust() tea.Cmd {
 	memPath := m.memoryPath
 	logger := m.logger
 	return func() tea.Msg {
-		trustPath := filepath.Join(memPath, "trust.yaml")
-		data, err := yaml.Marshal(&trust)
-		if err == nil {
-			_ = os.WriteFile(trustPath, data, 0600)
-		}
+		// trust.Config.Save round-trips every field it read (including
+		// `tuning: off`), since m.trust was loaded via trust.Load — no more
+		// full-overwrite from a struct that only knew Default/Providers.
+		_ = trust.Save(memPath)
 		agents := detect.InstalledAgents()
 		return settingsRefreshMsg{agents: agents, trust: trust, agentBrands: buildAgentSettingsBrands(agents, logger)}
 	}
@@ -616,10 +623,7 @@ func (m settingsModel) View() string {
 		if m.cursor == i+1 {
 			cur = cyan.Render("▸ ")
 		}
-		trust := ""
-		if p, ok := m.trust.Providers[a.Provider]; ok {
-			trust = p["trust_level"]
-		}
+		trust := m.trust.Providers[a.Provider].TrustLevel
 		if trust == "" {
 			trust = defaultTrust
 		}
@@ -695,6 +699,10 @@ func (m settingsModel) View() string {
 		// hopping sideways between two toggles sharing a line.
 		lines = append(lines, fmt.Sprintf("%s%s %s", liveCursor, liveLabel, liveState))
 		lines = append(lines, fmt.Sprintf("%s%s %s", autoCursor, autoLabel, autoState))
+	}
+
+	if m.tuningSuggestions > 0 {
+		lines = append(lines, dim.Render(fmt.Sprintf("💡 trust: %d suggestion(s) — run `auxly trust suggest`", m.tuningSuggestions)))
 	}
 
 	padW := w - 10
