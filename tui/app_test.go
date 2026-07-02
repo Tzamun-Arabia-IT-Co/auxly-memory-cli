@@ -22,7 +22,7 @@ func TestMouseClickOnReviewBadgeHitsReviewTab(t *testing.T) {
 	banner := renderBanner(m.width)
 	tabRow := strings.Count(banner, "\n")
 
-	reviewIdx := len(screenNames) - 1
+	reviewIdx := int(screenReview)
 	startX := 0
 	for i := 0; i < reviewIdx; i++ {
 		startX += 4 + len(m.labelFor(i)) + 2

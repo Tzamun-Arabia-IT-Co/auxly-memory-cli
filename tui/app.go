@@ -36,6 +36,9 @@ const (
 	// ponytail: append-only tab registration, smallest diff that doesn't
 	// reshuffle existing shortcuts; revisit if Review ever needs a prime digit.
 	screenReview
+	// screenMemory is appended after Review for the same append-only reason —
+	// its own "=" key, reachable via Tab/Shift+Tab cycling and mouse click.
+	screenMemory
 	screenViewer // must stay last
 )
 
@@ -51,6 +54,7 @@ var screenNames = []string{
 	"Skills",
 	"Audit Trail",
 	"Review",
+	"Memory",
 }
 
 type model struct {
@@ -72,6 +76,7 @@ type model struct {
 	ssh        sshModel
 	skills     skillsModel
 	review     reviewModel
+	memBrowser memBrowserModel
 	viewer     viewerModel // must stay last (no tab number)
 
 	// Shared state
@@ -112,6 +117,7 @@ func NewApp(memoryPath string) *model {
 		ssh:        newSSHModel(),
 		skills:     newSkillsModel(),
 		review:     newReviewModel(store, logger),
+		memBrowser: newMemBrowserModel(store, logger, pendingMgr),
 		viewer:     newViewerModel(store),
 	}
 }
@@ -158,6 +164,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == screenMemoryOrg && m.memoryOrg.capturesInput() {
 			var cmd tea.Cmd
 			m.memoryOrg, cmd = m.memoryOrg.Update(msg)
+			return m, cmd
+		}
+
+		// The Memory tab intercepts plain "tab" locally (pane focus toggle, per
+		// its own footer hint) instead of the app-wide screen-cycle, and while a
+		// search/edit/new-fact input or a delete confirm owns the keyboard every
+		// keystroke must reach it — never the global switch below.
+		if m.screen == screenMemory && (m.memBrowser.capturesInput() || msg.String() == "tab") {
+			var cmd tea.Cmd
+			m.memBrowser, cmd = m.memBrowser.Update(msg)
+			if m.vpReady {
+				m.syncViewport()
+			}
 			return m, cmd
 		}
 
@@ -211,6 +230,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.gotoScreen(screenAuditTrail)
 		case "-":
 			return m, m.gotoScreen(screenReview)
+		case "=":
+			return m, m.gotoScreen(screenMemory)
 		case "]", "tab":
 			if msg.String() == "tab" && ((m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
 				(m.screen == screenSSH && m.ssh.editingHost)) {
@@ -220,7 +241,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if next == screenViewer {
 				next = screenBrowser
 			}
-			return m, m.gotoScreen((next + 1) % 11)
+			return m, m.gotoScreen((next + 1) % 12)
 		case "[", "shift+tab", "backtab":
 			if (msg.String() == "shift+tab" || msg.String() == "backtab") && ((m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
 				(m.screen == screenSSH && m.ssh.editingHost)) {
@@ -231,9 +252,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				prev = screenBrowser
 			}
 			if prev == 0 {
-				return m, m.gotoScreen(10)
+				return m, m.gotoScreen(11)
 			}
-			return m, m.gotoScreen((prev - 1) % 11)
+			return m, m.gotoScreen((prev - 1) % 12)
 		case "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
 			// Scroll the content viewport on long pages, unless a modal/editor owns
 			// these keys.
@@ -269,6 +290,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ssh, _ = m.ssh.Update(msg)
 		m.skills, _ = m.skills.Update(msg)
 		m.review, _ = m.review.Update(msg)
+		m.memBrowser, _ = m.memBrowser.Update(msg)
 		m.viewer, _ = m.viewer.Update(msg)
 		m.syncViewport()
 
@@ -326,6 +348,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.auditTrail, cmd = m.auditTrail.Update(msg)
 	case screenReview:
 		m.review, cmd = m.review.Update(msg)
+	case screenMemory:
+		m.memBrowser, cmd = m.memBrowser.Update(msg)
 	case screenViewer:
 		m.viewer, cmd = m.viewer.Update(msg)
 	}
@@ -398,6 +422,8 @@ func (m model) screenContent() string {
 		return m.auditTrail.View()
 	case screenReview:
 		return m.review.View()
+	case screenMemory:
+		return m.memBrowser.View(m.width)
 	case screenViewer:
 		return m.viewer.View()
 	}
@@ -529,6 +555,9 @@ func (m model) renderTabs() string {
 		key := fmt.Sprintf("%d", i+1)
 		if i == 9 {
 			key = "0"
+		} else if screen(i) == screenMemory {
+			// 12th tab — its own key instead.
+			key = "="
 		} else if screen(i) == screenReview {
 			// 11th tab, past the 1-9/0 digit range — its own key instead.
 			key = "-"
@@ -602,6 +631,19 @@ func (m model) renderFooter() string {
 		}
 	case screenReview:
 		footerText = "j/k/↑/↓: Navigate • K keep (re-stamp) · a archive · r rescan · e edit hint • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+	case screenMemory:
+		switch {
+		case m.memBrowser.searching:
+			footerText = "/ " + m.memBrowser.searchInput.Value() + "▌   ↑/↓ select · Enter jump · Esc cancel"
+		case m.memBrowser.editing:
+			footerText = "edit: " + m.memBrowser.editInput.Value() + "▌   Enter save (queues for approval) · Esc cancel"
+		case m.memBrowser.creating:
+			footerText = "new fact: " + m.memBrowser.createInput.Value() + "▌   Enter save (queues for approval) · Esc cancel"
+		case m.memBrowser.confirmDelete:
+			footerText = "delete this fact? y/n"
+		default:
+			footerText = "e edit · d delete · n new · / search · r rescan · tab/h/l: switch pane · [ / ]: Switch tabs • q: Quit"
+		}
 	default:
 		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	}
@@ -655,6 +697,11 @@ func (m *model) refreshCurrentScreen() tea.Cmd {
 		// ever fire it on tab-enter (here), never from a background tick.
 		m.review.scanning = true
 		return m.review.Refresh()
+	case screenMemory:
+		// Mirrors Review: a vault-wide scan (Store.List + one View per file, plus
+		// RecallStatsByFile) — only ever fire it on tab-enter, never a tick.
+		m.memBrowser.scanning = true
+		return m.memBrowser.Refresh()
 	}
 	return nil
 }
