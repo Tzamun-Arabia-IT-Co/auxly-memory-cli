@@ -717,6 +717,12 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 
 	agentID := fmt.Sprintf("%s-mcp", provider)
 
+	// Staleness handling: a new fact that contradicts an existing one in the
+	// target file becomes a REPLACE (dated, with a "was:" trace) instead of a
+	// second bullet. Runs BEFORE trust routing so require_approval agents
+	// review the replacement, and auto trust audits it.
+	diff = s.maybeSupersede(file, diff)
+
 	if level == trust.LevelRequireApproval {
 		pendingName, err := s.pendingMgr.WriteFrom(file, diff, provider)
 		if err != nil {
