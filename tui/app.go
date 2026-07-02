@@ -633,6 +633,9 @@ func (m model) renderFooter() string {
 		footerText = "j/k/↑/↓: Navigate • K keep (re-stamp) · a archive · r rescan · e edit hint • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenMemory:
 		switch {
+		case m.memBrowser.playground:
+			footerText = "recall: " + m.memBrowser.playgroundInput.Value() + "▌ · enter run · tab lens: " +
+				memLensLabel(m.memBrowser.playgroundClients, m.memBrowser.playgroundLens) + " · esc exit"
 		case m.memBrowser.searching:
 			footerText = "/ " + m.memBrowser.searchInput.Value() + "▌   ↑/↓ select · Enter jump · Esc cancel"
 		case m.memBrowser.editing:
@@ -642,7 +645,7 @@ func (m model) renderFooter() string {
 		case m.memBrowser.confirmDelete:
 			footerText = "delete this fact? y/n"
 		default:
-			footerText = "e edit · d delete · n new · / search · r rescan · tab/h/l: switch pane · [ / ]: Switch tabs • q: Quit"
+			footerText = "e edit · d delete · n new · / search · ? recall playground · r rescan · tab/h/l: switch pane · [ / ]: Switch tabs • q: Quit"
 		}
 	default:
 		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"

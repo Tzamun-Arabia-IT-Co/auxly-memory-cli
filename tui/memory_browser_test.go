@@ -1,14 +1,20 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/embed"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/sharing"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -502,5 +508,449 @@ func TestMemTreeRowFitsWidthBudget(t *testing.T) {
 	plain := strings.TrimPrefix(row, "  ")
 	if n := utf8.RuneCountInString(plain); n != 20 {
 		t.Fatalf("row body should be padded/truncated to exactly 20 runes, got %d: %q", n, row)
+	}
+}
+
+// ---- Sprint 18: recall PLAYGROUND mode ----
+
+// TestMemScoreBar locks the score-bar math: round-to-nearest-block, clamped
+// to [0,1] so a negative or >1 raw cosine can never produce a negative fill
+// count (which would panic strings.Repeat).
+func TestMemScoreBar(t *testing.T) {
+	cases := []struct {
+		score float32
+		want  string
+	}{
+		{0.82, "▰▰▰▱"}, // round(0.82*4) = round(3.28) = 3
+		{1.0, "▰▰▰▰"},
+		{0.0, "▱▱▱▱"},
+		{-0.4, "▱▱▱▱"}, // clamped up to 0
+		{1.4, "▰▰▰▰"},  // clamped down to 1
+		{0.5, "▰▰▱▱"},  // round(2.0) = 2
+	}
+	for _, c := range cases {
+		if got := memScoreBar(c.score); got != c.want {
+			t.Errorf("memScoreBar(%v) = %q, want %q", c.score, got, c.want)
+		}
+	}
+}
+
+// TestMemPlaygroundRowMarker locks the three-tier marker text the row
+// styling keys off: accepted has none, above-floor-but-cut names k, below
+// floor names the floor value.
+func TestMemPlaygroundRowMarker(t *testing.T) {
+	accepted := memory.RecallDebugHit{Accepted: true, AboveFloor: true}
+	if got := memPlaygroundRowMarker(accepted, 8, 0.3); got != "" {
+		t.Fatalf("accepted hit marker = %q, want empty", got)
+	}
+	cut := memory.RecallDebugHit{Accepted: false, AboveFloor: true}
+	if got := memPlaygroundRowMarker(cut, 8, 0.3); got != "cut (k=8)" {
+		t.Fatalf("cut hit marker = %q, want %q", got, "cut (k=8)")
+	}
+	below := memory.RecallDebugHit{Accepted: false, AboveFloor: false}
+	if got := memPlaygroundRowMarker(below, 8, 0.3); got != "below floor 0.30" {
+		t.Fatalf("below-floor hit marker = %q, want %q", got, "below floor 0.30")
+	}
+}
+
+// TestMemPlaygroundRowRendering covers the row body itself (score bar, score,
+// file:line, truncated text, trailing marker preserved intact) across all
+// three tiers, plus the negative-width guard (spec constraint: never panic).
+func TestMemPlaygroundRowRendering(t *testing.T) {
+	h := memory.RecallDebugHit{File: "identity.md", LineStart: 12, Text: "likes cats a lot, more than anyone else", Score: 0.82, Accepted: true, AboveFloor: true}
+	row := memPlaygroundRow(h, 8, 0.3, 40)
+	if !strings.Contains(row, "▰▰▰▱ 0.82 · identity.md:12 ·") {
+		t.Fatalf("accepted row missing expected prefix: %q", row)
+	}
+	if strings.Contains(row, "cut") || strings.Contains(row, "below floor") {
+		t.Fatalf("accepted row must carry no marker: %q", row)
+	}
+
+	cut := h
+	cut.Accepted = false
+	cutRow := memPlaygroundRow(cut, 8, 0.3, 60)
+	if !strings.HasSuffix(cutRow, "cut (k=8)") {
+		t.Fatalf("cut row must end with its marker intact, got %q", cutRow)
+	}
+
+	below := h
+	below.Accepted = false
+	below.AboveFloor = false
+	belowRow := memPlaygroundRow(below, 8, 0.3, 60)
+	if !strings.HasSuffix(belowRow, "below floor 0.30") {
+		t.Fatalf("below-floor row must end with its marker intact, got %q", belowRow)
+	}
+
+	for _, w := range []int{20, 1, 0, -5, -100} {
+		_ = memPlaygroundRow(h, 8, 0.3, w) // must not panic
+	}
+}
+
+// TestMemNextLensIndexCyclesInclEmptyClients locks the lens cycle order:
+// local -> client1 -> ... -> clientN -> local, and the empty-clients case
+// (nothing to cycle to, stays at local).
+func TestMemNextLensIndexCyclesInclEmptyClients(t *testing.T) {
+	if got := memNextLensIndex(0, 0); got != 0 {
+		t.Fatalf("cycling with no clients configured must stay at local (0), got %d", got)
+	}
+	if got := memNextLensIndex(3, 0); got != 0 {
+		t.Fatalf("cycling with no clients configured must reset to local (0), got %d", got)
+	}
+	lens := 0
+	seq := []int{}
+	for i := 0; i < 4; i++ { // 2 clients -> 3-slot cycle (local, c1, c2), walked twice
+		lens = memNextLensIndex(lens, 2)
+		seq = append(seq, lens)
+	}
+	want := []int{1, 2, 0, 1}
+	for i, w := range want {
+		if seq[i] != w {
+			t.Fatalf("cycle sequence = %v, want %v", seq, want)
+		}
+	}
+}
+
+func TestMemLensLabel(t *testing.T) {
+	clients := []clientRow{{Name: "box1"}, {Name: "box2"}}
+	if got := memLensLabel(clients, 0); got != "local (all files)" {
+		t.Fatalf("lens 0 label = %q, want local", got)
+	}
+	if got := memLensLabel(clients, 1); got != "box1" {
+		t.Fatalf("lens 1 label = %q, want box1", got)
+	}
+	if got := memLensLabel(clients, 2); got != "box2" {
+		t.Fatalf("lens 2 label = %q, want box2", got)
+	}
+	if got := memLensLabel(clients, 3); got != "local (all files)" {
+		t.Fatalf("out-of-range lens label = %q, want local fallback", got)
+	}
+}
+
+// TestMemPlaygroundAllowLocalLensIsUnfiltered locks lens 0's contract: nil
+// allow, meaning Index.Load applies no ACL filter at all.
+func TestMemPlaygroundAllowLocalLensIsUnfiltered(t *testing.T) {
+	clients := []clientRow{{Name: "box1", SharedFiles: []string{"identity.md"}}}
+	if allow := memPlaygroundAllow(clients, 0, []string{"identity.md", "daily.md"}); allow != nil {
+		t.Fatalf("local lens must return a nil allow (unfiltered), got a closure")
+	}
+}
+
+// TestMemPlaygroundAllowClientLensHonorsSharedFiles is the core "why can't
+// the box see this fact" contract: a client lens's allowFn must agree
+// EXACTLY with sharing.CanRead fed the same ClientShare directly — the
+// playground has to use the real rule the MCP server filters that remote
+// through, not an approximation of it.
+func TestMemPlaygroundAllowClientLensHonorsSharedFiles(t *testing.T) {
+	allFiles := []string{"identity.md", "personal.md"}
+	clients := []clientRow{{Name: "box1", SharedFiles: []string{"identity.md"}}}
+	allow := memPlaygroundAllow(clients, 1, allFiles)
+	if allow == nil {
+		t.Fatalf("client lens must return a non-nil allow closure")
+	}
+	share := &sharing.ClientShare{SharedFiles: []string{"identity.md"}}
+	for _, f := range allFiles {
+		want := sharing.CanRead(share, f, allFiles)
+		if got := allow(f); got != want {
+			t.Errorf("allow(%q) = %v, want %v (sharing.CanRead fed the same share directly)", f, got, want)
+		}
+	}
+	if allow("personal.md") {
+		t.Fatalf("personal.md excluded from SharedFiles must not be readable through the lens")
+	}
+	if !allow("identity.md") {
+		t.Fatalf("identity.md included in SharedFiles must be readable through the lens")
+	}
+}
+
+// TestUpdateNormalQuestionMarkEntersPlayground mirrors the "/" search-entry
+// test: '?' in normal mode starts playground input and kicks the
+// clients.yaml load (a non-nil tea.Cmd — every I/O this sprint's spec
+// requires goes through a Cmd).
+func TestUpdateNormalQuestionMarkEntersPlayground(t *testing.T) {
+	m := newMemBrowserModel(nil, nil, nil)
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	if !m2.playground {
+		t.Fatalf("'?' in normal mode should enter playground")
+	}
+	if cmd == nil {
+		t.Fatalf("entering playground should kick off the clients.yaml load Cmd")
+	}
+	if m2.playgroundInput.Value() != "" {
+		t.Fatalf("playground input should start empty")
+	}
+}
+
+// TestQuestionMarkDuringSearchOrEditDoesNotTriggerPlayground is the spec's
+// explicit precedence guard: '?' typed while another input-capturing mode
+// already owns the keyboard must reach THAT mode's input, never start
+// playground.
+func TestQuestionMarkDuringSearchOrEditDoesNotTriggerPlayground(t *testing.T) {
+	m := newMemBrowserModel(nil, nil, nil)
+	m.searching = true
+	m.searchInput.Focus()
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	if m2.playground {
+		t.Fatalf("'?' while searching must not start playground")
+	}
+	if !strings.Contains(m2.searchInput.Value(), "?") {
+		t.Fatalf("'?' while searching should reach the search input, got %q", m2.searchInput.Value())
+	}
+
+	e := newMemBrowserModel(nil, nil, nil)
+	e.editing = true
+	e.editInput.Focus()
+	e2, _ := e.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	if e2.playground {
+		t.Fatalf("'?' while editing must not start playground")
+	}
+}
+
+// TestUpdatePlaygroundEscRestoresNormalView locks the exit path: Esc clears
+// playground and blurs its input, restoring the normal content/tree view.
+func TestUpdatePlaygroundEscRestoresNormalView(t *testing.T) {
+	m := newMemBrowserModel(nil, nil, nil)
+	m.playground = true
+	m.playgroundInput.Focus()
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m2.playground {
+		t.Fatalf("esc should leave playground mode")
+	}
+	if cmd != nil {
+		t.Fatalf("esc should not kick off any Cmd")
+	}
+}
+
+// TestUpdatePlaygroundEnterRunsRecallDebugNeverRecall exercises the Enter
+// path end-to-end against a nil store (deterministic, no network/embedding
+// I/O): it must return a Cmd whose resulting message carries the query,
+// proving the run goes through RecallDebug's message shape and not Recall's.
+func TestUpdatePlaygroundEnterRunsRecallDebugNeverRecall(t *testing.T) {
+	m := memBrowserModel{playground: true}
+	m.playgroundInput.SetValue("cats")
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m2.playgroundRunning {
+		t.Fatalf("Enter should mark a run in flight")
+	}
+	if cmd == nil {
+		t.Fatalf("Enter with a non-empty query should return a Cmd")
+	}
+	msg, ok := cmd().(memPlaygroundMsg)
+	if !ok {
+		t.Fatalf("expected memPlaygroundMsg, got %#v", cmd())
+	}
+	if msg.query != "cats" {
+		t.Fatalf("msg.query = %q, want %q", msg.query, "cats")
+	}
+	if msg.err == nil {
+		t.Fatalf("nil store should surface an error, not silently succeed")
+	}
+}
+
+func TestUpdatePlaygroundEnterEmptyQueryNoop(t *testing.T) {
+	m := memBrowserModel{playground: true}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("Enter with an empty query must not fire a Cmd")
+	}
+}
+
+// TestUpdatePlaygroundTabNoClientsShowsStatus is the spec's explicit
+// no-remote-clients case: tab must not silently do nothing, it must surface
+// why the lens can't move.
+func TestUpdatePlaygroundTabNoClientsShowsStatus(t *testing.T) {
+	m := memBrowserModel{playground: true}
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if cmd != nil {
+		t.Fatalf("tab with no clients configured must not fire a Cmd")
+	}
+	if m2.playgroundLens != 0 {
+		t.Fatalf("lens must stay at local with no clients configured")
+	}
+	if m2.status != "no remote clients — lens is local only" {
+		t.Fatalf("status = %q", m2.status)
+	}
+}
+
+// TestUpdatePlaygroundTabCyclesLensAndReRunsQuery covers lens cycling with
+// clients configured AND the auto-rerun-last-query contract.
+func TestUpdatePlaygroundTabCyclesLensAndReRunsQuery(t *testing.T) {
+	m := memBrowserModel{
+		playground:        true,
+		playgroundClients: []clientRow{{Name: "box1"}, {Name: "box2"}},
+	}
+	// No query run yet: tab moves the lens but fires no Cmd.
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m2.playgroundLens != 1 {
+		t.Fatalf("lens = %d, want 1", m2.playgroundLens)
+	}
+	if cmd != nil {
+		t.Fatalf("tab with no query run yet must not fire a Cmd")
+	}
+
+	// Simulate a completed run, then cycle: must re-fire with the SAME query.
+	m2.playgroundQuery = "cats"
+	m3, cmd3 := m2.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m3.playgroundLens != 2 {
+		t.Fatalf("lens = %d, want 2", m3.playgroundLens)
+	}
+	if cmd3 == nil {
+		t.Fatalf("tab with a run query must re-fire the recall Cmd")
+	}
+	msg, ok := cmd3().(memPlaygroundMsg)
+	if !ok || msg.query != "cats" {
+		t.Fatalf("re-run must carry the last RUN query, got %#v ok=%v", msg, ok)
+	}
+
+	// One more tab: 2 clients -> 3-slot cycle, back to local.
+	m4, _ := m3.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m4.playgroundLens != 0 {
+		t.Fatalf("lens = %d, want back to local (0)", m4.playgroundLens)
+	}
+}
+
+// TestMemPlaygroundMsgErrUnavailableSetsBanner locks the ErrUnavailable ->
+// banner contract (spec point 5), mirroring toolRecall's fallback wording.
+func TestMemPlaygroundMsgErrUnavailableSetsBanner(t *testing.T) {
+	m := memBrowserModel{playground: true, playgroundRunning: true}
+	wrapped := fmt.Errorf("recall unavailable: %w", embed.ErrUnavailable)
+	m2, _ := m.Update(memPlaygroundMsg{query: "cats", err: wrapped})
+	if m2.playgroundRunning {
+		t.Fatalf("receiving the result must clear the in-flight flag")
+	}
+	if !errors.Is(wrapped, embed.ErrUnavailable) {
+		t.Fatalf("test setup sanity: wrapped err should satisfy errors.Is ErrUnavailable")
+	}
+	want := "embeddings unavailable — agents get substring fallback here; check `auxly index status`"
+	if m2.playgroundErrMsg != want {
+		t.Fatalf("playgroundErrMsg = %q, want %q", m2.playgroundErrMsg, want)
+	}
+	if len(m2.playgroundHits) != 0 {
+		t.Fatalf("an error result must not carry stale hits")
+	}
+}
+
+// TestPlaygroundMsgDropsStaleGeneration is the lens-race regression test: a
+// Tab-switch or second Enter while a run is in flight bumps playgroundGen
+// before dispatching, so an overlapping run's result landing out of order
+// must never overwrite the newer lens/query's state.
+func TestPlaygroundMsgDropsStaleGeneration(t *testing.T) {
+	m := memBrowserModel{playground: true}
+	m.playgroundInput.SetValue("first")
+	m1, cmd1 := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // gen -> 1, in flight
+	m1.playgroundInput.SetValue("second")
+	m2, cmd2 := m1.Update(tea.KeyMsg{Type: tea.KeyEnter}) // gen -> 2, in flight
+	if cmd1 == nil || cmd2 == nil {
+		t.Fatalf("expected both dispatches to fire a Cmd")
+	}
+	staleMsg, ok := cmd1().(memPlaygroundMsg)
+	if !ok || staleMsg.query != "first" {
+		t.Fatalf("unexpected stale msg: %#v ok=%v", staleMsg, ok)
+	}
+	freshMsg, ok := cmd2().(memPlaygroundMsg)
+	if !ok || freshMsg.query != "second" {
+		t.Fatalf("unexpected fresh msg: %#v ok=%v", freshMsg, ok)
+	}
+
+	// The gen-1 run lands AFTER the gen-2 run was already dispatched: it must
+	// be dropped, not overwrite playgroundQuery/running with the old run's data.
+	m3, _ := m2.Update(staleMsg)
+	if m3.playgroundQuery != "" || !m3.playgroundRunning {
+		t.Fatalf("stale-gen msg must be dropped, got query=%q running=%v", m3.playgroundQuery, m3.playgroundRunning)
+	}
+
+	// The gen-2 run lands: it must be applied.
+	m4, _ := m3.Update(freshMsg)
+	if m4.playgroundQuery != "second" || m4.playgroundRunning {
+		t.Fatalf("current-gen msg must be applied, got query=%q running=%v", m4.playgroundQuery, m4.playgroundRunning)
+	}
+}
+
+// TestPlaygroundTabMidFlightUsesTypedQuery covers the lens-race fix's second
+// half: the user types, hits Enter, then Tab's before that run lands —
+// playgroundQuery is still "" (it only updates when a msg is received), but
+// the re-run under the new lens must still use the typed query, not skip it.
+func TestPlaygroundTabMidFlightUsesTypedQuery(t *testing.T) {
+	m := memBrowserModel{playground: true, playgroundClients: []clientRow{{Name: "box1"}}}
+	m.playgroundInput.SetValue("cats")
+	m1, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil || !m1.playgroundRunning || m1.playgroundQuery != "" {
+		t.Fatalf("setup: expected an in-flight run with playgroundQuery unlanded, got running=%v query=%q", m1.playgroundRunning, m1.playgroundQuery)
+	}
+	m2, cmd2 := m1.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m2.playgroundLens != 1 {
+		t.Fatalf("lens = %d, want 1", m2.playgroundLens)
+	}
+	if cmd2 == nil {
+		t.Fatalf("tab mid-flight with a typed query must re-fire the recall Cmd")
+	}
+	msg, ok := cmd2().(memPlaygroundMsg)
+	if !ok || msg.query != "cats" {
+		t.Fatalf("mid-flight re-run must use the typed query, got %#v ok=%v", msg, ok)
+	}
+}
+
+// TestMemVaultFileNamesFreshSeesFileCreatedAfterScan is Finding 2's
+// regression test: memPlaygroundCmd must build its ACL universe from a FRESH
+// store.List() call made inside the Cmd, not the model's cached tab-enter
+// scan snapshot — so a file created on disk after that scan is still visible
+// to a client-lens run, exactly as the live MCP server (mcp/server.go's
+// vaultFileNames) would show it.
+func TestMemVaultFileNamesFreshSeesFileCreatedAfterScan(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "identity.md"), []byte("- x\n"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	store := memory.NewStore(dir)
+	store.WorkspaceRoot = ""
+
+	// The model's stale tab-enter scan snapshot: only identity.md.
+	staleList := []string{"identity.md"}
+	clients := []clientRow{{Name: "box1"}} // empty SharedFiles -> default "share everything visible" tier
+
+	// A file appears on disk AFTER the scan snapshot was taken (e.g. queued
+	// via another session and approved while this tab sat open).
+	if err := os.WriteFile(filepath.Join(dir, "daily.md"), []byte("- y\n"), 0o644); err != nil {
+		t.Fatalf("add file: %v", err)
+	}
+
+	// Sanity check on the OLD bug: building the allow closure from the stale
+	// cached list makes the new file invisible even though a default share
+	// tier should cover it.
+	staleAllow := memPlaygroundAllow(clients, 1, staleList)
+	if staleAllow("daily.md") {
+		t.Fatalf("test sanity: the stale list must not see the post-scan file")
+	}
+
+	// The fix: memPlaygroundCmd feeds memPlaygroundAllow a fresh
+	// memVaultFileNames(store) call, so the same client-lens run now sees it.
+	freshAllow := memPlaygroundAllow(clients, 1, memVaultFileNames(store))
+	if !freshAllow("daily.md") {
+		t.Fatalf("a fresh store.List() must make a post-scan file visible to a client-lens run, mirroring mcp/server.go's per-request vaultFileNames")
+	}
+}
+
+// TestMemScanMsgDoesNotCancelPlayground is the Sprint 17 cancel-in-flight
+// rule applied to playground: unlike editing/creating/confirmDelete,
+// playground results are standalone copies (RecallDebugHit carries no index
+// into m.top/m.projects' Lines slices), so a rescan landing mid-playground
+// must leave the mode and its results untouched rather than cancelling.
+func TestMemScanMsgDoesNotCancelPlayground(t *testing.T) {
+	m := memBrowserModel{
+		top:        []memFile{{Name: "identity.md", Lines: []string{"- likes cats"}}},
+		playground: true,
+		playgroundHits: []memory.RecallDebugHit{
+			{File: "identity.md", Text: "likes cats", Score: 0.9, Accepted: true, AboveFloor: true},
+		},
+		playgroundQuery: "cats",
+	}
+	m2, _ := m.Update(memScanMsg{top: []memFile{{Name: "identity.md", Lines: []string{"- likes dogs"}}}})
+	if !m2.playground {
+		t.Fatalf("a rescan must not exit playground mode")
+	}
+	if len(m2.playgroundHits) != 1 {
+		t.Fatalf("a rescan must not clear playground results, got %+v", m2.playgroundHits)
+	}
+	if strings.Contains(m2.status, "action cancelled") {
+		t.Fatalf("playground must not be reported as a cancelled action, got status %q", m2.status)
 	}
 }

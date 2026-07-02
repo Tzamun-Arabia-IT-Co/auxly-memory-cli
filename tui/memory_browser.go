@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -9,8 +12,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/embed"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/sharing"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -87,6 +92,29 @@ type memBrowserModel struct {
 	confirmDelete  bool
 	confirmLineIdx int
 
+	// playground is the recall PLAYGROUND ('?') mode: score the live vault
+	// against a typed query via Store.RecallDebug — never Recall, see
+	// memPlaygroundCmd — and show explainable per-hit rows in the content
+	// pane. The cyclable provider LENS re-runs the same query through the
+	// exact ACL a configured remote client would see (sharing.CanRead), so
+	// the playground answers "why can't the box see this fact".
+	playground        bool
+	playgroundInput   textinput.Model
+	playgroundQuery   string // last query actually RUN (Enter) — drives the tab-cycle re-run, not just what's typed
+	playgroundRunning bool
+	playgroundHits    []memory.RecallDebugHit
+	playgroundFloor   float32
+	playgroundErrMsg  string      // non-empty -> render the error/unavailable banner instead of hits
+	playgroundClients []clientRow // loaded from clients.yaml when playground mode is entered
+	playgroundLens    int         // 0 = local (all files); 1..len(playgroundClients) = that client
+
+	// playgroundGen is bumped on every dispatch (Enter, or a lens-triggered
+	// re-run) and captured into that run's Cmd/memPlaygroundMsg. A lens
+	// Tab-switch or second Enter while a run is still in flight must not let
+	// the OLD run's result land last and overwrite the newer one — the
+	// handler drops any memPlaygroundMsg whose gen has since gone stale.
+	playgroundGen int
+
 	status string
 }
 
@@ -97,22 +125,25 @@ func newMemBrowserModel(store *memory.Store, logger *audit.Logger, pendingMgr *p
 	edit.Prompt = ""
 	create := textinput.New()
 	create.Prompt = ""
+	playground := textinput.New()
+	playground.Prompt = ""
 	return memBrowserModel{
-		store:       store,
-		logger:      logger,
-		pendingMgr:  pendingMgr,
-		searchInput: search,
-		editInput:   edit,
-		createInput: create,
+		store:           store,
+		logger:          logger,
+		pendingMgr:      pendingMgr,
+		searchInput:     search,
+		editInput:       edit,
+		createInput:     create,
+		playgroundInput: playground,
 	}
 }
 
 // capturesInput reports whether the Memory tab owns every keystroke right
-// now (typing a search/edit/new-fact value, or a pending y/n confirm) — the
-// app-wide switcher must not steal these keys, same contract as
-// organizeModel.capturesInput.
+// now (typing a search/edit/new-fact/playground-query value, or a pending
+// y/n confirm) — the app-wide switcher must not steal these keys, same
+// contract as organizeModel.capturesInput.
 func (m memBrowserModel) capturesInput() bool {
-	return m.searching || m.editing || m.creating || m.confirmDelete
+	return m.searching || m.editing || m.creating || m.confirmDelete || m.playground
 }
 
 // memScanMsg carries one completed vault scan: the taxonomy tree plus
@@ -126,6 +157,84 @@ type memScanMsg struct {
 // memActionMsg carries the result of queueing a pending change.
 type memActionMsg struct {
 	err error
+}
+
+// memPlaygroundK is the fixed k the playground scores with (the spec's
+// explicit RecallDebug(ctx, query, 8, …) call) — kept as its own constant,
+// independent of memory.defaultRecallK, so a future change to the latter
+// can't silently change what the playground displays or its "cut (k=N)"
+// marker.
+const memPlaygroundK = 8
+
+// memPlaygroundTimeout bounds one playground RecallDebug run so a slow or
+// unreachable embedding endpoint can never hang the TUI.
+const memPlaygroundTimeout = 10 * time.Second
+
+// memPlaygroundClientsMsg carries the host's configured clients.yaml entries,
+// loaded once when playground mode is entered — the provider-lens list 'tab'
+// cycles through. A file read, so (per this sprint's I/O-in-tea.Cmd rule) it
+// goes through a tea.Cmd exactly like the vault scan does.
+type memPlaygroundClientsMsg struct {
+	clients []clientRow
+}
+
+func memPlaygroundClientsCmd() tea.Cmd {
+	return func() tea.Msg {
+		return memPlaygroundClientsMsg{clients: readClients()}
+	}
+}
+
+// memPlaygroundMsg carries one playground recall run's result: either hits
+// (with the floor they were scored against) or an error — ErrUnavailable
+// when embeddings are off, wrapped exactly as Store.RecallDebug returns it.
+type memPlaygroundMsg struct {
+	gen   int // dispatch generation this run was fired under — see playgroundGen; a stale gen is dropped on arrival
+	query string
+	hits  []memory.RecallDebugHit
+	floor float32
+	err   error
+}
+
+// memPlaygroundCmd runs RecallDebug — deliberately NEVER Recall. Recall
+// records a RecallEvent (the audit trail RecallStatsByFile feeds the
+// dashboard's hit-rate and this tab's own hot/cold marker); a playground
+// query is the user poking at recall to understand its scoring, not a real
+// agent lookup, and must never pollute that signal. RecallDebug exists
+// exactly for this: it mirrors Recall's pipeline but never emits an event.
+//
+// The ACL universe (allFiles) is built HERE, inside the Cmd, from a fresh
+// Store.List() call — never from the cached tab-enter scan. This mirrors
+// mcp/server.go's vaultFileNames, which the live MCP server also lists fresh
+// on every request rather than caching: a file created after the tab was
+// scanned must still be visible to a client-lens run, exactly as the real
+// server would show it.
+func memPlaygroundCmd(store *memory.Store, query string, gen int, clients []clientRow, lens int) tea.Cmd {
+	return func() tea.Msg {
+		if store == nil {
+			return memPlaygroundMsg{gen: gen, query: query, err: fmt.Errorf("no store configured")}
+		}
+		allow := memPlaygroundAllow(clients, lens, memVaultFileNames(store))
+		ctx, cancel := context.WithTimeout(context.Background(), memPlaygroundTimeout)
+		defer cancel()
+		hits, floor, err := store.RecallDebug(ctx, query, memPlaygroundK, embed.New(), allow)
+		return memPlaygroundMsg{gen: gen, query: query, hits: hits, floor: floor, err: err}
+	}
+}
+
+// memVaultFileNames lists the vault's current file names via a fresh
+// Store.List() call — the same per-request pattern as mcp/server.go's
+// vaultFileNames — kept deliberately uncached so a playground client-lens
+// check always sees files created since the tab was last scanned.
+func memVaultFileNames(store *memory.Store) []string {
+	files, err := store.List()
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(files))
+	for _, f := range files {
+		names = append(names, f.Name)
+	}
+	return names
 }
 
 // Refresh fires the scan. Called by app.go's refreshCurrentScreen on
@@ -421,6 +530,42 @@ func (m memBrowserModel) Update(msg tea.Msg) (memBrowserModel, tea.Cmd) {
 		}
 		return m, nil
 
+	case memPlaygroundClientsMsg:
+		m.playgroundClients = msg.clients
+		// A tab-cycle that landed on a client slot which just disappeared
+		// (edited concurrently on disk) falls back to local rather than
+		// indexing out of range.
+		if m.playgroundLens > len(m.playgroundClients) {
+			m.playgroundLens = 0
+		}
+		return m, nil
+
+	case memPlaygroundMsg:
+		// Drop results from a superseded run: a lens Tab-switch or second
+		// Enter bumps playgroundGen before dispatching, so a msg whose gen
+		// no longer matches is an overlapping/old run landing late. Applying
+		// it would let stale results (e.g. unfiltered local hits) render
+		// under a newer lens's label, or race a newer run last-writer-wins.
+		if msg.gen != m.playgroundGen {
+			return m, nil
+		}
+		m.playgroundRunning = false
+		m.playgroundQuery = msg.query
+		m.playgroundHits = msg.hits
+		m.playgroundFloor = msg.floor
+		m.playgroundErrMsg = ""
+		if msg.err != nil {
+			m.playgroundHits = nil
+			if errors.Is(msg.err, embed.ErrUnavailable) {
+				// Mirrors toolRecall's fallback (mcp/server.go): agents get
+				// exact substring search instead of semantic recall.
+				m.playgroundErrMsg = "embeddings unavailable — agents get substring fallback here; check `auxly index status`"
+			} else {
+				m.playgroundErrMsg = msg.err.Error()
+			}
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		switch {
 		case m.searching:
@@ -431,6 +576,8 @@ func (m memBrowserModel) Update(msg tea.Msg) (memBrowserModel, tea.Cmd) {
 			return m.updateCreating(msg)
 		case m.confirmDelete:
 			return m.updateConfirmDelete(msg)
+		case m.playground:
+			return m.updatePlayground(msg)
 		default:
 			return m.updateNormal(msg)
 		}
@@ -486,6 +633,15 @@ func (m memBrowserModel) updateNormal(msg tea.KeyMsg) (memBrowserModel, tea.Cmd)
 		m.searchResults = nil
 		m.searchCursor = 0
 		m.status = ""
+	case "?":
+		m.playground = true
+		m.playgroundInput.SetValue("")
+		m.playgroundInput.Focus()
+		m.playgroundQuery = ""
+		m.playgroundHits = nil
+		m.playgroundErrMsg = ""
+		m.status = ""
+		return m, memPlaygroundClientsCmd()
 	case "e":
 		line, ok := m.currentContentLine()
 		if !ok {
@@ -676,6 +832,101 @@ func (m memBrowserModel) updateConfirmDelete(msg tea.KeyMsg) (memBrowserModel, t
 	return m, nil
 }
 
+// updatePlayground handles keys while recall PLAYGROUND mode owns the
+// keyboard: Enter runs (or re-runs) the query, Tab cycles the provider lens
+// (and re-runs the last query against it, per spec), Esc restores the normal
+// browser view, and everything else is forwarded to the query text input.
+func (m memBrowserModel) updatePlayground(msg tea.KeyMsg) (memBrowserModel, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.playground = false
+		m.playgroundInput.Blur()
+		m.status = ""
+		return m, nil
+	case tea.KeyEnter:
+		query := strings.TrimSpace(m.playgroundInput.Value())
+		if query == "" {
+			m.status = "empty query"
+			return m, nil
+		}
+		m.playgroundRunning = true
+		m.status = ""
+		m.playgroundGen++
+		return m, memPlaygroundCmd(m.store, query, m.playgroundGen, m.playgroundClients, m.playgroundLens)
+	case tea.KeyTab:
+		n := len(m.playgroundClients)
+		if n == 0 {
+			m.status = "no remote clients — lens is local only"
+			return m, nil
+		}
+		m.playgroundLens = memNextLensIndex(m.playgroundLens, n)
+		m.status = ""
+		// Re-fire whenever there's a query to re-run under the new lens: the
+		// last query that actually RAN (playgroundQuery), or — if a run is
+		// still in flight and hasn't landed yet, so playgroundQuery hasn't
+		// been set — whatever's currently typed. Enter never clears the
+		// input, so mid-flight it still holds the query that run was
+		// dispatched with (the case of "typed, hit Enter, then Tab'd before
+		// the result came back").
+		query := m.playgroundQuery
+		if m.playgroundRunning {
+			if v := strings.TrimSpace(m.playgroundInput.Value()); v != "" {
+				query = v
+			}
+		}
+		if query == "" {
+			return m, nil
+		}
+		// A lens change re-runs the query automatically — the whole point of
+		// the lens is comparing the SAME query across providers.
+		m.playgroundRunning = true
+		m.playgroundGen++
+		return m, memPlaygroundCmd(m.store, query, m.playgroundGen, m.playgroundClients, m.playgroundLens)
+	default:
+		var cmd tea.Cmd
+		m.playgroundInput, cmd = m.playgroundInput.Update(msg)
+		return m, cmd
+	}
+}
+
+// memNextLensIndex advances the provider lens: 0 (local) -> 1..n (each
+// configured client, in clients.yaml order) -> back to 0. Pure so the cycle
+// order (including the empty-clients case, which callers short-circuit
+// before ever reaching here) is directly testable.
+func memNextLensIndex(current, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return (current + 1) % (n + 1)
+}
+
+// memLensLabel returns lens i's display label: "local (all files)" for lens
+// 0 (or an out-of-range index), otherwise the matching client's friendly
+// name — what the footer and the results header show.
+func memLensLabel(clients []clientRow, lens int) string {
+	if lens <= 0 || lens > len(clients) {
+		return "local (all files)"
+	}
+	return clients[lens-1].Name
+}
+
+// memPlaygroundAllow builds the ACL closure for lens 0 (local — nil, meaning
+// "no filter" to Store.RecallDebug/Index.Load) or lens i in
+// 1..len(clients) (that configured remote's exact sharing.CanRead check —
+// the SAME gate the MCP server applies for a connected client). This is WHY
+// the lens exists: cycling it answers "why can't the box see this fact"
+// using the real rule a remote is filtered through, not an approximation.
+func memPlaygroundAllow(clients []clientRow, lens int, allFiles []string) func(file string) bool {
+	if lens <= 0 || lens > len(clients) {
+		return nil
+	}
+	c := clients[lens-1]
+	share := &sharing.ClientShare{SharedFiles: c.SharedFiles, WriteFiles: c.WriteFiles, Access: c.Access}
+	return func(file string) bool {
+		return sharing.CanRead(share, file, allFiles)
+	}
+}
+
 // memSearchAll scans every cached file's lines for a case-insensitive
 // substring match, capped at `cap` total hits — pure and I/O-free so it can
 // run on every keystroke.
@@ -848,6 +1099,125 @@ func (m memBrowserModel) renderSearch(width int) string {
 	return strings.Join(rows, "\n")
 }
 
+// memScoreBarSegments is the score bar's fixed width in blocks (the spec's
+// example "▰▰▰▱ 0.82" is a 4-block bar).
+const memScoreBarSegments = 4
+
+// memScoreBar renders a filled/empty block bar for a cosine score. Clamped to
+// [0,1] first — a raw cosine can dip negative or, on floating-point noise,
+// edge past 1.0 — so the filled count is always a valid, non-negative segment
+// count (an unclamped negative would panic strings.Repeat).
+func memScoreBar(score float32) string {
+	f := float64(score)
+	if f < 0 {
+		f = 0
+	}
+	if f > 1 {
+		f = 1
+	}
+	filled := int(math.Round(f * float64(memScoreBarSegments)))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > memScoreBarSegments {
+		filled = memScoreBarSegments
+	}
+	return strings.Repeat("▰", filled) + strings.Repeat("▱", memScoreBarSegments-filled)
+}
+
+// memPlaygroundRowMarker returns a hit's trailing status marker: "" for an
+// accepted hit (the real Recall would return it), "cut (k=N)" for a hit that
+// cleared the floor but fell past k, "below floor X.XX" otherwise.
+func memPlaygroundRowMarker(h memory.RecallDebugHit, k int, floor float32) string {
+	switch {
+	case h.Accepted:
+		return ""
+	case h.AboveFloor:
+		return fmt.Sprintf("cut (k=%d)", k)
+	default:
+		return fmt.Sprintf("below floor %.2f", floor)
+	}
+}
+
+// memPlaygroundRow renders one hit as a single plain (unstyled — the caller
+// applies dim/normal styling by tier, same plain-then-style order as
+// memContentRow) row: score bar, raw score, file:line, rune-safe truncated
+// text, then the status marker. The marker is computed and reserved for
+// FIRST so truncation never eats into it — it's the one thing a cut/below-
+// floor row must always show intact. width<=0 degrades to a 1-rune row
+// instead of panicking (truncate/strings.Repeat both reject negative counts).
+func memPlaygroundRow(h memory.RecallDebugHit, k int, floor float32, width int) string {
+	marker := memPlaygroundRowMarker(h, k, floor)
+	suffix := ""
+	if marker != "" {
+		suffix = "  " + marker
+	}
+	budget := width - utf8.RuneCountInString(suffix)
+	if budget < 1 {
+		budget = 1
+	}
+	prefix := fmt.Sprintf("%s %.2f · %s:%d · ", memScoreBar(h.Score), h.Score, h.File, h.LineStart)
+	textBudget := budget - utf8.RuneCountInString(prefix)
+	if textBudget < 1 {
+		textBudget = 1
+	}
+	row := prefix + truncate(strings.TrimSpace(h.Text), textBudget)
+	row = truncate(row, budget) // safety net if the prefix alone already exceeded budget
+	return row + suffix
+}
+
+// renderPlayground replaces the content pane with recall PLAYGROUND results:
+// a header line (query, floor, hit-tier counts) then one row per hit, styled
+// by tier — accepted normal, above-floor-but-cut dim, below-floor dimmest.
+// An embed.ErrUnavailable run instead shows the fallback banner (point 5).
+func (m memBrowserModel) renderPlayground(width int) string {
+	inner := width - 2
+	if inner < 1 {
+		inner = 1
+	}
+	if m.playgroundRunning {
+		return memDimStyle.Render("running recall…")
+	}
+	if m.playgroundErrMsg != "" {
+		return lipgloss.NewStyle().Foreground(ColorWarning).Render(truncate("⚠ "+m.playgroundErrMsg, inner))
+	}
+	if m.playgroundQuery == "" {
+		return memDimStyle.Render("type a query, enter to run recall through the vault")
+	}
+	if len(m.playgroundHits) == 0 {
+		return memDimStyle.Render("no hits")
+	}
+	var accepted, cut, below int
+	for _, h := range m.playgroundHits {
+		switch {
+		case h.Accepted:
+			accepted++
+		case h.AboveFloor:
+			cut++
+		default:
+			below++
+		}
+	}
+	header := fmt.Sprintf("query %q · floor %.2f · %d accepted / %d cut / %d below floor",
+		m.playgroundQuery, m.playgroundFloor, accepted, cut, below)
+	rows := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Render(truncate(header, inner)),
+		"",
+	}
+	for _, h := range m.playgroundHits {
+		text := memPlaygroundRow(h, memPlaygroundK, m.playgroundFloor, inner)
+		switch {
+		case h.Accepted:
+			rows = append(rows, text)
+		case h.AboveFloor:
+			rows = append(rows, memDimStyle.Render(text))
+		default:
+			rows = append(rows, memDimItalic.Render(text))
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
 func (m memBrowserModel) View(width int) string {
 	title := StyleTitle.Render("🧠 Memory")
 
@@ -881,9 +1251,12 @@ func (m memBrowserModel) View(width int) string {
 
 	left := m.renderTree(leftW)
 	var right string
-	if m.searching {
+	switch {
+	case m.playground:
+		right = m.renderPlayground(rightW)
+	case m.searching:
 		right = m.renderSearch(rightW)
-	} else {
+	default:
 		right = m.renderContent(rightW)
 	}
 	panes := lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", gutter), right)
