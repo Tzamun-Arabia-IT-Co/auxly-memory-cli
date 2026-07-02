@@ -1113,15 +1113,20 @@ var (
 	addStandalone bool
 )
 
-// normalizeOS maps user input to the canonical target OS, defaulting to linux.
+// normalizeOS maps user input to the canonical target OS. Empty stays EMPTY:
+// an undeclared OS lets runDoctor's auto-probe persist the detected one
+// (persistDetectedOS no-ops on profiles that already declare an OS, so the
+// old default-to-linux silently blocked detection forever).
 func normalizeOS(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "mac", "macos", "osx", "darwin":
 		return "darwin"
 	case "win", "windows":
 		return "windows"
-	case "linux", "":
+	case "linux":
 		return "linux"
+	case "":
+		return ""
 	default:
 		return "linux"
 	}
@@ -2326,7 +2331,7 @@ func installPubKey(p remoteProfile, pubPath string) error {
 	pubKey := strings.TrimSpace(string(pub))
 	fam := classifyOS(p.OS)
 	if fam == osUnknown && strings.TrimSpace(p.OS) == "" {
-		fmt.Println("   ⚠ Host OS not specified in the profile — assuming a POSIX host for key install. If this is Windows, re-run the wizard and select Windows.")
+		fmt.Println("   ⚠ Host OS not specified in the profile — assuming a POSIX host for key install. If this is Windows, re-run with `--os windows` (auxly connect add ... --os windows).")
 	}
 
 	// remoteArgs is the per-OS remote command appended after "-- target".

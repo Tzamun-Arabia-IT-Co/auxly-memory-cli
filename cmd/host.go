@@ -634,6 +634,7 @@ func init() {
 	hostCmd.AddCommand(hostForgetCmd)
 
 	hostVersionsCmd.Flags().BoolVar(&hostVersionsJSON, "json", false, "emit machine-readable JSON (used by the TUI)")
+	hostVersionsCmd.Flags().BoolVar(&hostVersionsHealth, "health", false, "also verify wiring + run the end-to-end memory-link selftest per box")
 	hostUpdateCmd.Flags().BoolVar(&hostUpdateAll, "all", false, "update every connected box that is outdated and idle")
 	hostUpdateCmd.Flags().BoolVar(&hostUpdateForce, "force", false, "update even a box that is serving a live session (single-box only)")
 	hostStatuslineCmd.Flags().BoolVar(&hostStatuslineAll, "all", false, "push the statusline to every connected box")

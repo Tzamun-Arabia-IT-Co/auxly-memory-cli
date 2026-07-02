@@ -72,7 +72,6 @@ const (
 
 // form steps.
 const (
-	formStepOS     = "os"
 	formStepMethod = "method"
 	formStepHost   = "host"
 	formStepJump   = "jump"
@@ -756,7 +755,7 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 		// (and again after an update resets the flag). SSH-bound, so never on a hot path.
 		if !m.versionsProbed && m.hostOK && len(m.clients) > 0 {
 			m.versionsProbed = true
-			return m, tea.Batch(sshDataTickCmd(), probeRemoteVersionsCmd())
+			return m, tea.Batch(sshDataTickCmd(), probeRemoteVersionsCmd(true))
 		}
 		return m, sshDataTickCmd()
 
@@ -1031,44 +1030,33 @@ func (m sshModel) handleFormKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 	case tea.KeyBackspace, tea.KeyCtrlH:
 		m.formTrim()
 		return m, nil
+	case tea.KeyTab:
+		if m.formStep == formStepHost {
+			if next := completeHostField(m.formHost); next != "" {
+				m.formHost = next
+			}
+		}
+		return m, nil
 	case tea.KeySpace:
 		m.formAppend(" ")
 		return m, nil
 	case tea.KeyRunes:
 		s := string(msg.Runes)
 		if m.formStep == formStepMethod {
-			// Method is the first, most important choice. 1 = relay (this machine is the
-			// host, served to a NAT'd/shared box) — the primary flow, shown first; the
-			// rest reach an external host this machine consumes.
+			// One decision, three answers. "direct" resolves to lan/public
+			// automatically from the address; OS is auto-probed by the doctor —
+			// the wizard never asks what the machine can discover itself.
 			switch s {
 			case "1":
 				m.formMethod = "relay"
 			case "2":
-				m.formMethod = "lan"
+				m.formMethod = "direct"
 			case "3":
-				m.formMethod = "vpn"
-			case "4":
 				m.formMethod = "bastion"
-			case "5":
-				m.formMethod = "public"
 			default:
 				return m, nil
 			}
 			m.formStep = formStepHost
-			return m, nil
-		}
-		if m.formStep == formStepOS {
-			switch s {
-			case "1":
-				m.formOS = "linux"
-			case "2":
-				m.formOS = "darwin"
-			case "3":
-				m.formOS = "windows"
-			default:
-				return m, nil
-			}
-			m.formStep = formStepName
 			return m, nil
 		}
 		m.formAppend(s)
@@ -1081,26 +1069,19 @@ func (m sshModel) advanceForm() (sshModel, tea.Cmd) {
 	switch m.formStep {
 	case formStepMethod:
 		if m.formMethod == "" {
-			m.formMethod = "public"
+			m.formMethod = "direct"
 		}
 		m.formStep = formStepHost
 	case formStepHost:
 		if strings.TrimSpace(m.formHost) == "" {
 			return m, nil // host/relay is required
 		}
-		if m.formMethod == "relay" {
-			m.formStep = formStepName // name the connection, then submit
-		} else if m.formMethod == "bastion" {
+		if m.formMethod == "bastion" {
 			m.formStep = formStepJump
 		} else {
-			m.formStep = formStepOS
+			m.formStep = formStepName // OS is auto-probed; name, then submit
 		}
 	case formStepJump:
-		m.formStep = formStepOS
-	case formStepOS:
-		if m.formOS == "" {
-			m.formOS = "linux"
-		}
 		m.formStep = formStepName
 	case formStepName:
 		// Relay makes THIS machine the host serving the box, so the next step is choosing
@@ -1153,11 +1134,22 @@ func (m sshModel) submitForm() (sshModel, tea.Cmd) {
 		m.preShareNames = clientNameSet(m.clients)
 		return m.beginCapturedSub("Setting up relay via "+host, "host", args...)
 	}
-	osTarget := m.formOS
-	if osTarget == "" {
-		osTarget = "linux"
+	// OS is deliberately NOT passed: normalizeOS("") keeps the profile's OS
+	// empty so runDoctor's probe persists the real one (persistDetectedOS).
+	method := m.formMethod
+	if method == "direct" {
+		method = "public"
+		if privateHostTUI(host) {
+			method = "lan"
+		}
 	}
-	base := []string{"add", "--os", osTarget, "--method", m.formMethod, "--host", host}
+	base := []string{"add", "--method", method, "--host", host}
+	if os := strings.TrimSpace(m.formOS); os != "" {
+		// Only the edit/retry flow pre-fills formOS (from the saved profile) —
+		// a fresh wizard leaves it empty for the doctor's auto-probe. Without
+		// this, retrying a method would wipe a declared OS back to empty.
+		base = append(base, "--os", os)
+	}
 	if name := strings.TrimSpace(m.formName); name != "" {
 		base = append(base, "--name", name)
 	}
@@ -1784,6 +1776,21 @@ func (m sshModel) View() string {
 						}
 						row += " " + vs.Render(text)
 					}
+					// Link cell from the health sweep: the selftest's verdict is
+					// the one signal that means "this box can actually read the
+					// memory right now" — config says nothing, the probe proves it.
+					if text, kind := linkCell(st); text != "" {
+						ls := dim
+						switch kind {
+						case "ok":
+							ls = green
+						case "slow":
+							ls = lipgloss.NewStyle().Foreground(ColorWarning)
+						case "fail":
+							ls = lipgloss.NewStyle().Foreground(ColorDanger)
+						}
+						row += " " + ls.Render(text)
+					}
 				}
 				if i == m.cursor {
 					lines = append(lines, accent.Render("▸ ")+selRow.Render(row))
@@ -2023,13 +2030,11 @@ func (m sshModel) View() string {
 		// ── Step 1 · Method (the key decision, shown first) ──────────────
 		methodOpts := []struct{ key, val, desc string }{
 			{"1", "relay", "Serve THIS machine to a NAT'd / shared box"},
-			{"2", "lan", "Same network — same Wi-Fi / router / subnet"},
-			{"3", "vpn", "Over a VPN you run (Tailscale, WireGuard…)"},
-			{"4", "bastion", "Through a jump host / bastion gateway"},
-			{"5", "public", "Public IP / custom host + ssh options"},
+			{"2", "direct", "Direct over SSH — LAN/VPN/public picked automatically"},
+			{"3", "bastion", "Through a jump host / bastion gateway"},
 		}
 		if m.formStep == formStepMethod {
-			lines = append(lines, "  "+boldAccent.Render("How does this machine reach the memory?")+dim.Render("   press 1–5"))
+			lines = append(lines, "  "+boldAccent.Render("How does this machine reach the box?")+dim.Render("   press 1–3"))
 			for _, o := range methodOpts {
 				marker, name, desc := dim.Render("○"), dim.Render(fmt.Sprintf("%-8s", o.val)), dim.Render(o.desc)
 				if m.formMethod == o.val {
@@ -2062,6 +2067,9 @@ func (m sshModel) View() string {
 		case m.formStep == formStepHost:
 			lines = append(lines, "  "+boldAccent.Render(hostTitle)+dim.Render("   "+hostHintTxt))
 			lines = append(lines, "   "+m.formHost+caret)
+			if hint := hostFieldHint(m.formHost); hint != "" {
+				lines = append(lines, "   "+dim.Render(hint))
+			}
 		case strings.TrimSpace(m.formHost) != "":
 			lines = append(lines, "  "+check+" "+dim.Render(hostTitle+"   ")+m.formHost)
 		default:
@@ -2076,33 +2084,6 @@ func (m sshModel) View() string {
 				lines = append(lines, "   "+m.formJump+caret)
 			case m.formJump != "":
 				lines = append(lines, "  "+check+" "+dim.Render("Jump host   ")+m.formJump)
-			}
-		}
-
-		// ── Step 3 · Target OS (not needed for relay) ────────────────────
-		if !isRelay {
-			osOpts := []struct{ val, lbl string }{{"linux", "Linux"}, {"darwin", "macOS"}, {"windows", "Windows"}}
-			switch {
-			case m.formStep == formStepOS:
-				row := "  " + boldAccent.Render("Host OS") + dim.Render("   press 1–3    ")
-				for i, o := range osOpts {
-					if m.formOS == o.val {
-						row += accent.Render("●") + " " + boldAccent.Render(o.lbl) + "   "
-					} else {
-						row += dim.Render(fmt.Sprintf("%d ○ %s   ", i+1, o.lbl))
-					}
-				}
-				lines = append(lines, row)
-			case m.formOS != "":
-				lbl := m.formOS
-				for _, o := range osOpts {
-					if o.val == m.formOS {
-						lbl = o.lbl
-					}
-				}
-				lines = append(lines, "  "+check+" "+dim.Render("Host OS   ")+lbl)
-			default:
-				lines = append(lines, "  "+dim.Render("· Host OS"))
 			}
 		}
 

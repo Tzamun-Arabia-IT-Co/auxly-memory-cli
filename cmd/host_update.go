@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
@@ -20,13 +22,17 @@ type clientVersionStatus struct {
 	Outdated  bool   `json:"outdated"`
 	Live      bool   `json:"live"`      // serving a live session right now
 	Reachable bool   `json:"reachable"` // SSH + `auxly --version` succeeded
+	// Health-sweep extras (--health): wiring + end-to-end link verdict from the
+	// selftest ("OK (N files)" / "SLOW …" / "FAIL <class>: …"; "" = not probed).
+	Wired bool   `json:"wired,omitempty"`
+	Link  string `json:"link,omitempty"`
 }
 
 // probeClientVersions SSHes every connected box CONCURRENTLY and reports each
 // one's auxly version against the latest published release. Network-bound but
 // parallel, so the whole sweep is ~one SSH round-trip, not N. Order matches
 // loadClients().
-func probeClientVersions() []clientVersionStatus {
+func probeClientVersions(health bool) []clientVersionStatus {
 	clients, _ := loadClients()
 	if len(clients) == 0 {
 		return nil // no boxes → no SSH, no /version network call (stays local-first)
@@ -54,6 +60,21 @@ func probeClientVersions() []clientVersionStatus {
 					st.Outdated = remoteNeedsUpdate(st.Version, latest, true)
 				}
 			}
+			if health && st.Reachable {
+				// Full health: wiring + the end-to-end selftest read. Reuses the
+				// host-clients probe (costs one extra round-trip; health sweeps
+				// are one-shot user actions, never a hot tick).
+				hctx, hcancel := context.WithTimeout(context.Background(), 25*time.Second)
+				h := probeClient(hctx, c)
+				hcancel()
+				st.Wired = h.wired
+				st.Link = h.link
+				if !h.wired && h.link == "" {
+					// probeClient skips the selftest for unwired boxes; without
+					// this the TUI row would look identical to a healthy one.
+					st.Link = "FAIL unwired"
+				}
+			}
 			out[i] = st
 		}()
 	}
@@ -61,7 +82,10 @@ func probeClientVersions() []clientVersionStatus {
 	return out
 }
 
-var hostVersionsJSON bool
+var (
+	hostVersionsJSON   bool
+	hostVersionsHealth bool
+)
 
 var hostVersionsCmd = &cobra.Command{
 	Use:          "versions",
@@ -71,7 +95,7 @@ var hostVersionsCmd = &cobra.Command{
 }
 
 func runHostVersions(cmd *cobra.Command, args []string) error {
-	statuses := probeClientVersions()
+	statuses := probeClientVersions(hostVersionsHealth)
 	if hostVersionsJSON {
 		b, err := json.Marshal(statuses)
 		if err != nil {

@@ -20,11 +20,41 @@ func TestMethodRelayIsFirst(t *testing.T) {
 		t.Errorf("choosing a method should advance to the host step, got %q", m.formStep)
 	}
 
-	// And "2" is now lan (everything shifted down by one).
+	// "2" is direct — the wizard no longer asks lan/vpn/public; the address
+	// decides at submit (privateHostTUI), and the OS question is gone entirely.
 	m2 := sshModel{mode: sshModeForm, formStep: formStepMethod}
 	m2, _ = m2.handleFormKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	if m2.formMethod != "lan" {
-		t.Errorf("method key 2 should select lan, got %q", m2.formMethod)
+	if m2.formMethod != "direct" {
+		t.Errorf("method key 2 should select direct, got %q", m2.formMethod)
+	}
+	// Direct host step advances straight to name (no OS step in the chain).
+	m2.formStep = formStepHost
+	m2.formHost = "10.0.0.7"
+	m2, _ = m2.advanceForm()
+	if m2.formStep != formStepName {
+		t.Errorf("direct host step should advance to name, got %q", m2.formStep)
+	}
+}
+
+// TestDirectMethodResolvesByAddress locks the auto-resolution: private targets
+// become lan, public ones public — the user never answers a networking question.
+func TestDirectMethodResolvesByAddress(t *testing.T) {
+	cases := []struct {
+		spec    string
+		private bool
+	}{
+		{"root@10.0.0.7", true},
+		{"192.168.1.24:2222", true},
+		{"box.local", true},
+		{"user@203.0.113.9", false},
+		{"build.example.com", false},
+		{"root@[fd12:3456:789a::1]:22", true},
+		{"[2001:db8::1]:2222", false},
+	}
+	for _, c := range cases {
+		if got := privateHostTUI(c.spec); got != c.private {
+			t.Errorf("privateHostTUI(%q) = %v, want %v", c.spec, got, c.private)
+		}
 	}
 }
 

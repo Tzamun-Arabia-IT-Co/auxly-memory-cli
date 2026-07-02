@@ -20,6 +20,8 @@ type clientVersionStatus struct {
 	Outdated  bool   `json:"outdated"`
 	Live      bool   `json:"live"`
 	Reachable bool   `json:"reachable"`
+	Wired     bool   `json:"wired,omitempty"` // health sweep only
+	Link      string `json:"link,omitempty"`  // selftest verdict; "" = not probed
 }
 
 // remoteVersionsMsg delivers a completed version sweep into a model's Update.
@@ -31,10 +33,16 @@ type remoteVersionsMsg struct {
 // returns the parsed statuses. It is SSH-bound (one round-trip per box, run
 // concurrently by the command) so it must never be called on a hot tick — only on
 // screen-enter, after an update, or on an explicit refresh. A failure yields an
-// empty sweep (no badges) rather than an error.
-func probeRemoteVersionsCmd() tea.Cmd {
+// empty sweep (no badges) rather than an error. health additionally verifies
+// wiring + runs the memory-link selftest per box (Remote tab; the dashboard
+// keeps the fast version-only sweep).
+func probeRemoteVersionsCmd(health bool) tea.Cmd {
 	return func() tea.Msg {
-		out, err := exec.Command(exePath(), "host", "versions", "--json").Output()
+		args := []string{"host", "versions", "--json"}
+		if health {
+			args = append(args, "--health")
+		}
+		out, err := exec.Command(exePath(), args...).Output()
 		if err != nil {
 			return remoteVersionsMsg{}
 		}
@@ -114,6 +122,32 @@ func versionCell(st clientVersionStatus) (text, kind string) {
 		return "unreachable", "unreachable"
 	}
 	return "", ""
+}
+
+// linkCell renders a health-swept box's memory-link verdict for the Remote row.
+// kind is "ok", "slow", or "fail"; empty text means no health sweep has run
+// (the fast dashboard sweep leaves Link empty) — claim nothing without proof.
+func linkCell(st clientVersionStatus) (text, kind string) {
+	switch {
+	case strings.HasPrefix(st.Link, "OK"):
+		return "link ✓", "ok"
+	case strings.HasPrefix(st.Link, "SLOW"):
+		return "link slow", "slow"
+	case strings.HasPrefix(st.Link, "FAIL"):
+		return truncateLink(st.Link), "fail"
+	}
+	return "", ""
+}
+
+// truncateLink keeps the FAIL class visible without flooding the row.
+func truncateLink(link string) string {
+	if i := strings.Index(link, ":"); i > 0 {
+		return link[:i] // "FAIL hostbin"
+	}
+	if len(link) > 16 {
+		return link[:16]
+	}
+	return link
 }
 
 // updateResultKind classifies the captured output of a `host update` run so the

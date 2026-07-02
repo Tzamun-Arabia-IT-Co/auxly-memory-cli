@@ -306,7 +306,7 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		// minute. The command no-ops (no SSH, no network) when there are no boxes.
 		if !m.boxesUpdating && time.Since(m.boxesProbedAt) > 60*time.Second {
 			m.boxesProbedAt = time.Now()
-			cmds = append(cmds, probeRemoteVersionsCmd())
+			cmds = append(cmds, probeRemoteVersionsCmd(false))
 		}
 		return m, tea.Batch(cmds...)
 	case remoteVersionsMsg:
