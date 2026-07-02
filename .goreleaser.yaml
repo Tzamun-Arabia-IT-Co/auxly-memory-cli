@@ -62,6 +62,24 @@ archives:
     formats: [binary]
     name_template: "auxly-{{ .Os }}-{{ .Arch }}"
 
+# Authenticode-sign the Windows executables via SignPath Foundation (free for
+# OSS). DORMANT until the SignPath application is approved: with no
+# SIGNPATH_API_TOKEN in the CI environment the script exits 0 without touching
+# the binary, so releases keep working exactly as today. When the secrets are
+# set, each windows .exe is submitted to SignPath and replaced in place with
+# the signed artifact BEFORE archiving/checksumming, so the zip, the raw
+# binary, and the checksum manifest all carry the signed bytes.
+# Publisher will show "SignPath Foundation" — that is expected for their OSS
+# program. See RELEASING.md for the application + setup runbook.
+binary_signs:
+  - id: signpath-authenticode
+    cmd: sh
+    args:
+      - "-c"
+      - 'scripts/signpath-sign.sh "${artifact}"'
+    # The script signs in place; no detached signature artifact is produced.
+    signature: ""
+
 checksum:
   # Versioned so a verifying client fetches the manifest for the EXACT release it
   # is downloading, and older releases keep their own manifest (H2/H3, see
