@@ -151,6 +151,27 @@ func TestRecallEventNeverCarriesRawQueryText(t *testing.T) {
 	})
 }
 
+// TestBulletHashesAcceptsStarBullets is Finding 3's regression: bulletHashes
+// must accept "* " bullets exactly like isBulletLine (decay.go) does — a "*"
+// fact that never accrues a recall hash looks permanently unrecalled and gets
+// archived out from under active use.
+func TestBulletHashesAcceptsStarBullets(t *testing.T) {
+	chunk := "* First star fact\n* Second star fact\n"
+	got := bulletHashes(chunk)
+	want := []string{
+		HashRecallText("* First star fact"),
+		HashRecallText("* Second star fact"),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("bulletHashes(%q) = %v, want %v", chunk, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("bulletHashes[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // walkStrings recursively visits every string reachable from v (struct
 // fields, slice/array elements, pointers/interfaces).
 func walkStrings(v reflect.Value, visit func(string)) {

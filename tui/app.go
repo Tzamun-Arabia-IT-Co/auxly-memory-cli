@@ -28,6 +28,14 @@ const (
 	screenSSH
 	screenSkills
 	screenAuditTrail
+	// screenReview is appended at the END of the tab list (not spliced in after
+	// Approvals) so the existing single-digit hotkeys 1-9/0 for the ten tabs
+	// above stay untouched — all ten digits are already spoken for, and
+	// reordering would renumber every tab after Approvals. Reachable via
+	// Tab/Shift+Tab cycling, mouse click, and its own "-" key.
+	// ponytail: append-only tab registration, smallest diff that doesn't
+	// reshuffle existing shortcuts; revisit if Review ever needs a prime digit.
+	screenReview
 	screenViewer // must stay last
 )
 
@@ -42,6 +50,7 @@ var screenNames = []string{
 	"Remote",
 	"Skills",
 	"Audit Trail",
+	"Review",
 }
 
 type model struct {
@@ -62,6 +71,7 @@ type model struct {
 	settings   settingsModel
 	ssh        sshModel
 	skills     skillsModel
+	review     reviewModel
 	viewer     viewerModel // must stay last (no tab number)
 
 	// Shared state
@@ -101,6 +111,7 @@ func NewApp(memoryPath string) *model {
 		settings:   newSettingsModel(memoryPath, logger),
 		ssh:        newSSHModel(),
 		skills:     newSkillsModel(),
+		review:     newReviewModel(store, logger),
 		viewer:     newViewerModel(store),
 	}
 }
@@ -198,6 +209,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.gotoScreen(screenSkills)
 		case "0":
 			return m, m.gotoScreen(screenAuditTrail)
+		case "-":
+			return m, m.gotoScreen(screenReview)
 		case "]", "tab":
 			if msg.String() == "tab" && ((m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
 				(m.screen == screenSSH && m.ssh.editingHost)) {
@@ -207,7 +220,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if next == screenViewer {
 				next = screenBrowser
 			}
-			return m, m.gotoScreen((next + 1) % 10)
+			return m, m.gotoScreen((next + 1) % 11)
 		case "[", "shift+tab", "backtab":
 			if (msg.String() == "shift+tab" || msg.String() == "backtab") && ((m.screen == screenDashboard && m.dashboard.selectedAgent != "") ||
 				(m.screen == screenSSH && m.ssh.editingHost)) {
@@ -218,9 +231,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				prev = screenBrowser
 			}
 			if prev == 0 {
-				return m, m.gotoScreen(9)
+				return m, m.gotoScreen(10)
 			}
-			return m, m.gotoScreen((prev - 1) % 10)
+			return m, m.gotoScreen((prev - 1) % 11)
 		case "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end":
 			// Scroll the content viewport on long pages, unless a modal/editor owns
 			// these keys.
@@ -255,6 +268,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settings, _ = m.settings.Update(msg)
 		m.ssh, _ = m.ssh.Update(msg)
 		m.skills, _ = m.skills.Update(msg)
+		m.review, _ = m.review.Update(msg)
 		m.viewer, _ = m.viewer.Update(msg)
 		m.syncViewport()
 
@@ -264,8 +278,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tabRow := strings.Count(banner, "\n")
 			if msg.Y >= tabRow-1 && msg.Y <= tabRow+1 {
 				startX := 0
-				for idx, name := range screenNames {
-					tabWidth := 4 + len(name) + 2
+				for idx := range screenNames {
+					// labelFor is the SAME label renderTabs draws (incl. the
+					// "Review (N)" badge) — computing width from the static
+					// screenNames entry instead let a badged tab widen on screen
+					// while its click zone stayed the static width, so clicks on
+					// the badge silently hit nothing.
+					tabWidth := 4 + len(m.labelFor(idx)) + 2
 					if msg.X >= startX && msg.X < startX+tabWidth {
 						return m, m.gotoScreen(screen(idx))
 					}
@@ -305,6 +324,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.skills, cmd = m.skills.Update(msg)
 	case screenAuditTrail:
 		m.auditTrail, cmd = m.auditTrail.Update(msg)
+	case screenReview:
+		m.review, cmd = m.review.Update(msg)
 	case screenViewer:
 		m.viewer, cmd = m.viewer.Update(msg)
 	}
@@ -375,6 +396,8 @@ func (m model) screenContent() string {
 		return m.skills.View(m.width, m.height)
 	case screenAuditTrail:
 		return m.auditTrail.View()
+	case screenReview:
+		return m.review.View()
 	case screenViewer:
 		return m.viewer.View()
 	}
@@ -486,13 +509,31 @@ func clampContentHeight(content string, maxLines int) string {
 	return strings.Join(append(kept, note), "\n")
 }
 
+// labelFor returns the display label for tab slot i: the static screenNames
+// entry, except screenReview which gets a "(N)" badge while the queue is
+// non-empty. Shared by renderTabs (what's drawn) and the mouse click math
+// (what hit-zone corresponds to each tab) so the two can never desync.
+func (m model) labelFor(i int) string {
+	name := screenNames[i]
+	if screen(i) == screenReview && len(m.review.facts) > 0 {
+		// Approvals' own tab label is a static string (its count is shown
+		// inline in the body instead), so badge the count here per spec.
+		name = fmt.Sprintf("Review (%d)", len(m.review.facts))
+	}
+	return name
+}
+
 func (m model) renderTabs() string {
 	var tabs string
-	for i, name := range screenNames {
+	for i := range screenNames {
 		key := fmt.Sprintf("%d", i+1)
 		if i == 9 {
 			key = "0"
+		} else if screen(i) == screenReview {
+			// 11th tab, past the 1-9/0 digit range — its own key instead.
+			key = "-"
 		}
+		name := m.labelFor(i)
 		if screen(i) == m.screen {
 			tabs += lipgloss.NewStyle().
 				Bold(true).
@@ -559,6 +600,8 @@ func (m model) renderFooter() string {
 		} else {
 			footerText = "j/k: Navigate logs • Enter: View details • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 		}
+	case screenReview:
+		footerText = "j/k/↑/↓: Navigate • K keep (re-stamp) · a archive · r rescan · e edit hint • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	default:
 		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	}
@@ -607,6 +650,11 @@ func (m *model) refreshCurrentScreen() tea.Cmd {
 		return m.skills.Refresh(m.memoryPath, m.logger)
 	case screenAuditTrail:
 		return m.auditTrail.Refresh()
+	case screenReview:
+		// StaleFacts scans the whole vault + one audit-DB query per file — only
+		// ever fire it on tab-enter (here), never from a background tick.
+		m.review.scanning = true
+		return m.review.Refresh()
 	}
 	return nil
 }

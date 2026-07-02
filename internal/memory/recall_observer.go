@@ -56,12 +56,15 @@ func recallObserverSuppressed(ctx context.Context) bool {
 // bulletHashes returns one hash per bullet line of a chunk — fact-granularity
 // identity for the decay/review features (a chunk hash would churn whenever
 // ANY sibling bullet changes). Chunks without bullets fall back to one hash of
-// the whole text.
+// the whole text. Uses isBulletLine (decay.go) so "- " and "* " bullets are
+// both recognized — a "* " fact that never accrues a recall hash looks
+// permanently unrecalled and gets archived out from under active use.
 func bulletHashes(chunkText string) []string {
 	var out []string
 	for _, line := range strings.Split(chunkText, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "- ") {
-			out = append(out, HashRecallText(strings.TrimSpace(line)))
+		t := strings.TrimSpace(line)
+		if isBulletLine(t) {
+			out = append(out, HashRecallText(t))
 		}
 	}
 	if len(out) == 0 {

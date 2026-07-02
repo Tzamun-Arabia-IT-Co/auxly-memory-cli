@@ -155,6 +155,7 @@ func helpText() string {
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"index"+reset, "Build/rebuild the semantic recall index"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"export"+reset, "Export the memory vault (backup/share)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"populate"+reset, "Auto-detect system profile and populate files"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"review"+reset, "Review stale facts (old + unrecalled) — keep or archive"))
 	sb.WriteString("\r\n")
 
 	sb.WriteString(bold + "Remote Access:" + reset + "\r\n")

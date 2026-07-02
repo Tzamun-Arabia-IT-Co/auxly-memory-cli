@@ -331,14 +331,21 @@ func sortedCounts(m map[string]int) []kvCount {
 	return out
 }
 
+// truncate shortens s to at most max RUNES (not bytes) — a byte-based cut can
+// land mid-character on multi-byte UTF-8 (brand names, non-ASCII file names)
+// and render garbage at the boundary.
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	r := []rune(s)
+	if len(r) <= max {
 		return s
 	}
-	if max <= 1 {
-		return s[:max]
+	if max <= 0 {
+		return ""
 	}
-	return s[:max-1] + "…"
+	if max == 1 {
+		return string(r[:1])
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // relativeTime renders an RFC3339 timestamp as a friendly "Xh ago" string.
