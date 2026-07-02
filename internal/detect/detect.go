@@ -96,6 +96,20 @@ func InstalledAgents() []Agent {
 		// config is wired at ~/.void-editor/mcp.json.
 		{"Void", "void", "MCP",
 			[]string{filepath.Join(home, ".void-editor")}, []string{"void"}},
+		// Windsurf / Devin Desktop (Cognition rebrand Jun 2026). Detected ONLY by
+		// the ~/.codeium config root — the same root setup's wiring targets reach
+		// — so "detected" never means "detected but forever unwirable". (An
+		// install exposing only the AppSupport data dir has no known writable MCP
+		// path, so we deliberately don't detect on it.)
+		{"Windsurf (Devin Desktop)", "windsurf", "MCP",
+			[]string{filepath.Join(home, ".codeium", "windsurf"), filepath.Join(home, ".codeium")},
+			[]string{"windsurf"}},
+		// Kimi Code CLI + Trae IDE — both have wiring targets in knownIDETargets;
+		// detection was missing (agents/doctor could never show them).
+		{"Kimi Code CLI", "kimi", "MCP",
+			[]string{filepath.Join(home, ".kimi-code"), filepath.Join(home, ".kimi")}, []string{"kimi"}},
+		{"Trae IDE", "trae", "MCP",
+			[]string{filepath.Join(home, ".trae")}, []string{"trae"}},
 	}
 
 	for _, c := range checks {

@@ -18,6 +18,9 @@ func init() {
 }
 
 func runOrganize(cmd *cobra.Command, args []string) error {
+	if err := requireInit(); err != nil {
+		return err
+	}
 	store := memory.NewStore(getMemoryPath())
 	// Chunked organize (large vaults) runs one model call per file and can take
 	// minutes each — show progress so a headless run never looks hung.

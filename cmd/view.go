@@ -132,6 +132,9 @@ func (m cliViewerModel) View() string {
 }
 
 func runView(cmd *cobra.Command, args []string) error {
+	if err := requireInit(); err != nil {
+		return err
+	}
 	store := memory.NewStore(getMemoryPath())
 	content, err := store.View(args[0])
 	if err != nil {

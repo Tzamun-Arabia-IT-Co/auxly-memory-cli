@@ -19,6 +19,9 @@ func init() {
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
+	if err := requireInit(); err != nil {
+		return err
+	}
 	store := memory.NewStore(getMemoryPath())
 	results, err := store.Search(args[0])
 	if err != nil {

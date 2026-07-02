@@ -18,6 +18,9 @@ func init() {
 }
 
 func runStats(cmd *cobra.Command, args []string) error {
+	if err := requireInit(); err != nil {
+		return err
+	}
 	logger, err := audit.NewLogger(getMemoryPath())
 	if err != nil {
 		return err

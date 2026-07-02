@@ -1764,7 +1764,14 @@ func injectRemoteConfigs(name string) {
 			"command": "auxly",
 			"args":    []interface{}{connectMCPArgsName, name, "--provider", t.ProviderID},
 		}
-		if app := writeMCPConfigEntry(t, serverDef); app != "" {
+		app, werr := writeMCPConfigEntry(t, serverDef)
+		if werr != nil {
+			// Same fail-loud contract as `auxly setup`: a config-write failure
+			// must never be silently dropped from the "configured" list.
+			fmt.Printf("⚠️  %s: MCP config write failed — %v\n", t.AppName, werr)
+			continue
+		}
+		if app != "" {
 			configured = append(configured, app)
 		}
 	}

@@ -31,6 +31,9 @@ func init() {
 }
 
 func runExport(cmd *cobra.Command, args []string) error {
+	if err := requireInit(); err != nil {
+		return err
+	}
 	dest := exportDest
 	if dest == "" {
 		home, err := os.UserHomeDir()

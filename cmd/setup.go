@@ -196,6 +196,18 @@ func knownIDETargets(home string) []ideTarget {
 	voidBaseDir := filepath.Join(home, ".void-editor")
 	targets = append(targets, ideTarget{filepath.Join(voidBaseDir, "mcp.json"), "Void", voidBaseDir, false, "void"})
 
+	// 7b. Windsurf / Devin Desktop (Cognition rebrand, Jun 2026) — Cascade MCP
+	// config. Post-rebrand docs contradict themselves on the path (the FAQ says
+	// ~/.codeium/mcp_config.json, the Cascade MCP doc says
+	// ~/.codeium/windsurf/mcp_config.json, verified 2026-07). Each target gates
+	// on its OWN layout dir existing, so setup only writes the layout the
+	// installed app actually uses and never creates a phantom sibling layout.
+	// Same {"mcpServers":{...}} schema as Claude Desktop.
+	codeiumBaseDir := filepath.Join(home, ".codeium")
+	windsurfLayoutDir := filepath.Join(codeiumBaseDir, "windsurf")
+	targets = append(targets, ideTarget{filepath.Join(windsurfLayoutDir, "mcp_config.json"), "Windsurf (Devin Desktop)", windsurfLayoutDir, false, "windsurf"})
+	targets = append(targets, ideTarget{filepath.Join(codeiumBaseDir, "mcp_config.json"), "Windsurf (Devin Desktop, flat layout)", codeiumBaseDir, false, "windsurf"})
+
 	// 8. GitHub Copilot CLI — ~/.copilot/mcp-config.json. Same {"mcpServers":{...}}
 	// wrapper, but each entry also needs "type":"local" and "tools":["*"] (added in
 	// runSetup for the copilot provider). COPILOT_HOME can relocate ~/.copilot.
@@ -221,18 +233,20 @@ func localServerDef(binaryPath, memPath, providerID string) map[string]interface
 }
 
 // writeMCPConfigEntry writes serverDef into the target's config file, honoring
-// the per-file placement rules. Returns the app name on success, "" on skip/error.
-func writeMCPConfigEntry(t ideTarget, serverDef map[string]interface{}) string {
+// the per-file placement rules. Returns (appName, nil) on success, ("", nil)
+// when the app isn't installed (benign skip), and ("", err) on a real write
+// failure — callers must report failures, never silently claim success.
+func writeMCPConfigEntry(t ideTarget, serverDef map[string]interface{}) (string, error) {
 	path := t.Path
 	appName := t.AppName
 
-	// Check if base directory exists (meaning the app is installed)
+	// Check if base directory exists (meaning the app is installed). A stat
+	// error other than NotExist (AV lock, OneDrive reparse point on Windows)
+	// counts as "can't reach this app" and skips — hard failures are reserved
+	// for real write errors so one flaky probe never fails the whole setup.
 	if t.BaseDir != "" {
 		if _, err := os.Stat(t.BaseDir); err != nil {
-			if os.IsNotExist(err) {
-				return "" // Skip since app is not installed
-			}
-			fmt.Printf("⚠️  [Debug] Stat error on baseDir %s for %s: %v\n", t.BaseDir, appName, err)
+			return "", nil
 		}
 	}
 
@@ -247,8 +261,7 @@ func writeMCPConfigEntry(t ideTarget, serverDef map[string]interface{}) string {
 	// Force create the parent directory of the config file
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		fmt.Printf("⚠️  [Debug] MkdirAll error for %s at %s: %v\n", appName, dir, err)
-		return ""
+		return "", fmt.Errorf("cannot create %s: %w", dir, err)
 	}
 
 	// Read existing JSON
@@ -325,14 +338,12 @@ func writeMCPConfigEntry(t ideTarget, serverDef map[string]interface{}) string {
 	// Marshal and write back
 	newData, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		fmt.Printf("⚠️  [Debug] Marshal error for %s: %v\n", appName, err)
-		return ""
+		return "", fmt.Errorf("cannot marshal config: %w", err)
 	}
 	if err := os.WriteFile(path, newData, 0644); err != nil {
-		fmt.Printf("⚠️  [Debug] Write error for %s at %s: %v\n", appName, path, err)
-		return ""
+		return "", fmt.Errorf("cannot write %s: %w", path, err)
 	}
-	return appName
+	return appName, nil
 }
 
 // findCursorAgent returns the Cursor Agent CLI path, preferring the canonical
@@ -432,6 +443,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	var configuredApps []string
+	var failedApps []string
 
 	// Inject the local MCP server definition into every known IDE/agent target.
 	for _, t := range knownIDETargets(home) {
@@ -442,9 +454,14 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			serverDef["type"] = "local"
 			serverDef["tools"] = []interface{}{"*"}
 		}
-		if app := writeMCPConfigEntry(t, serverDef); app != "" {
+		app, werr := writeMCPConfigEntry(t, serverDef)
+		switch {
+		case werr != nil:
+			failedApps = append(failedApps, fmt.Sprintf("%s — %v", t.AppName, werr))
+		case app != "":
 			configuredApps = append(configuredApps, app)
 		}
+		// app == "" && werr == nil → agent not installed, benign skip
 	}
 
 	// Print beautiful aligned configured applications
@@ -452,6 +469,15 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		printAl("✅ Automatically configured local MCP for:")
 		for _, app := range configuredApps {
 			printAlf("   ↳ %s\r\n", app)
+		}
+		printAl("")
+	}
+	// A failed write must never masquerade as success — name each failure and
+	// exit non-zero at the end so scripts see it too.
+	if len(failedApps) > 0 {
+		printAl("❌ FAILED to configure (fix and re-run `auxly setup`):")
+		for _, f := range failedApps {
+			printAlf("   ↳ %s\r\n", f)
 		}
 		printAl("")
 	}
@@ -547,6 +573,11 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	printAl("   (Claude Desktop, Claude Code CLI, Cursor, or Codex IDE).")
 	printAl("   This will run the onboarding training and align memory automatically!")
 	printAl("")
+
+	if len(failedApps) > 0 {
+		printAlf("⚠️  Setup finished with %d failure(s) — see the FAILED list above.\r\n", len(failedApps))
+		return fmt.Errorf("%d agent config write(s) failed", len(failedApps))
+	}
 
 	printAl("🎉 Automated setup complete!")
 	printAl("   Please restart your IDEs (Cursor/Codex) or Claude Desktop to load the new tools.")

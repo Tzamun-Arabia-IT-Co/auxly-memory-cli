@@ -107,6 +107,13 @@ func init() {
 }
 
 func customHelpFunc(cmd *cobra.Command, args []string) {
+	fmt.Print(helpText())
+}
+
+// helpText renders the full custom help. Kept as a pure function so
+// TestHelpListsEveryCommand can walk rootCmd.Commands() against it — a new
+// command that isn't added here fails CI instead of shipping undiscoverable.
+func helpText() string {
 	cyan := "\033[38;5;38m"
 	purple := "\033[38;5;134m"
 	green := "\033[38;5;34m"
@@ -130,6 +137,9 @@ func customHelpFunc(cmd *cobra.Command, args []string) {
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"ui"+reset, "Launch the interactive TUI dashboard (Tab 1-8)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"init"+reset, "Run the onboarding wizard and configure local settings"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"setup"+reset, "Configure auxly-cli MCP server for detected agents"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"agents"+reset, "List detected agents and their wiring status"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"doctor"+reset, "One-screen health check of your Auxly install"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"statusline"+reset, "Install/manage the Auxly agent statusline"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"update"+reset, "Check for updates and automatically rebuild/install"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"version"+reset, "Print the version number of auxly-cli"))
 	sb.WriteString("\r\n")
@@ -140,6 +150,9 @@ func customHelpFunc(cmd *cobra.Command, args []string) {
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"write"+reset, "Write a change/diff to memory (respects trust levels)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"sync"+reset, "Git commit and push memory changes to remote"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"search"+reset, "Fuzzy search across all memory files"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"organize"+reset, "LLM re-file/tidy of the whole vault (review before apply)"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"index"+reset, "Build/rebuild the semantic recall index"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"export"+reset, "Export the memory vault (backup/share)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"populate"+reset, "Auto-detect system profile and populate files"))
 	sb.WriteString("\r\n")
 
@@ -155,9 +168,11 @@ func customHelpFunc(cmd *cobra.Command, args []string) {
 
 	sb.WriteString(bold + "Audit & Pending Queue:" + reset + "\r\n")
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"stats"+reset, "Show agent usage metrics from audit.db"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"usage"+reset, "Live provider usage/quota meters"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"tail"+reset, "Live stream the .audit.log"))
-	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"approve"+reset, "Approve a pending memory change"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"approve"+reset, "Approve a pending memory change (--force on conflict)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"reject"+reset, "Reject and delete a pending memory change"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"trust"+reset, "View/set per-agent trust levels (auto/approval/read-only)"))
 	sb.WriteString("\r\n")
 
 	sb.WriteString(bold + "Flags:" + reset + "\r\n")
@@ -168,7 +183,23 @@ func customHelpFunc(cmd *cobra.Command, args []string) {
 
 	sb.WriteString("Use " + bold + "auxly [command] --help" + reset + " for more information about a command.\r\n")
 
-	fmt.Print(sb.String())
+	return sb.String()
+}
+
+// requireInit gates read commands on an initialized vault, replacing raw file
+// errors with a friendly pointer. Shared by view/search/stats/export/organize.
+// An explicit --path override bypasses the gate: pointing at a foreign vault
+// (restored backup, shared dir) that never ran `auxly init` is a legitimate
+// read — the marker only guards the DEFAULT path's first-run confusion.
+func requireInit() error {
+	if cfgPath != "" {
+		return nil
+	}
+	memPath := getMemoryPath()
+	if !tui.IsInitialized(memPath) {
+		return fmt.Errorf("memory not initialized — run `auxly init` first (it creates %s, detects your agents, and wires their MCP configs)", memPath)
+	}
+	return nil
 }
 
 func getMemoryPath() string {

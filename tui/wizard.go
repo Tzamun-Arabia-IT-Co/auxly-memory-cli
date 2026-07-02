@@ -71,7 +71,8 @@ type wizardModel struct {
 	scanResults     []scanResult
 	totalFolders    int
 	totalFiles      int
-	setupChoice     int // 0=yes, 1=skip
+	setupChoice     int    // 0=yes, 1=skip
+	setupWarning    string // non-empty when `auxly setup` exited non-zero (config write failures)
 	width           int
 	height          int
 	onboardStatuses []agentOnboardStatus
@@ -143,6 +144,11 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case setupDoneMsg:
+		// setup now exits non-zero when any agent config write FAILED — surface
+		// it instead of silently proceeding as if every agent were wired.
+		if msg.err != nil {
+			m.setupWarning = "Some agent configs could not be written — run `auxly setup` in a terminal to see which, then fix and re-run."
+		}
 		m.onboardStatuses = []agentOnboardStatus{}
 
 		var cmds []tea.Cmd
@@ -980,6 +986,9 @@ func (m wizardModel) View() string {
 
 		descText := "Running '/auxly-init' on installed CLI agents to synchronize memory vault..."
 		b.WriteString("  " + dim.Render(descText) + "\n\n")
+		if m.setupWarning != "" {
+			b.WriteString("  " + lipgloss.NewStyle().Foreground(ColorWarning).Render("⚠ "+m.setupWarning) + "\n\n")
+		}
 
 		// Real onboarding progress: each agent starts "pending" and resolves to
 		// success/auth_needed/manual. Fill the bar by how many have resolved, so it

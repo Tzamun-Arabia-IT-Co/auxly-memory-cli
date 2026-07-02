@@ -19,8 +19,8 @@ func TestCopilotCLI_MCPConfigSchema(t *testing.T) {
 	serverDef["type"] = "local"
 	serverDef["tools"] = []interface{}{"*"}
 
-	if app := writeMCPConfigEntry(target, serverDef); app == "" {
-		t.Fatal("writeMCPConfigEntry returned empty (skip/error) for the Copilot target")
+	if app, err := writeMCPConfigEntry(target, serverDef); app == "" || err != nil {
+		t.Fatalf("writeMCPConfigEntry returned empty/skip (err=%v) for the Copilot target", err)
 	}
 
 	data, err := os.ReadFile(path)
