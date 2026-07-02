@@ -969,7 +969,7 @@ Welcome! You are now aligned with the **Auxly Unified Memory standard**. This lo
 * If you have any existing facts about the developer (e.g. name, preferences, IDEs, servers, or keys), immediately execute the 'auxly_skill_sync' tool to save them into the vault under the appropriate category!
 * Confirm to the user that you have understood these rules and are ready to sync.`
 
-	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(onboarding)}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: s.withFooter(onboarding + s.sessionPrimer())}}}
 }
 
 func (s *Server) toolSkillMemory() toolResult {
@@ -1350,7 +1350,10 @@ func (s *Server) toolSkillLearn(folder, topic string) toolResult {
 		sb.WriteString("ABSORB this memory and operate from it for the rest of the session. Internalize these facts and behave as if you already knew them — do not ask the user to repeat what is below.\n\n")
 		sb.WriteString(fmt.Sprintf("### 📄 %s\n\n", fileName))
 		sb.WriteString(content)
-		return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(sb.String())}}}
+		// A single-category learn still gets the cross-category primer so the
+		// session is grounded beyond the one file (whole-vault learn already
+		// contains everything and skips it).
+		return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(sb.String() + s.sessionPrimer())}}}
 	}
 
 	// Whole-vault internalize: read every populated file in canonical order.
