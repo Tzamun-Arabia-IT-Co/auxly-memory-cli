@@ -2,18 +2,24 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/embed"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/spf13/cobra"
 )
 
 var organizeSplitProjects bool
+var organizeContradictions bool
 
 var organizeCmd = &cobra.Command{
 	Use:   "organize",
@@ -24,6 +30,8 @@ var organizeCmd = &cobra.Command{
 func init() {
 	organizeCmd.Flags().BoolVar(&organizeSplitProjects, "split-projects", false,
 		"split the projects.md monolith into projects/<slug>.md files (queued as pending changes for review)")
+	organizeCmd.Flags().BoolVar(&organizeContradictions, "contradictions", false,
+		"find cross-file contradicting or duplicate facts via embedding similarity (queued as pending changes for review)")
 	rootCmd.AddCommand(organizeCmd)
 }
 
@@ -31,7 +39,13 @@ func runOrganize(cmd *cobra.Command, args []string) error {
 	if err := requireInit(); err != nil {
 		return err
 	}
+	if organizeSplitProjects && organizeContradictions {
+		return fmt.Errorf("--split-projects and --contradictions: one mode at a time")
+	}
 	store := memory.NewStore(getMemoryPath())
+	if organizeContradictions {
+		return runContradictions(store)
+	}
 	if organizeSplitProjects {
 		return runSplitProjects(store)
 	}
@@ -147,5 +161,96 @@ func backupProjectsMonolith(store *memory.Store, memPath string) error {
 		return fmt.Errorf("backup projects.md first: %w", err)
 	}
 	fmt.Printf("   ✓ Backed up projects.md → %s\n", backup)
+	return nil
+}
+
+// runContradictions finds cross-file fact pairs the embedding index scores as
+// similar, has the model judge each as a contradiction, duplicate, or merely
+// similar (distinct — dropped with no action), then queues the LOSING side of
+// every remaining finding as a pending change. Nothing is written directly —
+// same review-first shape as runSplitProjects.
+func runContradictions(store *memory.Store) error {
+	emb := embed.New()
+
+	fmt.Println("🧠 Scanning for cross-file contradictions and duplicates (embedding similarity)...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	findings, err := store.PlanContradictionsWithAgent(ctx, emb, "Direct LLM", "", "")
+	if err != nil {
+		if errors.Is(err, embed.ErrUnavailable) {
+			fmt.Println("⚠️  Contradiction check needs embeddings — configure a provider (auxly index status).")
+			return nil
+		}
+		if errors.Is(err, memory.ErrVaultTooLarge) {
+			fmt.Println(err.Error())
+			return nil
+		}
+		return err
+	}
+	if len(findings) == 0 {
+		fmt.Println("✅ No cross-file contradictions or duplicates above the similarity floor.")
+		return nil
+	}
+
+	mgr := pending.NewManager(getMemoryPath())
+	today := time.Now().Format("2006-01-02")
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "VERDICT\tLOSER\tREASON\tPENDING\n")
+	// Two findings can resolve to the same losing line (e.g. it's the loser
+	// in more than one similar pair) — queue it once. A second pending for
+	// the same target line is redundant and, once the first is approved,
+	// fails as a conflict needing --force.
+	seen := make(map[string]bool)
+	for _, f := range findings {
+		winner, loser := f.Pair.A, f.Pair.B
+		if f.Keep == "b" {
+			winner, loser = f.Pair.B, f.Pair.A
+		}
+
+		key := loser.File + "\x00" + strconv.Itoa(loser.LineNo)
+		if seen[key] {
+			fmt.Printf("   (skipped duplicate finding for %s:%d)\n", loser.File, loser.LineNo)
+			continue
+		}
+		seen[key] = true
+
+		// Persist the model's verdict + reason as a leading comment line in
+		// the queued diff. ApplyDiff only acts on "+"/"-" lines (everything
+		// else is inert), so this never touches the target file — but
+		// ViewDiff returns the raw pending body, so `auxly pending` /
+		// `auxly approve <name>` shows WHY before a human (or a bulk
+		// `--agent organize-contradictions` run) applies it. Strip embedded
+		// newlines from the reason so model output can't smuggle in an extra
+		// "-"-prefixed line that ApplyDiff would treat as a real deletion.
+		reason := strings.ReplaceAll(f.Reason, "\n", " ")
+		comment := fmt.Sprintf("# organize-contradictions: %s — %s (vs %s)\n", f.Verdict, reason, winner.File)
+
+		var diff string
+		switch f.Verdict {
+		case "duplicate":
+			// The surviving copy already exists elsewhere — pure removal.
+			diff = comment + "-" + loser.Line + "\n"
+		case "contradict":
+			// RULE 0: a contradicted fact is never silently erased. Replace
+			// (not delete) so the loser's file keeps a trace pointing at
+			// whichever fact won — a human re-reading loser.File later can
+			// still find where the truth moved instead of hitting a gap.
+			diff = comment + "-" + loser.Line + "\n" +
+				"+" + loser.Line + " (superseded " + today + "; see " + winner.File + ")\n"
+		default:
+			continue
+		}
+
+		name, werr := mgr.WriteFrom(loser.File, diff, "organize-contradictions")
+		if werr != nil {
+			return fmt.Errorf("queue %s for %s: %w", f.Verdict, loser.File, werr)
+		}
+		fmt.Fprintf(w, "%s\t%s:%d\t%s\t%s\n", f.Verdict, loser.File, loser.LineNo, f.Reason, name)
+	}
+	w.Flush()
+
+	fmt.Println("\n   Review each: `auxly pending` then `auxly approve <name>` (shows the diff).")
+	fmt.Println("   Bulk `auxly approve --agent organize-contradictions` applies WITHOUT preview — only after reviewing.")
 	return nil
 }

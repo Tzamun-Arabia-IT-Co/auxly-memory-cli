@@ -48,6 +48,7 @@ Looking for **1.1.x** (organize agent fixes, Kimi skills, the Windows end-to-end
 - [Uninstall](#uninstall)
 - [Quick start](#quick-start)
 - [The memory vault](#the-memory-vault)
+- [Memory insights & review (1.3)](#memory-insights--review-13)
 - [Trust & access control](#trust--access-control)
 - [Skills (slash commands)](#skills-slash-commands)
 - [Supported agents](#supported-agents)
@@ -312,6 +313,46 @@ Your memory lives in `~/.auxly/memory/` as human-readable Markdown, organized by
 ```
 
 Edit any of these by hand at any time — Auxly treats the files as the source of truth.
+
+---
+
+## Memory insights & review (1.3)
+
+v1.3 makes memory visible and self-maintaining — the vault tracks which facts agents actually use (hashes only, never query text), ages out stale facts through a human-approved review queue, and flags cross-file contradictions.
+
+### `auxly stats --recall`
+
+```bash
+auxly stats --recall
+```
+
+- **Per-file hit tables** — recall counts over the last 7/30/90 days, broken down file by file.
+- **Dead files** — files with zero recall hits, the first candidates for pruning.
+- **Hot facts** — the individual facts pulled into context most often.
+- **Fallback rate** — how often recall falls back to keyword search instead of embeddings, a quick read on embeddings health.
+
+Only fact **hashes** are stored in `audit.db` — never the query text — so a recalled secret can never leak into analytics.
+
+### `auxly review`
+
+`auxly review` surfaces facts that are both old and unrecalled — untouched for 90 days by default, tunable with `AUXLY_REVIEW_AGE_DAYS`.
+
+```bash
+auxly review                # walk the queue interactively, fact by fact
+auxly review --keep-all     # re-stamp every flagged fact and move on
+auxly review --archive-all  # archive every flagged fact
+```
+
+- **Keep** re-stamps the fact's date, so it won't come up for review again until it's stale once more.
+- **Archive** moves the fact into `.archive/` — never deleted, still plain text, still greppable.
+- `personal.md` is excluded by default; pass `--include-personal` to include it too.
+- Same queue lives in the dashboard's **Review** tab (`-`) — `K` keeps, `a` archives.
+
+### `auxly organize --contradictions`
+
+`auxly organize --contradictions` embeds your facts and pairs up suspiciously-similar ones across files, then has an LLM judge each pair as a contradiction or a plain duplicate. Resolutions land in the normal pending queue tagged with the model's reason — **review them first with `auxly pending`, then `auxly approve <name>` to see each diff**. Bulk `auxly approve --agent organize-contradictions` applies every queued resolution **without a preview**, so only run it after you've reviewed. The pass needs an embeddings provider configured to run.
+
+Everything above is read-only until a human approves it — analytics never mutate the vault.
 
 ---
 
