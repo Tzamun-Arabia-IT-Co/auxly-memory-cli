@@ -36,6 +36,19 @@ builds:
       - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage.geminiClientSecret={{ envOrDefault "GEMINI_CLIENT_SECRET" "" }}
       - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage.antigravityClientID={{ envOrDefault "ANTIGRAVITY_CLIENT_ID" "" }}
       - -X github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage.antigravityClientSecret={{ envOrDefault "ANTIGRAVITY_CLIENT_SECRET" "" }}
+    # Authenticode-sign the Windows exes via SignPath Foundation (free for OSS).
+    # A post-BUILD hook (not binary_signs): the script replaces the exe in place
+    # and produces NO detached signature, and binary_signs would register a
+    # phantom signature artifact that the release upload then fails on (the
+    # v1.2.0 first-attempt failure). Runs before archiving/checksumming, so the
+    # zip, raw binary, and checksum manifest all carry the signed bytes.
+    # DORMANT until the SignPath application is approved: with no
+    # SIGNPATH_API_TOKEN in CI the script exits 0 without touching the binary.
+    # Publisher will show "SignPath Foundation" — expected for their OSS
+    # program. See RELEASING.md for the application + setup runbook.
+    hooks:
+      post:
+        - sh scripts/signpath-sign.sh {{ .Path }}
 
 archives:
   # 1) tar.gz / zip archives — consumed by Homebrew, the deb/rpm packages, and
@@ -61,24 +74,6 @@ archives:
       - auxly
     formats: [binary]
     name_template: "auxly-{{ .Os }}-{{ .Arch }}"
-
-# Authenticode-sign the Windows executables via SignPath Foundation (free for
-# OSS). DORMANT until the SignPath application is approved: with no
-# SIGNPATH_API_TOKEN in the CI environment the script exits 0 without touching
-# the binary, so releases keep working exactly as today. When the secrets are
-# set, each windows .exe is submitted to SignPath and replaced in place with
-# the signed artifact BEFORE archiving/checksumming, so the zip, the raw
-# binary, and the checksum manifest all carry the signed bytes.
-# Publisher will show "SignPath Foundation" — that is expected for their OSS
-# program. See RELEASING.md for the application + setup runbook.
-binary_signs:
-  - id: signpath-authenticode
-    cmd: sh
-    args:
-      - "-c"
-      - 'scripts/signpath-sign.sh "${artifact}"'
-    # The script signs in place; no detached signature artifact is produced.
-    signature: ""
 
 checksum:
   # Versioned so a verifying client fetches the manifest for the EXACT release it
