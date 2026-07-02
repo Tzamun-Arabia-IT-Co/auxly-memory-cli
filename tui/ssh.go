@@ -509,12 +509,30 @@ func (m sshModel) beginPTY(title, password, sub string, args ...string) (sshMode
 	return m.beginRun(title, ch)
 }
 
+// stepPct maps the CLI's machine-readable AUXLY_STEP:<step>:<state> contract to
+// bar positions — the stable signal. The fuzzy human-line matching below stays
+// as fallback for older binaries and host-side actions.
+var stepPct = map[string]int{
+	"connect:ok":     30,
+	"install:start":  40,
+	"install:ok":     55,
+	"return-path:ok": 62,
+	"key-auth:ok":    70,
+	"wire:start":     75,
+	"wire:ok":        85,
+	"selftest:start": 90,
+	"selftest:ok":    97,
+}
+
 // milestonePct maps a streamed line to a coarse completion percentage so the bar
 // advances through the recognisable stages of whichever flow is running — the
 // connect/setup doctor AND the host-side box actions (update / reconnect / forget /
 // provision). The caller only ever raises the bar, so order matters solely when one
 // line could match two cases; the later-stage markers are listed first.
 func milestonePct(line string) int {
+	if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "AUXLY_STEP:"); ok {
+		return stepPct[strings.TrimSpace(rest)] // unknown/fail states: 0 (never snaps)
+	}
 	l := strings.ToLower(line)
 	switch {
 	case strings.Contains(l, "configured") || strings.Contains(l, "injected") || strings.Contains(l, "restart your") || strings.Contains(l, "onboard"):
@@ -692,10 +710,13 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 			return m, nil
 		}
 		if line := strings.TrimRight(msg.line, "\r"); strings.TrimSpace(line) != "" {
-			m.progressLast = line
-			m.progressOut = append(m.progressOut, line)
 			if p := milestonePct(line); p > m.progressPct {
 				m.progressPct = p
+			}
+			// Machine step lines drive the bar but are noise in the log pane.
+			if !strings.HasPrefix(strings.TrimSpace(line), "AUXLY_STEP:") {
+				m.progressLast = line
+				m.progressOut = append(m.progressOut, line)
 			}
 		}
 		if m.progressCh != nil {

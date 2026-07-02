@@ -428,7 +428,30 @@ func parseHostSpec(spec string) (user, host string, port int, err error) {
 		user = spec[:at]
 		spec = spec[at+1:]
 	}
-	if colon := strings.LastIndex(spec, ":"); colon >= 0 {
+	switch {
+	case strings.HasPrefix(spec, "["):
+		// Bracketed IPv6: [2001:db8::1] or [2001:db8::1]:2222.
+		end := strings.Index(spec, "]")
+		if end < 0 {
+			return "", "", 0, fmt.Errorf("invalid IPv6 host %q: missing closing ']'", spec)
+		}
+		host = spec[1:end]
+		if rest := spec[end+1:]; rest != "" {
+			if !strings.HasPrefix(rest, ":") {
+				return "", "", 0, fmt.Errorf("invalid host %q: expected ':port' after ']'", spec)
+			}
+			p, perr := strconv.Atoi(rest[1:])
+			if perr != nil {
+				return "", "", 0, fmt.Errorf("invalid port %q: %w", rest[1:], perr)
+			}
+			port = p
+		}
+	case strings.Count(spec, ":") > 1:
+		// Bare IPv6 is ambiguous — is the last group a port or part of the
+		// address? Require brackets instead of guessing wrong silently.
+		return "", "", 0, fmt.Errorf("ambiguous IPv6 host %q: use brackets — [%s] or [addr]:port", spec, spec)
+	case strings.Contains(spec, ":"):
+		colon := strings.LastIndex(spec, ":")
 		host = spec[:colon]
 		portStr := spec[colon+1:]
 		p, perr := strconv.Atoi(portStr)
@@ -436,7 +459,7 @@ func parseHostSpec(spec string) (user, host string, port int, err error) {
 			return "", "", 0, fmt.Errorf("invalid port %q: %w", portStr, perr)
 		}
 		port = p
-	} else {
+	default:
 		host = spec
 	}
 	if host == "" {
@@ -579,6 +602,7 @@ func runDoctor(p remoteProfile) error {
 	switch fam {
 	case osWindows:
 		fmt.Printf("   ✓ Host reachable (Windows: %s)\n", detail)
+		stepLine("connect", "ok")
 		persistDetectedOS(p, "windows")
 		if out, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
 			fmt.Println("   ✓ auxly present on host (Windows)")
@@ -613,6 +637,7 @@ func runDoctor(p remoteProfile) error {
 
 	case osUnix:
 		fmt.Printf("   ✓ Host reachable (uname: %s)\n", detail)
+		stepLine("connect", "ok")
 		if strings.Contains(strings.ToLower(detail), "darwin") {
 			persistDetectedOS(p, "darwin")
 		} else {
@@ -624,6 +649,12 @@ func runDoctor(p remoteProfile) error {
 			return nil
 		}
 		fmt.Println("   ⬇ auxly not found on host — installing silently...")
+		stepLine("install", "start")
+		// Preflight curl: `curl | sh` conflates "curl missing" with every real
+		// install failure. Name the actual problem.
+		if _, cerr := runSSH(p, "command", "-v", "curl"); cerr != nil {
+			return fmt.Errorf("curl is missing on %s — install it there first (e.g. `sudo apt install curl`), then retry", p.Host)
+		}
 		if _, instErr := runRemoteScript(p, osUnix, "curl -fsSL "+remoteInstallURL+" | sh", ""); instErr != nil {
 			return fmt.Errorf("failed to install auxly on host %s: %w", p.Host, instErr)
 		}
@@ -632,6 +663,7 @@ func runDoctor(p remoteProfile) error {
 			return fmt.Errorf("auxly still missing on host %s after install attempt: %w", p.Host, verErr)
 		}
 		fmt.Println("   ✓ auxly installed on host")
+		stepLine("install", "ok")
 		recordProvision(p)
 		// A fresh silent install already lands the latest binary, so the version check
 		// is a no-op here — but still wire the remote statusline when opted in.
@@ -642,6 +674,12 @@ func runDoctor(p remoteProfile) error {
 		printConnectionFailureGuidance(p, fmt.Errorf("unrecognized remote OS"))
 		return fmt.Errorf("could not determine OS of host %s over SSH", p.Host)
 	}
+}
+
+// stepLine emits the machine-readable progress contract consumed by the TUI:
+// AUXLY_STEP:<step>:<state>. Human lines around it stay; this one is stable.
+func stepLine(step, state string) {
+	fmt.Printf("AUXLY_STEP:%s:%s\n", step, state)
 }
 
 // checkTwoWay verifies the box can reach THIS machine back over SSH — that is
@@ -658,9 +696,11 @@ func checkTwoWay(p remoteProfile) (string, error) {
 	}
 	if reachAddr, ok := hostCanReachBack(p, addrs); ok {
 		fmt.Printf("   ✓ Return path OK — %s can reach this machine at %s:22\n", p.Host, reachAddr)
+		stepLine("return-path", "ok")
 		return reachAddr, nil
 	}
 	printTwoWayFailureGuidance(p, addrs)
+	stepLine("return-path", "fail")
 	// Machine-readable token so the TUI can offer the relay ([h]) / method-retry ([m]).
 	fmt.Println("AUXLY_TWOWAY_FAILED:" + p.Name)
 	return "", fmt.Errorf("no return path on '%s' — enable Remote Login/sshd on THIS machine, or set up the relay with `auxly host setup`", p.Method)
@@ -710,11 +750,22 @@ func hostCanReachBack(p remoteProfile, addrs []string) (string, bool) {
 }
 
 func printTwoWayFailureGuidance(p remoteProfile, addrs []string) {
-	fmt.Printf("   ✗ %s can't reach this machine back over '%s' (NAT) — no direct return path.\n", p.Host, p.Method)
-	fmt.Println("     This machine is your memory HOST. The fix is a relay tunnel, not another method:")
-	fmt.Println("     → Run `auxly host setup` on THIS machine — it dials out to a public relay you")
-	fmt.Println("       control, then prints the `auxly connect use --jump …` command for the host.")
-	fmt.Println("     (Another method only helps if it gives a real return path, e.g. same-LAN/Tailscale.)")
+	fmt.Printf("   ✗ %s can't reach this machine back over '%s' — the memory link needs a return path.\n", p.Host, p.Method)
+	fmt.Println("     Fixes, in order:")
+	fmt.Println("     1. Enable the SSH server on THIS machine (the box dials back in to read memory):")
+	switch runtime.GOOS {
+	case "darwin":
+		fmt.Println("        macOS: System Settings → General → Sharing → Remote Login (turn ON)")
+	case "linux":
+		fmt.Println("        Linux: sudo systemctl enable --now ssh")
+	case "windows":
+		fmt.Println("        Windows: Settings → Apps → Optional Features → add 'OpenSSH Server'")
+	}
+	if len(addrs) > 0 {
+		fmt.Printf("        …then re-run; the box will be probed against %s\n", strings.Join(addrs, ", "))
+	}
+	fmt.Println("     2. If a firewall/NAT still blocks it: run `auxly host setup` on THIS machine —")
+	fmt.Println("        it dials OUT to a relay you control, and the box connects through that.")
 }
 
 // recordProvision logs the silent host install to the audit trail (best effort).
@@ -1908,6 +1959,7 @@ func provisionRemote(p remoteProfile, backAddr string) error {
 		fmt.Printf("   ⚠ could not authorize the box's key on this machine: %v\n", kerr)
 	} else {
 		fmt.Println("   ✓ Authorized the box's SSH key on this machine")
+		stepLine("key-auth", "ok")
 	}
 
 	hostBin := "auxly"
@@ -1933,19 +1985,25 @@ func provisionRemote(p remoteProfile, backAddr string) error {
 	if p.MemPath != "" {
 		wireArgs = append(wireArgs, "--mem-path", p.MemPath)
 	}
+	stepLine("wire", "start")
 	if out, werr := runSSH(withoutMux(p), wireArgs...); werr != nil {
+		stepLine("wire", "fail")
 		fmt.Printf("   ⚠ box wiring failed: %v\n   %s\n", werr, firstLine(out))
 		return fmt.Errorf("memory-link wiring failed on %s (connection saved — retry from `auxly host clients`): %w", p.Name, werr)
 	}
+	stepLine("wire", "ok")
 	fmt.Println("   ✓ Box agents wired — they now read this machine's memory")
 
 	// Success is PROVEN by a real read, never claimed from config writes: run
 	// the end-to-end selftest on the box (it execs the exact launcher the
 	// agents will use and calls auxly_memory_list through it).
 	fmt.Println("🔎 Verifying the box can actually read this memory...")
+	stepLine("selftest", "start")
 	if out, serr := runSSH(withoutMux(p), "auxly", "connect-mcp", offerName(), "--selftest"); serr == nil {
+		stepLine("selftest", "ok")
 		fmt.Printf("   ✅ box read this machine's memory: %s\n", firstLine(out))
 	} else {
+		stepLine("selftest", "fail")
 		fmt.Printf("   ⚠ link selftest failed: %s — fix and re-run from `auxly host clients`\n", firstLine(out))
 		return fmt.Errorf("memory link wired but the proving read failed on %s: %s", p.Name, firstLine(out))
 	}
@@ -2236,10 +2294,13 @@ func installPubKey(p remoteProfile, pubPath string) error {
 		copyCmd.Stdin = os.Stdin
 		copyCmd.Stdout = os.Stdout
 		copyCmd.Stderr = os.Stderr
-		if err := copyCmd.Run(); err != nil {
-			return fmt.Errorf("ssh-copy-id failed: %w", err)
+		if err := copyCmd.Run(); err == nil {
+			return nil
 		}
-		return nil
+		// ssh-copy-id is flaky through ProxyJump (and on odd remote shells) —
+		// fall through to the manual authorized_keys append, same as when the
+		// tool is absent, instead of dead-ending the whole connect.
+		fmt.Println("   ⚠ ssh-copy-id failed — falling back to a manual key append")
 	}
 
 	// Manual fallback: append pubkey over one interactive (password) SSH.
