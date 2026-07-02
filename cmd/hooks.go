@@ -15,11 +15,56 @@ var hooksCmd = &cobra.Command{
 	Short: "Install/remove agent hooks that auto-capture session facts (opt-in)",
 }
 
+// hooksAgent backs --agent on both install and uninstall. A single package
+// var is safe here since a CLI process runs exactly one subcommand.
+var hooksAgent string
+
+// supportedHookAgents lists every agent wireable via `--agent`; keep in sync
+// with the router below and `hooks status`'s row list.
+var supportedHookAgents = []string{"claude", "codex", "gemini", "kimi"}
+
 var hooksInstallCmd = &cobra.Command{
 	Use:          "install",
-	Short:        "Add a Claude Code Stop hook that runs `auxly capture` after each session",
+	Short:        "Wire an agent's session-end hook to run `auxly capture` (default: Claude Code)",
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		return installHookForAgent(hooksAgent)
+	},
+}
+
+var hooksUninstallCmd = &cobra.Command{
+	Use:          "uninstall",
+	Short:        "Remove the auxly capture hook for an agent",
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return uninstallHookForAgent(hooksAgent)
+	},
+}
+
+var hooksStatusCmd = &cobra.Command{
+	Use:          "status",
+	Short:        "Show which agents have auxly capture wired",
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runHooksStatus()
+	},
+}
+
+func init() {
+	hooksInstallCmd.Flags().StringVar(&hooksAgent, "agent", "claude", "agent to wire: claude, codex, gemini, kimi")
+	hooksUninstallCmd.Flags().StringVar(&hooksAgent, "agent", "claude", "agent to unwire: claude, codex, gemini, kimi")
+	hooksCmd.AddCommand(hooksInstallCmd)
+	hooksCmd.AddCommand(hooksUninstallCmd)
+	hooksCmd.AddCommand(hooksStatusCmd)
+	rootCmd.AddCommand(hooksCmd)
+}
+
+// installHookForAgent routes to the agent-specific installer. Claude and the
+// shell-wrapper agents print their own outcome here; codex's installer
+// already prints its own (see hooks_codex.go), so it isn't repeated.
+func installHookForAgent(agent string) error {
+	switch agent {
+	case "claude":
 		path, err := claudeSettingsPath()
 		if err != nil {
 			return err
@@ -35,14 +80,33 @@ var hooksInstallCmd = &cobra.Command{
 			fmt.Println("✓ Stop hook already installed — nothing to do.")
 		}
 		return nil
-	},
+	case "codex":
+		return installCodexHook()
+	case "gemini", "kimi":
+		already, err := shellWrapperInstalled(agent)
+		if err != nil {
+			return err
+		}
+		if err := installShellWrapper(agent); err != nil {
+			return err
+		}
+		path, _ := shellRCPath()
+		if already {
+			fmt.Printf("✓ %s capture wrapper already installed in %s — nothing to do.\n", agent, path)
+		} else {
+			fmt.Printf("✅ %s capture wrapper added to %s — restart your shell (or `source %s`).\n", agent, path, path)
+			fmt.Println("   Honest caveat: this captures raw terminal output via `script`, not a structured transcript.")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported --agent %q — supported: %s", agent, strings.Join(supportedHookAgents, ", "))
+	}
 }
 
-var hooksUninstallCmd = &cobra.Command{
-	Use:          "uninstall",
-	Short:        "Remove the auxly capture Stop hook from Claude Code settings",
-	SilenceUsage: true,
-	RunE: func(cmd *cobra.Command, args []string) error {
+// uninstallHookForAgent is installHookForAgent's mirror image.
+func uninstallHookForAgent(agent string) error {
+	switch agent {
+	case "claude":
 		path, err := claudeSettingsPath()
 		if err != nil {
 			return err
@@ -57,13 +121,68 @@ var hooksUninstallCmd = &cobra.Command{
 			fmt.Println("✓ No auxly capture hook found — nothing to remove.")
 		}
 		return nil
-	},
+	case "codex":
+		return uninstallCodexHook()
+	case "gemini", "kimi":
+		removed, err := uninstallShellWrapper(agent)
+		if err != nil {
+			return err
+		}
+		if removed {
+			fmt.Printf("🗑️  %s capture wrapper removed.\n", agent)
+		} else {
+			fmt.Printf("✓ No %s capture wrapper found — nothing to remove.\n", agent)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported --agent %q — supported: %s", agent, strings.Join(supportedHookAgents, ", "))
+	}
 }
 
-func init() {
-	hooksCmd.AddCommand(hooksInstallCmd)
-	hooksCmd.AddCommand(hooksUninstallCmd)
-	rootCmd.AddCommand(hooksCmd)
+// runHooksStatus prints one row per supported agent: WIRED (hook/wrapper
+// present), manual (needs attention — detail says why), or not-installed.
+func runHooksStatus() error {
+	fmt.Println("🔌 Capture hook status")
+	fmt.Printf("   %-8s %-14s %s\n", "AGENT", "STATUS", "DETAIL")
+
+	// claude: settings.json Stop hook presence.
+	claudeStatus, claudeDetail := "not-installed", "run `auxly hooks install`"
+	if path, err := claudeSettingsPath(); err == nil {
+		if installed, ierr := captureHookInstalled(path); ierr != nil {
+			claudeStatus, claudeDetail = "manual", ierr.Error()
+		} else if installed {
+			claudeStatus, claudeDetail = "WIRED", path
+		}
+	}
+	fmt.Printf("   %-8s %-14s %s\n", "claude", claudeStatus, claudeDetail)
+
+	// codex: the parallel notify-hook check, reused as-is. codexHookStatus
+	// returns a typed state, so "manual" (a foreign notify program `hooks
+	// install --agent codex` refuses to overwrite) is a direct comparison —
+	// no string-matching the human-readable detail.
+	state, detail := codexHookStatus()
+	codexStatus := "not-installed"
+	switch state {
+	case codexHookWired:
+		codexStatus = "WIRED"
+	case codexHookForeign:
+		codexStatus = "manual"
+	}
+	fmt.Printf("   %-8s %-14s %s\n", "codex", codexStatus, detail)
+
+	// gemini/kimi: shell-wrapper marked block presence in the rc file.
+	for _, agent := range shellWrapperAgents {
+		status, detail := "not-installed", fmt.Sprintf("run `auxly hooks install --agent %s`", agent)
+		installed, err := shellWrapperInstalled(agent)
+		if err != nil {
+			status, detail = "manual", err.Error()
+		} else if installed {
+			path, _ := shellRCPath()
+			status, detail = "WIRED", path
+		}
+		fmt.Printf("   %-8s %-14s %s\n", agent, status, detail)
+	}
+	return nil
 }
 
 func claudeSettingsPath() (string, error) {
@@ -78,6 +197,37 @@ func claudeSettingsPath() (string, error) {
 // own entry — never touch anything else in the user's settings.
 const captureHookCommand = "auxly capture --stop-hook"
 
+// settingsHasCaptureStopHook reports whether an already-parsed settings.json
+// carries our Stop hook entry — the read-only half of install's idempotency
+// check, factored out so `hooks status` can reuse it.
+func settingsHasCaptureStopHook(settings map[string]any) bool {
+	hooks, _ := settings["hooks"].(map[string]any)
+	stop, _ := hooks["Stop"].([]any)
+	for _, entry := range stop {
+		if entryHasCaptureCommand(entry) {
+			return true
+		}
+	}
+	return false
+}
+
+// captureHookInstalled reads path and reports whether the Stop hook is
+// already wired. A missing settings file means "not installed", not an error.
+func captureHookInstalled(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	settings := map[string]any{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false, fmt.Errorf("%s is not valid JSON: %w", path, err)
+	}
+	return settingsHasCaptureStopHook(settings), nil
+}
+
 // installCaptureHook merges a Stop hook into settings.json (read-merge-write,
 // never clobber). Returns false when the hook is already present (idempotent).
 func installCaptureHook(path string) (bool, error) {
@@ -87,18 +237,15 @@ func installCaptureHook(path string) (bool, error) {
 			return false, fmt.Errorf("%s is not valid JSON — fix it first, refusing to clobber: %w", path, jerr)
 		}
 	}
+	if settingsHasCaptureStopHook(settings) {
+		return false, nil
+	}
 
 	hooks, _ := settings["hooks"].(map[string]any)
 	if hooks == nil {
 		hooks = map[string]any{}
 	}
 	stop, _ := hooks["Stop"].([]any)
-	for _, entry := range stop {
-		if entryHasCaptureCommand(entry) {
-			return false, nil
-		}
-	}
-
 	stop = append(stop, map[string]any{
 		"hooks": []any{map[string]any{
 			"type":    "command",

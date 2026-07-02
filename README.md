@@ -679,14 +679,21 @@ auxly hooks uninstall   # removes exactly that hook, touching nothing else
 Throttled by design: sessions under ~2K tokens are skipped, at most one
 capture per 10 minutes, at most 10 facts per run.
 
-Other agents (fast-follow — wire them manually today by piping a transcript):
+Every agent, one command:
 
-| Agent | Hook point | Status |
-|-------|-----------|--------|
-| Claude Code | `Stop` hook (`auxly hooks install`) | ✅ built-in |
-| Codex CLI | `notify` program in `~/.codex/config.toml` → `auxly capture --transcript <file>` | manual |
-| Gemini CLI | no session-end hook yet — pipe a saved chat: `gemini ... \| auxly capture` | manual |
-| Kimi CLI | shell wrapper around the session, then `auxly capture --transcript` | manual |
+| Agent | Install |
+|-------|---------|
+| Claude Code | `auxly hooks install` |
+| Codex CLI | `auxly hooks install --agent codex` |
+| Gemini CLI | `auxly hooks install --agent gemini` |
+| Kimi CLI | `auxly hooks install --agent kimi` |
+
+`auxly hooks status` shows what's actually wired right now, agent by agent.
+Honest caveat: Gemini and Kimi have no session-end hook, so their wrappers
+capture raw terminal output via `script`, not a structured transcript — still
+enough signal to extract durable facts from. Codex capture reads conversation
+messages only — function calls, tool output, and reasoning traces are
+filtered out before anything reaches the extraction LLM.
 
 ---
 
@@ -760,7 +767,7 @@ Auxly is a standard **stdio MCP server**, so *any* MCP-capable tool can share th
 | `auxly approve \| reject <id>` | Apply or discard a pending change (`--all`, `--agent <name>`, `--file <target>` for bulk) |
 | `auxly organize` | LLM consolidation of the vault (`--split-projects` migrates projects.md into per-project files) |
 | `auxly capture` | Extract durable facts from a session transcript into the pending queue |
-| `auxly hooks install \| uninstall` | Wire/unwire auto-capture into Claude Code |
+| `auxly hooks install \| uninstall \| status` | Wire/unwire auto-capture (`--agent claude\|codex\|gemini\|kimi`); status shows what's wired |
 | `auxly doctor` | One-screen health check (vault, agents, remote links, host topology) |
 | `auxly trust list \| set <provider> <level>` | Manage access control |
 | `auxly tail` | Stream the audit log |

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,9 +18,10 @@ import (
 )
 
 var (
-	captureTranscript string
-	captureStopHook   bool
-	captureProvider   string
+	captureTranscript      string
+	captureStopHook        bool
+	captureProvider        string
+	captureCodexNotifyFlag bool
 )
 
 var captureCmd = &cobra.Command{
@@ -38,6 +40,7 @@ func init() {
 	captureCmd.Flags().StringVar(&captureTranscript, "transcript", "", "path to a Claude Code transcript (.jsonl)")
 	captureCmd.Flags().BoolVar(&captureStopHook, "stop-hook", false, "read the Claude Code Stop-hook JSON from stdin (extracts transcript_path itself)")
 	captureCmd.Flags().StringVar(&captureProvider, "provider", "claude-code", "provider attribution for the queued facts")
+	captureCmd.Flags().BoolVar(&captureCodexNotifyFlag, "codex-notify", false, "read a Codex notify-hook JSON payload (arg or stdin) and capture the session (wired by `hooks install --agent codex`)")
 	rootCmd.AddCommand(captureCmd)
 }
 
@@ -47,12 +50,33 @@ const captureMinChars = 8_000
 // captureCooldown throttles back-to-back hook fires (agents can stop often).
 const captureCooldown = 10 * time.Minute
 
+// captureMarkerPath is the throttle marker's path for a given vault — shared
+// so every capture entry point (Stop-hook, codex notify, shell wrapper) reads
+// and writes the exact same file.
+func captureMarkerPath(memPath string) string {
+	return filepath.Join(memPath, ".capture-last")
+}
+
+// inCaptureCooldown reports whether memPath's throttle marker is still fresh.
+// Every capture entry point checks this FIRST, before doing any real work —
+// walking a session tree, reading a transcript, calling an LLM.
+func inCaptureCooldown(memPath string) bool {
+	st, err := os.Stat(captureMarkerPath(memPath))
+	return err == nil && time.Since(st.ModTime()) < captureCooldown
+}
+
 func runCapture(cmd *cobra.Command, args []string) error {
+	// codex's notify hook has its own full pipeline (cooldown, transcript
+	// resolution, extraction) — route to it before any other mode, and
+	// before touching memPath/the marker below (runCodexNotify does its own).
+	if captureCodexNotifyFlag {
+		return captureCodexNotify()
+	}
+
 	memPath := getMemoryPath()
 
 	// Throttle FIRST — the marker costs nothing, the LLM call doesn't.
-	marker := filepath.Join(memPath, ".capture-last")
-	if st, err := os.Stat(marker); err == nil && time.Since(st.ModTime()) < captureCooldown {
+	if inCaptureCooldown(memPath) {
 		return nil // silent: hook-driven, cooldown active
 	}
 
@@ -63,7 +87,7 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	if len(transcript) < captureMinChars {
 		return nil // too small to teach anything durable — silent no-op
 	}
-	_ = os.WriteFile(marker, []byte(time.Now().Format(time.RFC3339)), 0600)
+	_ = os.WriteFile(captureMarkerPath(memPath), []byte(time.Now().Format(time.RFC3339)), 0600)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -135,7 +159,10 @@ func captureInput() (string, error) {
 
 // readTranscriptJSONL extracts human-relevant text (user + assistant turns)
 // from a Claude Code transcript, skipping tool dumps — those are code and
-// command noise, not knowledge about the user.
+// command noise, not knowledge about the user. Falls back to the raw file
+// content when no line parses as JSON at all — a `script`-captured shell
+// session (gemini/kimi wrapper) is plain text, not JSONL, and the whole file
+// IS the session text in that case.
 func readTranscriptJSONL(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -177,5 +204,20 @@ func readTranscriptJSONL(path string) (string, error) {
 			}
 		}
 	}
+	// ponytail: nothing extracted (whether the file had zero valid JSON
+	// lines, or was valid JSON that just never matched a user/assistant
+	// turn — e.g. one incidental `{}` in a script(1)-captured plain-text
+	// session) means there's no structured transcript to trust — fall back
+	// to the raw file content. A lone JSON log line must not veto an
+	// otherwise plain-text transcript; captureMinChars still gates junk.
+	if b.Len() == 0 {
+		return ansiEscapeRE.ReplaceAllString(string(data), ""), nil
+	}
 	return b.String(), nil
 }
+
+// ansiEscapeRE strips terminal color/cursor-control sequences — CSI
+// (`\x1b[...<letter>`) and OSC (`\x1b]...<BEL>`) — that a `script`-captured
+// raw transcript carries. Only applied to the raw fallback above: noise for
+// an LLM doing fact extraction, not signal.
+var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07`)
