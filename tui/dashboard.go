@@ -1938,11 +1938,12 @@ var brandMeta = map[string]agentCard{
 	"android-studio": {"android-studio", "Android Studio", "🤖", "34"},
 	"kimi":           {"kimi", "Kimi", "🌙", "34"},
 	"trae":           {"trae", "Trae", "🔷", "39"},
+	"windsurf":       {"windsurf", "Windsurf (Devin)", "🌊", "45"},
 }
 
 // brandOrder is the canonical card order; detected brands not listed fall to the
 // end (in detection order) so newly-added providers never need a code change here.
-var brandOrder = []string{"claude", "claude-code", "antigravity", "cursor", "codex", "gemini", "copilot", "perplexity", "warp", "void", "android-studio", "kimi", "trae"}
+var brandOrder = []string{"claude", "claude-code", "antigravity", "cursor", "codex", "gemini", "copilot", "perplexity", "warp", "void", "android-studio", "kimi", "trae", "windsurf"}
 
 // agentCardOrder returns one card per brand that is either DETECTED on this
 // machine (config/binary present) OR has audit activity (it connected and wrote,
