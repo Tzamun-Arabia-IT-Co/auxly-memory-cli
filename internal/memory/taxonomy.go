@@ -74,7 +74,7 @@ var Taxonomy = []Category{
 		Slug:        "projects",
 		File:        "projects.md",
 		Tier:        TierShared,
-		Description: "repos, active work, workspaces, project status",
+		Description: "repos, active work, workspaces, project status — directory-backed: facts written from a workspace land in that project's own projects/<slug>.md; projects.md keeps cross-project notes",
 		Keywords:    []string{"repo", "git", "project", "workspace", "folder", "directory"},
 	},
 	{
@@ -114,14 +114,64 @@ func FileForCategory(slug string) string {
 	return FileForCategory(DefaultCategorySlug)
 }
 
-// CategoryForFile returns the category backing a given file name.
+// CategoryForFile returns the category backing a given file name. The projects
+// category is directory-backed: any projects/<slug>.md belongs to it, so every
+// tier/ACL/organize gate treats per-project sub-files exactly like projects.md.
 func CategoryForFile(file string) (Category, bool) {
+	norm := strings.ReplaceAll(file, "\\", "/")
 	for _, c := range Taxonomy {
-		if c.File == file {
+		if c.File == norm {
 			return c, true
 		}
 	}
+	if strings.HasPrefix(norm, "projects/") && strings.HasSuffix(norm, ".md") && !strings.Contains(strings.TrimPrefix(norm, "projects/"), "/") {
+		return CategoryBySlug("projects")
+	}
 	return Category{}, false
+}
+
+// ProjectFile returns the per-project sub-file for a workspace root:
+// projects/<slug>.md, where the slug is the workspace directory name sanitized
+// to lowercase alphanumerics and dashes. No workspace → projects/general.md,
+// so a global-context write still lands in a reviewable per-file bucket.
+func ProjectFile(workspaceRoot string) string {
+	slug := ProjectSlug(workspaceRoot)
+	if slug == "" {
+		return "projects/general.md"
+	}
+	return "projects/" + slug + ".md"
+}
+
+// ProjectSlug derives the project slug from a workspace root path ("" when no
+// workspace). Lowercase alnum+dash, collapsed; "auxly-memory" ← /Users/x/projects/auxly-memory.
+// Store.WorkspaceRoot is the marker dir INSIDE the repo (<repo>/.auxly/memory),
+// so that suffix is stripped first — the slug names the repo, not the marker.
+func ProjectSlug(workspaceRoot string) string {
+	base := strings.TrimSpace(workspaceRoot)
+	if base == "" {
+		return ""
+	}
+	base = strings.ReplaceAll(base, "\\", "/")
+	base = strings.TrimRight(base, "/")
+	base = strings.TrimSuffix(base, "/.auxly/memory")
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(base) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash && b.Len() > 0 {
+				b.WriteRune('-')
+				lastDash = true
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "-")
 }
 
 // CategoryBySlug returns the category for a slug.

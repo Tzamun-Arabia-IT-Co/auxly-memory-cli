@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/safepath"
@@ -28,6 +29,15 @@ type Store struct {
 	// organize (one model call per file can take minutes each — without this a
 	// headless `auxly organize` looks hung). Nil-safe: unset means silent.
 	OrganizeProgress func(current, total int, file string)
+
+	// Recall fast-path state (long-lived MCP server): the open index handle is
+	// reused across recalls and the vault signature at last successful refresh
+	// lets an unchanged vault skip the whole re-chunk/re-hash pass.
+	recallMu       sync.Mutex
+	recallIdx      *Index
+	recallIdxMeta  IndexMeta
+	recallIdxStat  os.FileInfo // identity of the DB file the handle was opened on
+	lastRefreshSig string
 }
 
 // NewStore creates a new memory store, dynamically detecting any local workspace.
@@ -70,11 +80,44 @@ func findWorkspaceRoot() string {
 func (s *Store) List() ([]FileInfo, error) {
 	filesMap := make(map[string]FileInfo)
 
-	// 1. Read global root files
-	globalEntries, err := os.ReadDir(s.Root)
-	if err == nil {
-		for _, entry := range globalEntries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+	// collect reads one root's memory files into filesMap (later roots override
+	// earlier ones — workspace over global). Top-level .md files plus ONE
+	// directory level for the directory-backed `projects` category, whose
+	// entries list under their slash name ("projects/<slug>.md") so every
+	// consumer (recall index, unified compile, organize, ACL) sees them.
+	collect := func(root string) {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				if entry.Name() != "projects" {
+					continue
+				}
+				sub, serr := os.ReadDir(filepath.Join(root, "projects"))
+				if serr != nil {
+					continue
+				}
+				for _, se := range sub {
+					if se.IsDir() || !strings.HasSuffix(se.Name(), ".md") {
+						continue
+					}
+					info, ierr := se.Info()
+					if ierr != nil {
+						continue
+					}
+					name := "projects/" + se.Name()
+					filesMap[name] = FileInfo{
+						Name:    name,
+						Path:    filepath.Join(root, "projects", se.Name()),
+						Size:    info.Size(),
+						ModTime: info.ModTime(),
+					}
+				}
+				continue
+			}
+			if !strings.HasSuffix(entry.Name(), ".md") {
 				continue
 			}
 			info, err := entry.Info()
@@ -83,35 +126,18 @@ func (s *Store) List() ([]FileInfo, error) {
 			}
 			filesMap[entry.Name()] = FileInfo{
 				Name:    entry.Name(),
-				Path:    filepath.Join(s.Root, entry.Name()),
+				Path:    filepath.Join(root, entry.Name()),
 				Size:    info.Size(),
 				ModTime: info.ModTime(),
 			}
 		}
 	}
 
-	// 2. Read local workspace files (if it exists)
+	// 1. Global root, then 2. workspace overrides (same coordinates win).
+	collect(s.Root)
 	if s.WorkspaceRoot != "" {
 		if _, err := os.Stat(s.WorkspaceRoot); err == nil {
-			localEntries, err := os.ReadDir(s.WorkspaceRoot)
-			if err == nil {
-				for _, entry := range localEntries {
-					if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
-						continue
-					}
-					info, err := entry.Info()
-					if err != nil {
-						continue
-					}
-					// Workspace overrides global file coordinates
-					filesMap[entry.Name()] = FileInfo{
-						Name:    entry.Name(),
-						Path:    filepath.Join(s.WorkspaceRoot, entry.Name()),
-						Size:    info.Size(),
-						ModTime: info.ModTime(),
-					}
-				}
-			}
+			collect(s.WorkspaceRoot)
 		}
 	}
 
@@ -222,6 +248,10 @@ func (s *Store) writeScopedNoLock(filename string, content string, scope string)
 		path, err = safepath.ResolveSafe(s.WorkspaceRoot, filename)
 		if err != nil {
 			return err
+		}
+		// Directory-backed names (projects/<slug>.md) need their parent too.
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return fmt.Errorf("cannot create directory: %w", err)
 		}
 	} else {
 		path, err = s.resolvePath(filename)

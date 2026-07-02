@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/embed"
 )
@@ -64,25 +68,42 @@ func (s *Store) Recall(ctx context.Context, query string, k int, emb Embedder, a
 	qv := vecs[0]
 	dim := len(qv)
 
-	indexDir := filepath.Join(s.Root, ".index")
-	if err := os.MkdirAll(indexDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create index dir: %w", err)
-	}
-	ix, err := OpenIndex(filepath.Join(indexDir, "embeddings.db"), IndexMeta{
+	meta := IndexMeta{
 		Provider:           emb.Provider(),
 		Model:              emb.Model(),
 		Dim:                dim,
 		EmbedFormatVersion: embedFormatVersion,
 		ChunkerVersion:     chunkerVersion,
-	})
+	}
+
+	// The whole refresh-and-load section is serialized per Store: the long-lived
+	// MCP server reuses one index handle and one vault signature across recalls.
+	s.recallMu.Lock()
+	ix, err := s.recallIndex(meta)
 	if err != nil {
+		s.recallMu.Unlock()
 		return nil, fmt.Errorf("open recall index: %w", err)
 	}
-	defer ix.Close()
 
-	// Refresh the index incrementally (best-effort: a refresh hiccup must not abort
-	// recall — existing indexed chunks still serve).
-	s.refreshIndex(ctx, ix, emb)
+	// Refresh the index incrementally (best-effort: a refresh hiccup must not
+	// abort recall — existing indexed chunks still serve). Skipped entirely when
+	// the vault signature (file set + mtimes) is unchanged since the last CLEAN
+	// refresh: on the steady state this avoids re-chunking and re-hashing every
+	// file on every recall. A partial refresh (embed hiccup, prune failure) never
+	// records the signature, so the next recall retries instead of masking the
+	// gap until the next vault write.
+	files, lerr := s.List()
+	sig := vaultSignature(files, meta)
+	if lerr != nil || sig != s.lastRefreshSig {
+		clean := s.refreshIndex(ctx, ix, emb)
+		// Never record a signature while a file's mtime is still inside the
+		// current coarse-mtime tick (FAT/SMB ~2s): a second same-tick,
+		// same-size edit would produce an identical signature and the change
+		// would be skipped forever. Holding off costs one extra refresh pass.
+		if lerr == nil && clean && !vaultTouchedWithin(files, 2*time.Second) {
+			s.lastRefreshSig = sig
+		}
+	}
 
 	// Score only chunks that pass BOTH the aggregate exclusion AND the ACL. Even
 	// though unified_memory.md is never indexed (refreshIndex skips it), the Load
@@ -90,13 +111,39 @@ func (s *Store) Recall(ctx context.Context, query string, k int, emb Embedder, a
 	cands, err := ix.Load(func(_ string, file string) bool {
 		return file != unifiedMemoryFile && (allow == nil || allow(file))
 	})
+	s.recallMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("load recall candidates: %w", err)
 	}
 
-	scored := TopK(qv, cands, k)
-	hits := make([]RecallHit, 0, len(scored))
+	// Score everything, then rank with a light recency nudge and drop
+	// low-relevance noise. The threshold applies to the RAW cosine score (the
+	// recency boost is ranking-only, never a relevance signal).
+	scored := TopK(qv, cands, len(cands))
+	minScore := recallMinScore()
+	mtimes := fileMtimes(files)
+	kept := make([]ScoredChunk, 0, len(scored))
+	ranks := make([]float32, 0, len(scored))
 	for _, sc := range scored {
+		if sc.Score < minScore {
+			continue
+		}
+		kept = append(kept, sc)
+		ranks = append(ranks, sc.Score*recencyBoost(mtimes[sc.File]))
+	}
+	sortByRank(kept, ranks)
+	if len(kept) > k {
+		kept = kept[:k]
+	}
+	if len(kept) == 0 {
+		// Everything scored below the relevance floor — treat like an unavailable
+		// semantic layer so callers fall back to substring search instead of
+		// receiving top-8 noise.
+		return nil, fmt.Errorf("no recall hit above relevance threshold %.2f: %w", minScore, embed.ErrUnavailable)
+	}
+
+	hits := make([]RecallHit, 0, len(kept))
+	for _, sc := range kept {
 		hits = append(hits, RecallHit{
 			File:      sc.File,
 			Heading:   sc.Heading,
@@ -109,14 +156,133 @@ func (s *Store) Recall(ctx context.Context, query string, k int, emb Embedder, a
 	return hits, nil
 }
 
+// recallIndex returns the cached open index handle, (re)opening it when absent
+// or when the embedding identity changed. Caller holds recallMu. The handle is
+// deliberately NOT closed per-recall: the MCP server is long-lived and SQLite
+// open/close per call was pure overhead (one-shot CLI processes release it at
+// exit).
+func (s *Store) recallIndex(meta IndexMeta) (*Index, error) {
+	if s.recallIdx != nil && s.recallIdxMeta == meta && s.recallIdxLive() {
+		return s.recallIdx, nil
+	}
+	if s.recallIdx != nil {
+		s.recallIdx.Close()
+		s.recallIdx = nil
+	}
+	indexDir := filepath.Join(s.Root, ".index")
+	if err := os.MkdirAll(indexDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create index dir: %w", err)
+	}
+	dbPath := filepath.Join(indexDir, "embeddings.db")
+	ix, err := OpenIndex(dbPath, meta)
+	if err != nil {
+		return nil, err
+	}
+	s.recallIdx = ix
+	s.recallIdxMeta = meta
+	s.recallIdxStat, _ = os.Stat(dbPath)
+	s.lastRefreshSig = "" // new handle → force one full refresh pass
+	return ix, nil
+}
+
+// recallIdxLive reports whether the cached handle still points at the on-disk
+// DB. `auxly index rebuild` (another process, or the CLI while the MCP server
+// runs) DELETES and recreates embeddings.db — a handle on the unlinked inode
+// would serve stale chunks forever. One stat per recall buys the check.
+func (s *Store) recallIdxLive() bool {
+	if s.recallIdxStat == nil {
+		return false
+	}
+	st, err := os.Stat(s.indexDBPath())
+	return err == nil && os.SameFile(s.recallIdxStat, st)
+}
+
+// vaultSignature fingerprints the vault's file set + mtimes + the embedding
+// identity. Unchanged signature ⇒ nothing to re-index. The meta is included so
+// an index wipe caused by an embedding-model change never skips its rebuild.
+func vaultSignature(files []FileInfo, meta IndexMeta) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s|%s|%d|%d|%d;", meta.Provider, meta.Model, meta.Dim, meta.EmbedFormatVersion, meta.ChunkerVersion)
+	for _, f := range files {
+		fmt.Fprintf(&b, "%s=%d,%d;", f.Path, f.ModTime.UnixNano(), f.Size)
+	}
+	return b.String()
+}
+
+// vaultTouchedWithin reports whether any vault file was modified within d of
+// now — the window where a coarse-mtime filesystem could still fold a further
+// edit into the same signature.
+func vaultTouchedWithin(files []FileInfo, d time.Duration) bool {
+	cutoff := time.Now().Add(-d)
+	for _, f := range files {
+		if f.ModTime.After(cutoff) {
+			return true
+		}
+	}
+	return false
+}
+
+func fileMtimes(files []FileInfo) map[string]time.Time {
+	m := make(map[string]time.Time, len(files))
+	for _, f := range files {
+		m[f.Name] = f.ModTime
+	}
+	return m
+}
+
+// recallMinScore is the raw-cosine floor below which a hit is noise, not a
+// memory. Tuned on the real vault; override with AUXLY_RECALL_MIN_SCORE.
+func recallMinScore() float32 {
+	if v := os.Getenv("AUXLY_RECALL_MIN_SCORE"); v != "" {
+		if f, err := strconv.ParseFloat(v, 32); err == nil && f >= 0 && f <= 1 {
+			return float32(f)
+		}
+	}
+	return 0.35
+}
+
+// recencyBoost nudges recently-touched files up the ranking: ×1.2 for a file
+// written today decaying linearly to ×1.0 at 30 days. A nudge, not a reorder —
+// relevance stays the dominant signal.
+func recencyBoost(mtime time.Time) float32 {
+	if mtime.IsZero() {
+		return 1
+	}
+	age := time.Since(mtime)
+	const window = 30 * 24 * time.Hour
+	if age < 0 {
+		return 1.2 // future mtime (clock skew, restored backup) — cap, don't extrapolate
+	}
+	if age >= window {
+		return 1
+	}
+	return 1 + 0.2*float32(1-age.Seconds()/window.Seconds())
+}
+
+// sortByRank orders kept by the parallel ranks slice (descending), stable
+// tie-break on the underlying deterministic order TopK already produced.
+func sortByRank(kept []ScoredChunk, ranks []float32) {
+	idx := make([]int, len(kept))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return ranks[idx[a]] > ranks[idx[b]] })
+	out := make([]ScoredChunk, len(kept))
+	for i, j := range idx {
+		out[i] = kept[j]
+	}
+	copy(kept, out)
+}
+
 // refreshIndex incrementally re-embeds changed chunks across the vault. It is
 // best-effort: a per-file embed failure is skipped, never fatal. unified_memory.md
 // is ALWAYS excluded — indexing the aggregate would create vectors that bypass
-// per-file ACL.
-func (s *Store) refreshIndex(ctx context.Context, ix *Index, emb Embedder) {
+// per-file ACL. Returns true only when EVERY file reconciled cleanly — a partial
+// pass must not be recorded as a completed refresh.
+func (s *Store) refreshIndex(ctx context.Context, ix *Index, emb Embedder) bool {
 	files, err := s.List()
 	if err != nil {
-		return
+		return false
 	}
 	// Track every scope_key we actually process. Any stored scope NOT in this set
 	// is orphaned — a file deleted from the vault, or a global file shadowed by a
@@ -124,33 +290,43 @@ func (s *Store) refreshIndex(ctx context.Context, ix *Index, emb Embedder) {
 	// global's physical Path disappears here). Those chunks must be swept or stale/
 	// shadowed content could still be served via Load's bare-filename ACL.
 	processedScopes := make(map[string]bool, len(files))
+	clean := true
 	for _, f := range files {
 		if f.Name == unifiedMemoryFile {
 			continue // hard exclusion — the aggregate is never indexed
 		}
 		processedScopes[f.Path] = true
-		s.refreshFile(ctx, ix, emb, f)
+		if !s.refreshFile(ctx, ix, emb, f) {
+			clean = false
+		}
 	}
-	_ = ix.PruneScopesExcept(processedScopes)
+	if err := ix.PruneScopesExcept(processedScopes); err != nil {
+		clean = false
+	}
+	return clean
 }
 
 // refreshFile reconciles one file's chunks with the index: embeds new chunks in a
 // single batched call, then prunes chunks deleted from the source. scopeKey is the
 // physical path (NOT bare Name) so a workspace file never shadows a global one.
-func (s *Store) refreshFile(ctx context.Context, ix *Index, emb Embedder, f FileInfo) {
+// Returns true only when the file reconciled cleanly (a skipped embed/put leaves
+// the refresh incomplete, and the caller must not record it as done).
+func (s *Store) refreshFile(ctx context.Context, ix *Index, emb Embedder, f FileInfo) bool {
 	scopeKey := f.Path
 	content, err := s.View(f.Name)
 	if err != nil {
-		return
+		return false
 	}
 	chunks := ChunkMarkdown(f.Name, content)
 
+	clean := true
 	currentHashes := make(map[string]bool, len(chunks))
 	var pending []Chunk
 	for _, c := range chunks {
 		currentHashes[c.Hash] = true
 		has, herr := ix.Has(scopeKey, c.Hash)
 		if herr != nil {
+			clean = false
 			continue
 		}
 		if !has {
@@ -167,10 +343,17 @@ func (s *Store) refreshFile(ctx context.Context, ix *Index, emb Embedder, f File
 		// but does NOT abort recall — already-indexed chunks still serve.
 		if vecs, eerr := emb.Embed(ctx, texts); eerr == nil && len(vecs) == len(pending) {
 			for i, c := range pending {
-				_ = ix.Put(scopeKey, c, vecs[i])
+				if perr := ix.Put(scopeKey, c, vecs[i]); perr != nil {
+					clean = false
+				}
 			}
+		} else {
+			clean = false
 		}
 	}
 
-	_ = ix.PruneExcept(scopeKey, currentHashes)
+	if perr := ix.PruneExcept(scopeKey, currentHashes); perr != nil {
+		clean = false
+	}
+	return clean
 }

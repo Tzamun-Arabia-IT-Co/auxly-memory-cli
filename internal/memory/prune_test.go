@@ -114,6 +114,7 @@ func itoa(i int) string {
 // recall no longer returns its content.
 func TestRefreshIndexPrunesDeletedFile(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("AUXLY_RECALL_MIN_SCORE", "0") // stub vectors score low; this test is about pruning, not relevance
 	writeFile(t, root, "a.md", "# A\n\n- alpha content lives here.\n")
 	writeFile(t, root, "b.md", "# B\n\n- beta content lives here.\n")
 	s := &Store{Root: root}
