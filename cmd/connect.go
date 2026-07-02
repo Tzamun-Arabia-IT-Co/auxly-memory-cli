@@ -1984,6 +1984,7 @@ func provisionRemote(p remoteProfile, backAddr string) error {
 	// Record the connection BEFORE wiring (same rationale as the relay flow: a
 	// stalled wire must not leave an unmanaged box) — this also puts direct
 	// boxes into clients.yaml so the hourly reconciler covers them.
+	warnIfKnownMachine(boxHostname, p.Name)
 	if err := upsertClient(clientEntry{Name: p.Name, Target: connTarget(p), Method: "direct", Hostname: boxHostname}); err == nil {
 		fmt.Printf("   ✓ Saved connection %q (manage with `auxly host clients`)\n", p.Name)
 	}

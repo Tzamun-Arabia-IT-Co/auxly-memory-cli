@@ -413,6 +413,7 @@ func provisionConsumer(hc hostConfig) error {
 	if clientName == "" {
 		clientName = host
 	}
+	warnIfKnownMachine(boxHostname, clientName)
 	if err := upsertClient(clientEntry{Name: clientName, Target: hc.Rendezvous, Method: "relay", Hostname: boxHostname}); err == nil {
 		fmt.Printf("   ✓ Saved connection \"%s\" (manage with `auxly host clients`)\n", clientName)
 	}

@@ -176,6 +176,11 @@ func doctorReport(memPath string, probeLinks bool) string {
 		} else {
 			line("⚠", "host keep-alive service NOT loaded — remote boxes cannot reach this memory", "run `auxly host up` (any auxly TUI/MCP start also self-heals it)")
 		}
+		// Topology hygiene (config analysis only — no network). Auto-repair owns
+		// wiring; topology stays human-owned, so these are prompts, not actions.
+		for _, w := range hostTopologyWarnings(relays) {
+			line("⚠", w, "review with `auxly host clients` / `auxly host forget <name>`")
+		}
 	}
 
 	// 8. Version. Cached() is network-free and returns ("", false) when no
