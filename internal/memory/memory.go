@@ -30,6 +30,12 @@ type Store struct {
 	// headless `auxly organize` looks hung). Nil-safe: unset means silent.
 	OrganizeProgress func(current, total int, file string)
 
+	// RecallObserver, when set, receives one RecallEvent per completed recall
+	// (the MCP server forwards these to the audit layer). Nil-safe. Called
+	// AFTER ranking, outside recallMu — the observer must be fast and must
+	// never call back into Recall.
+	RecallObserver func(RecallEvent)
+
 	// Recall fast-path state (long-lived MCP server): the open index handle is
 	// reused across recalls and the vault signature at last successful refresh
 	// lets an unchanged vault skip the whole re-chunk/re-hash pass.

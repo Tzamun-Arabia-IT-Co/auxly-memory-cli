@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 )
 
 // supersedeThreshold is the cosine floor above which an existing fact in the
@@ -64,7 +66,7 @@ func (s *Server) maybeSupersede(file, diff string) string {
 			out = append(out, dl)
 			continue // overall budget spent — remaining lines append plainly
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(memory.WithoutRecallObserver(context.Background()), 3*time.Second)
 		hits, err := s.store.Recall(ctx, fact, 3, emb, func(f string) bool { return f == file })
 		cancel()
 		if err != nil {

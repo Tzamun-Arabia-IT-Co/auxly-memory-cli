@@ -126,6 +126,25 @@ func NewServer(memoryPath string) *Server {
 	// Default embedder factory: a real local-first embed client. Tests override
 	// s.newEmbedder with a deterministic offline stub.
 	s.newEmbedder = func() memory.Embedder { return embed.New() }
+	// Recall analytics: forward each recall's event to the audit layer. Only
+	// hashes cross this boundary (never query or fact text). Provider resolves
+	// at event time; a logger failure must never surface into the recall.
+	store.RecallObserver = func(ev memory.RecallEvent) {
+		if s.logger == nil {
+			return
+		}
+		hits := make([]audit.RecallHitRecord, 0, len(ev.Hits))
+		for _, h := range ev.Hits {
+			hits = append(hits, audit.RecallHitRecord{File: h.File, LineHash: h.LineHash, Score: h.Score, Rank: h.Rank, Accepted: h.Accepted})
+		}
+		_ = s.logger.RecordRecall(audit.RecallMeta{
+			Provider:   s.resolveProvider(),
+			QueryHash:  ev.QueryHash,
+			Fallback:   ev.Fallback,
+			Source:     s.sourceMeta.Source,
+			RemoteHost: s.sourceMeta.RemoteHost,
+		}, hits)
+	}
 	// §10 per-remote file sharing: when serving an SSH-remote consumer, load that
 	// remote's sharing ACL from the host's clients.yaml (nil → safe default).
 	s.isRemote = meta.Source == "ssh-remote"
@@ -801,6 +820,33 @@ func (s *Server) toolRecall(query string) toolResult {
 	hits, err := s.store.Recall(context.Background(), query, 8, emb, s.canRead)
 	if errors.Is(err, embed.ErrUnavailable) {
 		// Offline / no model: fall back to exact substring search (still ACL-gated).
+		// Record the fallback as a query event first — the fallback RATE is the
+		// health signal `auxly stats --recall` surfaces (a high rate means agents
+		// rarely get semantic results). Hashes only; a zero-hit query still counts
+		// via a single non-accepted marker row.
+		if s.logger != nil {
+			var frecs []audit.RecallHitRecord
+			if results, serr := s.store.Search(query); serr == nil {
+				i := 0
+				for file := range results {
+					if !s.canRead(file) || file == "unified_memory.md" {
+						continue
+					}
+					frecs = append(frecs, audit.RecallHitRecord{File: file, Rank: i, Accepted: true})
+					i++
+				}
+			}
+			if len(frecs) == 0 {
+				frecs = append(frecs, audit.RecallHitRecord{Accepted: false})
+			}
+			_ = s.logger.RecordRecall(audit.RecallMeta{
+				Provider:   s.resolveProvider(),
+				QueryHash:  memory.HashRecallText(query),
+				Fallback:   true,
+				Source:     s.sourceMeta.Source,
+				RemoteHost: s.sourceMeta.RemoteHost,
+			}, frecs)
+		}
 		return s.toolSearch(query)
 	}
 	if err != nil {

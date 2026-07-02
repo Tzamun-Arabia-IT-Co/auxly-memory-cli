@@ -132,6 +132,10 @@ func (s *Store) Recall(ctx context.Context, query string, k int, emb Embedder, a
 		ranks = append(ranks, sc.Score*recencyBoost(mtimes[sc.File]))
 	}
 	sortByRank(kept, ranks)
+	// Snapshot the full ranked list (pre-cut) for the RecallEvent below — kept
+	// gets sliced down to k next, but the observer wants the whole picture
+	// (including what was scored but trimmed).
+	ranked := kept
 	if len(kept) > k {
 		kept = kept[:k]
 	}
@@ -153,6 +157,45 @@ func (s *Store) Recall(ctx context.Context, query string, k int, emb Embedder, a
 			Score:     sc.Score,
 		})
 	}
+
+	if s.RecallObserver != nil && !recallObserverSuppressed(ctx) {
+		// Cap chunks at 32 (top-ranked — `ranked` is already sorted) and total
+		// emitted rows at 64: an outsized candidate list must not turn one
+		// recall into a giant event. One hit per BULLET line, not per chunk —
+		// fact-granularity identity is what the decay/review features match on.
+		nChunks := len(ranked)
+		if nChunks > 32 {
+			nChunks = 32
+		}
+		evHits := make([]RecallEventHit, 0, 64)
+	emit:
+		for i := 0; i < nChunks; i++ {
+			sc := ranked[i]
+			for _, lh := range bulletHashes(sc.Text) {
+				if len(evHits) >= 64 {
+					break emit
+				}
+				evHits = append(evHits, RecallEventHit{
+					File:     sc.File,
+					LineHash: lh,
+					Score:    sc.Score,
+					Rank:     i,
+					Accepted: i < len(kept),
+				})
+			}
+		}
+		// A panicking observer must not take recall (or the whole MCP server)
+		// down with it — analytics are strictly best-effort.
+		func() {
+			defer func() { _ = recover() }()
+			s.RecallObserver(RecallEvent{
+				QueryHash: HashRecallText(query),
+				Fallback:  false,
+				Hits:      evHits,
+			})
+		}()
+	}
+
 	return hits, nil
 }
 

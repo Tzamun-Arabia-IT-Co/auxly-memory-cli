@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +44,12 @@ type SourceMeta struct {
 type Logger struct {
 	logPath string
 	db      *sql.DB
+
+	// recall_events state — per-Logger so a transient create failure is
+	// retried on the next call instead of latched for the process lifetime.
+	recallMu    sync.Mutex
+	recallReady bool
+	recallCalls int64
 }
 
 // NewLogger creates a new audit logger at the given memory root.
@@ -54,6 +61,11 @@ func NewLogger(memoryRoot string) (*Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open audit.db: %w", err)
 	}
+	// Multiple MCP server processes (one per agent) share this DB. Without WAL
+	// + a busy timeout, simultaneous first-recalls collide with an immediate
+	// "database is locked" (embeddings.db learned this first — index.go).
+	_, _ = db.Exec("PRAGMA journal_mode=WAL;")
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
 
 	// Create table if not exists
 	_, err = db.Exec(`
