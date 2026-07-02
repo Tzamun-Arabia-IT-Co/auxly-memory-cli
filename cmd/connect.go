@@ -20,6 +20,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/session"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/statusline"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/mcp"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -193,6 +194,10 @@ func upsertRemote(p remoteProfile) error {
 	if !replaced {
 		out = append(out, p)
 	}
+	// Feed the consumer link guard: remember this box has been wired to the
+	// host, so a future silent loss of the profile is detected and surfaced
+	// instead of quietly serving the stale local vault.
+	mcp.RecordRemoteHistory(p.Name)
 	return saveRemotes(remotesConfig{Remotes: out})
 }
 
@@ -824,15 +829,15 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 	sshArgs = append(sshArgs, p.SSHArgs...)
 	// "--" terminates ssh option processing before the target.
 	sshArgs = append(sshArgs, "--", connTarget(p))
-	sshArgs = append(sshArgs,
-		hostAuxlyBin(p), "mcp-server",
+	serverArgs := []string{
+		"mcp-server",
 		"--provider", provider,
 		"--source", "ssh-remote",
 		"--remote-os", runtime.GOOS,
 		"--remote-host", localHostname(),
-	)
+	}
 	if p.MemPath != "" {
-		sshArgs = append(sshArgs, "--path", p.MemPath)
+		serverArgs = append(serverArgs, "--path", p.MemPath)
 	}
 
 	// Resilient launch: when the ssh transport itself fails (exit 255 — the relay
@@ -842,25 +847,97 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 	// NOT retry: a mid-session drop is stateful (the MCP `initialize` handshake
 	// would be lost), so we surface it and let the client respawn connect-mcp,
 	// which re-establishes and re-handshakes cleanly.
+	//
+	// Exit 127 is different: the remote shell ran but the auxly binary at
+	// host_bin is GONE (the "provisioned against a dev binary that later moved"
+	// incident). That fails instantly, so we walk a fallback chain — bare PATH
+	// lookup, then the standard install locations — and persist whichever path
+	// worked back into the profile so the next launch goes straight there.
 	const (
 		maxLauncherAttempts = 3
 		launcherBackoff     = time.Second
 	)
-	for attempt := 1; ; attempt++ {
-		launch := exec.Command("ssh", sshArgs...)
-		launch.Stdin = os.Stdin
-		launch.Stdout = os.Stdout
-		launch.Stderr = os.Stderr
-		err := launch.Run()
-		if err == nil {
-			return nil // clean exit — the client closed the stream
+	candidates := hostBinCandidates(p)
+	originalDead := false // candidate #1 (the configured host_bin) proven gone via 127
+	for ci, bin := range candidates {
+		remote := append([]string{bin}, serverArgs...)
+		for attempt := 1; ; attempt++ {
+			launch := exec.Command("ssh", append(append([]string{}, sshArgs...), remote...)...)
+			launch.Stdin = os.Stdin
+			launch.Stdout = os.Stdout
+			launch.Stderr = os.Stderr
+			started := time.Now()
+			err := launch.Run()
+			// Persist a repair ONLY when the configured host_bin was actually
+			// observed dead (127) AND the replacement is an absolute path — a
+			// bare "auxly" must never be persisted (non-interactive SSH PATH on
+			// macOS omits /usr/local/bin, so it is strictly less reliable than
+			// an absolute path and is already the implicit fallback).
+			ranForReal := err == nil || time.Since(started) > 30*time.Second
+			if ranForReal && originalDead && bin != hostAuxlyBin(p) && strings.HasPrefix(bin, "/") {
+				repairHostBin(p, bin) // this candidate served a session — remember it
+			}
+			if err == nil {
+				return nil // clean exit — the client closed the stream
+			}
+			code, isExit := sshExitCode(err)
+			// 127 is the POSIX not-found convention; a Windows host reports a
+			// different code, so the chain (and repairHostBin) is POSIX-hosts
+			// only — a Windows host fails straight through with the raw error.
+			if isExit && code == 127 && ci < len(candidates)-1 {
+				if ci == 0 {
+					originalDead = true
+				}
+				fmt.Fprintf(os.Stderr, "auxly connect-mcp: %q not found on host — trying %q\n", bin, candidates[ci+1])
+				break // next candidate
+			}
+			if shouldRetryLauncher(code, isExit, attempt, maxLauncherAttempts) {
+				time.Sleep(launcherBackoff) // transport failure → tunnel may be coming up
+				continue
+			}
+			return fmt.Errorf("ssh launcher to %s failed (attempt %d): %w", p.Host, attempt, err)
 		}
-		code, isExit := sshExitCode(err)
-		if shouldRetryLauncher(code, isExit, attempt, maxLauncherAttempts) {
-			time.Sleep(launcherBackoff) // transport failure → tunnel may be coming up
-			continue
+	}
+	return fmt.Errorf("auxly not found on host %s at any known location — reinstall it there or fix host_bin in remotes.yaml", p.Host)
+}
+
+// hostBinCandidates is the launch order for the auxly binary on the host: the
+// profile's host_bin first, then PATH, then the standard install locations.
+// $HOME expands in the remote POSIX shell. The chain only advances on POSIX
+// exit 127 — a Windows host's missing-command code differs, so Windows hosts
+// get candidate #1 only and surface the raw error (see the launcher loop).
+func hostBinCandidates(p remoteProfile) []string {
+	cands := []string{}
+	if strings.TrimSpace(p.HostBin) != "" {
+		cands = append(cands, p.HostBin)
+	}
+	for _, c := range []string{"auxly", "$HOME/.bun/bin/auxly", "/usr/local/bin/auxly", "$HOME/.local/bin/auxly"} {
+		dup := false
+		for _, have := range cands {
+			if have == c {
+				dup = true
+			}
 		}
-		return fmt.Errorf("ssh launcher to %s failed (attempt %d): %w", p.Host, attempt, err)
+		if !dup {
+			cands = append(cands, c)
+		}
+	}
+	return cands
+}
+
+// repairHostBin persists a working binary path into the profile after the
+// configured one turned out dead, so every future launch (and the agents'
+// configs that reference this profile) skips the broken path. Best-effort.
+func repairHostBin(p remoteProfile, workingBin string) {
+	p.HostBin = workingBin
+	if err := upsertRemote(p); err != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "auxly connect-mcp: repaired host_bin for %q → %s\n", p.Name, workingBin)
+	if logger, err := audit.NewLogger(getMemoryPath()); err == nil {
+		defer logger.Close()
+		logger.Log("connect-mcp", "system", "hostbin_repair", "remotes.yaml", "",
+			fmt.Sprintf("profile %s: host_bin was dead, now %s", p.Name, workingBin), "auto")
 	}
 }
 
@@ -1265,6 +1342,7 @@ func runConnectRemove(cmd *cobra.Command, args []string) error {
 	if err := saveRemotes(remotesConfig{Remotes: out}); err != nil {
 		return err
 	}
+	mcp.ForgetRemoteHistory(name) // deliberate removal — no "link lost" banner
 	fmt.Printf("🗑️  Removed remote profile %q\n", name)
 	return nil
 }
@@ -1567,6 +1645,11 @@ func runConnectDisconnect(cmd *cobra.Command, args []string) error {
 			fmt.Printf("   ✓ Removed saved profile %q (relay/host coordinates)\n", name)
 		}
 	}
+
+	// Deliberate disconnect: clear the link-guard history so the local MCP
+	// server never shows a false "MEMORY LINK LOST" banner for a link the user
+	// intentionally removed.
+	mcp.ForgetRemoteHistory(name)
 
 	fmt.Println("👉 Restart your IDE/agent to drop the connection. No memory was stored on this machine.")
 	return nil

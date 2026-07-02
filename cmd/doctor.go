@@ -74,7 +74,7 @@ func doctorReport(memPath string) string {
 		if pendings, perr := pending.NewManager(memPath).List(); perr != nil {
 			line("✗", fmt.Sprintf("pending queue unreadable: %v", perr), "check permissions on "+filepath.Join(memPath, ".pending"))
 		} else if n := len(pendings); n > 0 {
-			line("⚠", fmt.Sprintf("%d pending approval(s) waiting", n), "review with `auxly approve <name>` / dashboard tab 4")
+			line("⚠", fmt.Sprintf("%d pending approval(s) waiting", n), "review with `auxly pending`, then `auxly approve <name>` (or --all)")
 		} else {
 			line("✓", "no pending approvals", "")
 		}
@@ -140,7 +140,18 @@ func doctorReport(memPath string) string {
 		line("✓", fmt.Sprintf("trust: default %q · %s", cfg.Default, strings.Join(parts, " · ")), "")
 	}
 
-	// 7. Version. Cached() is network-free and returns ("", false) when no
+	// 7. Host keep-alive — only when this machine serves its memory to remote
+	// boxes. An unloaded service means every remote tunnel is down (the July
+	// 2026 incident); selfHealKeepAlive repairs it on the next long-lived launch.
+	if relays, ok, herr := loadHostConfigs(); herr == nil && ok && len(relays) > 0 {
+		if loaded, detail := keepAliveStatus(); loaded {
+			line("✓", fmt.Sprintf("host keep-alive: %s · %d relay(s)", detail, len(relays)), "")
+		} else {
+			line("⚠", "host keep-alive service NOT loaded — remote boxes cannot reach this memory", "run `auxly host up` (any auxly TUI/MCP start also self-heals it)")
+		}
+	}
+
+	// 8. Version. Cached() is network-free and returns ("", false) when no
 	// check has ever run — that's "unknown", not "up to date".
 	latest, newer := update.Cached()
 	switch {

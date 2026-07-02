@@ -101,7 +101,11 @@ type Server struct {
 	// newEmbedder builds the embedder used by semantic recall. Injectable so tests
 	// can substitute a deterministic offline stub instead of hitting a live model.
 	newEmbedder func() memory.Embedder
-	mu          sync.Mutex
+	// staleLink carries the "this box lost its remote-memory wiring" banner
+	// (empty when healthy). Computed once at start — a repaired link is picked
+	// up on the next server launch, which is every agent restart.
+	staleLink string
+	mu        sync.Mutex
 }
 
 // NewServer creates a new MCP server.
@@ -125,6 +129,12 @@ func NewServer(memoryPath string) *Server {
 	// §10 per-remote file sharing: when serving an SSH-remote consumer, load that
 	// remote's sharing ACL from the host's clients.yaml (nil → safe default).
 	s.isRemote = meta.Source == "ssh-remote"
+	// Consumer link guard: a LOCAL server on a box whose remote wiring vanished
+	// must say so on every response instead of silently serving stale data.
+	// (After isRemote is known — host-side remote sessions skip the disk reads.)
+	if !s.isRemote {
+		s.staleLink = staleLinkWarning()
+	}
 	if s.isRemote {
 		s.share = sharing.LoadForRemoteHost(memoryPath, meta.RemoteHost)
 		// Opt-in default-write (config DefaultRemoteWrite): upgrade a MATCHED client
@@ -708,7 +718,7 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 	agentID := fmt.Sprintf("%s-mcp", provider)
 
 	if level == trust.LevelRequireApproval {
-		pendingName, err := s.pendingMgr.Write(file, diff)
+		pendingName, err := s.pendingMgr.WriteFrom(file, diff, provider)
 		if err != nil {
 			return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}}, IsError: true}
 		}
@@ -748,7 +758,7 @@ func (s *Server) toolSearch(query string) toolResult {
 	}
 
 	if len(results) == 0 {
-		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("No results for \"%s\"", query)}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: "No results in readable memory for that query."}}}
 	}
 
 	var sb strings.Builder
@@ -766,7 +776,7 @@ func (s *Server) toolSearch(query string) toolResult {
 		shown++
 	}
 	if shown == 0 {
-		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("No results for \"%s\"", query)}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: "No results in readable memory for that query."}}}
 	}
 	return toolResult{Content: []toolContent{{Type: "text", Text: sb.String()}}}
 }
@@ -813,7 +823,7 @@ func (s *Server) toolRecall(query string) toolResult {
 	}
 
 	if shown == 0 {
-		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("No results for \"%s\"", query)}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: "No results in readable memory for that query."}}}
 	}
 	return toolResult{Content: []toolContent{{Type: "text", Text: sb.String()}}}
 }
@@ -880,7 +890,7 @@ func (s *Server) withSyncFooter(text string) string {
 	if s.isRemote {
 		return text + s.remoteScopeFooter()
 	}
-	return text + "\n\n---\n🧠 **Auxly Agent Sync Active:** Proactively call `auxly_skill_sync` when you learn new facts."
+	return text + s.staleLink + "\n\n---\n🧠 **Auxly Agent Sync Active:** Proactively call `auxly_skill_sync` when you learn new facts."
 }
 
 // withFooter appends the standard Auxly sync reminder + category guide to a tool
@@ -893,7 +903,7 @@ func (s *Server) withFooter(text string) string {
 	if s.isRemote {
 		return text + s.remoteScopeFooter()
 	}
-	return text +
+	return text + s.staleLink +
 		"\n\n---\n🧠 **Auxly Agent Sync Active:** Remember to proactively call `auxly_skill_sync` to update the memory vault whenever you learn new preferences, system setups, or developer details!" +
 		"\n\n📂 WHERE FACTS GO (file the right place the first time):\n" + memory.RenderForPrompt()
 }
@@ -1068,6 +1078,12 @@ func (s *Server) toolSkillSync(content, category, scope string) toolResult {
 	}
 
 	fileName := memory.FileForCategory(category)
+	// Per-project sub-files: a projects fact written from a workspace lands in
+	// that project's own file (projects/<repo-slug>.md) instead of the shared
+	// monolith, so two repos never interleave their notes.
+	if category == "projects" {
+		fileName = memory.ProjectFile(s.store.WorkspaceRoot)
+	}
 
 	// Dynamic trust verification
 	trustCfg, err := trust.Load(s.memoryPath)

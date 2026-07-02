@@ -342,6 +342,43 @@ func (l *Logger) Stats() (*Stats, error) {
 	return stats, nil
 }
 
+// LastRemoteActivity returns the RFC3339 timestamp of the most recent entry
+// attributed to the given ssh-remote host ("" if none). Feeds the host clients
+// health table: "when did this box last actually touch the memory".
+func (l *Logger) LastRemoteActivity(remoteHost string) string {
+	if l.db == nil || remoteHost == "" {
+		return ""
+	}
+	var ts string
+	l.db.QueryRow(`SELECT COALESCE(MAX(timestamp),'') FROM audit_entries
+		WHERE source = 'ssh-remote' AND LOWER(remote_host) = LOWER(?)`, remoteHost).Scan(&ts)
+	return ts
+}
+
+// RemoteHostsSeen returns every distinct ssh-remote host that has EVER touched
+// this vault, with its last activity timestamp. Surfaces boxes that connected
+// via `connect auto` (self-service) and therefore exist in no host-side
+// registry — the health table lists them instead of pretending they don't exist.
+func (l *Logger) RemoteHostsSeen() (map[string]string, error) {
+	if l.db == nil {
+		return nil, nil
+	}
+	rows, err := l.db.Query(`SELECT LOWER(remote_host), MAX(timestamp) FROM audit_entries
+		WHERE source = 'ssh-remote' AND COALESCE(remote_host,'') != '' GROUP BY LOWER(remote_host)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var host, ts string
+		if rows.Scan(&host, &ts) == nil {
+			out[host] = ts
+		}
+	}
+	return out, nil
+}
+
 // ActiveProviders returns all providers whose absolute latest log entry is not a 'disconnect'.
 func (l *Logger) ActiveProviders(duration time.Duration) ([]string, error) {
 	if l.db == nil {

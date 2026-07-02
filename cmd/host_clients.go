@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
+	"text/tabwriter"
 	"time"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -199,6 +203,58 @@ var hostForgetCmd = &cobra.Command{
 	RunE:         runHostForget,
 }
 
+// clientHealth is one probed row of the `auxly host clients` health table.
+type clientHealth struct {
+	entry        clientEntry
+	reachable    bool
+	version      string
+	wired        bool
+	remoteEntry  *remoteProfile // the box's remotes.yaml entry for THIS host (nil if none)
+	lastActivity string
+	detail       string // failure detail when unreachable/unwired
+}
+
+// probeClient checks one box live over SSH: reachable + auxly version in one
+// round-trip, wiring (does its remotes.yaml still carry THIS host's entry) in a
+// second. Bounded — a dead box costs its timeout, never a hang.
+func probeClient(ctx context.Context, c clientEntry) clientHealth {
+	h := clientHealth{entry: c}
+	p, err := clientProfile(c)
+	if err != nil {
+		h.detail = err.Error()
+		return h
+	}
+	out, err := runSSHCtx(ctx, p, "auxly", "--version")
+	if err != nil {
+		h.detail = firstLine(out)
+		return h
+	}
+	h.reachable = true
+	h.version = strings.TrimSpace(firstLine(out))
+	// Wiring: the box's remotes.yaml must still carry this host's entry. POSIX
+	// first, Windows fallback — the file lives at ~/.auxly/remotes.yaml either way.
+	wout, werr := runSSHCtx(ctx, p, "cat", "$HOME/.auxly/remotes.yaml")
+	if werr != nil {
+		wout, werr = runSSHCtx(ctx, p, "cmd", "/c", "type", "%USERPROFILE%\\.auxly\\remotes.yaml")
+	}
+	if werr == nil {
+		var rc remotesConfig
+		if yaml.Unmarshal([]byte(wout), &rc) == nil {
+			for i := range rc.Remotes {
+				if rc.Remotes[i].Name == offerName() {
+					h.wired = true
+					h.remoteEntry = &rc.Remotes[i]
+					break
+				}
+			}
+		}
+	}
+	if !h.wired {
+		h.detail = "remotes.yaml has no entry for this host — `auxly host reconnect " + c.Name + "`"
+	}
+	return h
+}
+
 func runHostClients(cmd *cobra.Command, args []string) error {
 	cs, err := loadClients()
 	if err != nil {
@@ -208,9 +264,93 @@ func runHostClients(cmd *cobra.Command, args []string) error {
 		fmt.Println("No connected boxes yet. Set one up with `auxly host provision`.")
 		return nil
 	}
-	fmt.Println("Remote boxes using this machine's memory:")
-	for _, c := range cs {
-		fmt.Printf("  • %-20s %s [%s]\n", c.Name, c.Target, c.Method)
+
+	fmt.Printf("Probing %d box(es)…\n\n", len(cs))
+	rows := make([]clientHealth, len(cs))
+	var wg sync.WaitGroup
+	for i, c := range cs {
+		wg.Add(1)
+		go func(i int, c clientEntry) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			rows[i] = probeClient(ctx, c)
+		}(i, c)
+	}
+	wg.Wait()
+
+	// Last activity comes from the local audit trail (the box's reads/writes land
+	// here) — no network involved.
+	var logger *audit.Logger
+	if lg, lerr := audit.NewLogger(getMemoryPath()); lerr == nil {
+		logger = lg
+		defer logger.Close()
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "BOX\tTARGET\tREACHABLE\tAUXLY\tWIRED\tLAST ACTIVITY\n")
+	problems := 0
+	for _, r := range rows {
+		reach, wired, version, last := "✗", "✗", "-", "-"
+		if r.reachable {
+			reach = "✓"
+			if r.version != "" {
+				version = r.version
+			}
+		}
+		if r.wired {
+			wired = "✓"
+		}
+		if logger != nil {
+			hostKey := r.entry.Hostname
+			if hostKey == "" {
+				hostKey = r.entry.Name
+			}
+			if ts := logger.LastRemoteActivity(hostKey); ts != "" {
+				if t, terr := time.Parse(time.RFC3339, ts); terr == nil {
+					last = humanAge(time.Since(t)) + " ago"
+				}
+			}
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", r.entry.Name, r.entry.Target, reach, version, wired, last)
+		if !r.reachable || !r.wired {
+			problems++
+		}
+	}
+	w.Flush()
+	for _, r := range rows {
+		if r.detail != "" && (!r.reachable || !r.wired) {
+			fmt.Printf("   ⚠ %s: %s\n", r.entry.Name, r.detail)
+		}
+	}
+	if problems == 0 {
+		fmt.Println("\n✅ all boxes healthy")
+	}
+
+	// Boxes that self-connected (`auxly connect auto`) are in no host-side
+	// registry — this host has no address to probe or repair them with. Listing
+	// them from the audit trail turns that blind spot into visible state.
+	if logger != nil {
+		seen, _ := logger.RemoteHostsSeen()
+		managed := map[string]bool{}
+		for _, c := range cs {
+			managed[strings.ToLower(c.Name)] = true
+			managed[strings.ToLower(c.Hostname)] = true
+		}
+		var unmanaged []string
+		for host, ts := range seen {
+			if !managed[host] {
+				unmanaged = append(unmanaged, fmt.Sprintf("%s (last activity %s)", host, ts))
+			}
+		}
+		if len(unmanaged) > 0 {
+			sort.Strings(unmanaged)
+			fmt.Println("\nSelf-connected boxes (seen in audit, not managed from this host —")
+			fmt.Println("cannot be probed or auto-repaired; provision from here to manage):")
+			for _, u := range unmanaged {
+				fmt.Printf("   • %s\n", u)
+			}
+		}
 	}
 	return nil
 }

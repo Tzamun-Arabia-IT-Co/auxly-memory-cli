@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -915,34 +917,140 @@ func superviseRelays() {
 		}
 	}
 
-	reconcile() // start the initial set immediately
+	reconcile()           // start the initial set immediately
+	go reconcileClients() // and verify every box's wiring once at startup
+	lastClientPass := time.Now()
 	ticker := time.NewTicker(relayReconcileInterval)
 	defer ticker.Stop()
 	for range ticker.C {
 		reconcile()
+		// Piggyback the hourly client-wiring reconcile on the relay ticker; it
+		// runs in the background so a slow box never delays tunnel supervision.
+		if time.Since(lastClientPass) >= clientReconcileInterval {
+			lastClientPass = time.Now()
+			go reconcileClients()
+		}
 	}
 }
 
-// superviseTunnel runs one relay's reverse tunnel, restarting it with a short
-// backoff whenever it exits — until its context is cancelled (the relay was
-// removed). Each relay runs in its own goroutine so the tunnels are independent.
+// superviseTunnel runs one relay's reverse tunnel, restarting it whenever it
+// exits — until its context is cancelled (the relay was removed). Each relay
+// runs in its own goroutine so the tunnels are independent.
+//
+// Retries escalate 5s → 30s → 2m → 10m (reset after a tunnel that actually
+// held) so an auth-dead or firewalled relay is not hammered every 5s forever —
+// that pattern trips MaxAuthTries/fail2ban on the relay and turns a config
+// problem into a lockout. After 5 consecutive failures ONE audit entry records
+// the last stderr line (Permission denied vs timeout vs port in use), instead
+// of per-attempt log spam.
 func superviseTunnel(ctx context.Context, hc hostConfig) {
+	fails := 0
+	audited := false
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+		tail := &tailBuffer{}
 		c := exec.CommandContext(ctx, "ssh", tunnelArgs(hc)...)
-		c.Stdout, c.Stderr = os.Stdout, os.Stderr
+		c.Stdout = os.Stdout
+		c.Stderr = io.MultiWriter(os.Stderr, tail)
+		started := time.Now()
 		_ = c.Run() // returns when the tunnel drops OR the context is cancelled
 		if ctx.Err() != nil {
 			return // relay removed — stop quietly, leaving sibling tunnels alone
 		}
+
+		if time.Since(started) > time.Minute {
+			fails, audited = 0, false // it held — this drop is a disconnect, not a broken config
+		}
+		fails++
+		stderrLine := tail.LastLine()
+
+		if fails >= 5 && !audited {
+			audited = true
+			logTunnelFailure(hc, fails, stderrLine)
+		}
+
+		// Stale reverse-port listener on the relay (a dead prior tunnel holding
+		// the bind): one best-effort cleanup so the NEXT retry binds instead of
+		// failing until sshd times the ghost out.
+		if strings.Contains(stderrLine, "remote port forwarding failed") {
+			cleanupStaleRelayPort(ctx, hc)
+		}
+
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(5 * time.Second): // brief backoff, then reconnect
+		case <-time.After(nextTunnelBackoff(fails)):
 		}
 	}
+}
+
+// nextTunnelBackoff maps consecutive failures to the retry delay:
+// 5s, 30s, 2m, then 10m for everything after.
+func nextTunnelBackoff(consecutiveFails int) time.Duration {
+	steps := []time.Duration{5 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute}
+	if consecutiveFails < 1 {
+		consecutiveFails = 1
+	}
+	if consecutiveFails > len(steps) {
+		return steps[len(steps)-1]
+	}
+	return steps[consecutiveFails-1]
+}
+
+// tailBuffer keeps only the last 4 KB written to it — enough for ssh's final
+// error lines without growing unbounded on a chatty long-lived tunnel.
+type tailBuffer struct {
+	buf []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > 4096 {
+		t.buf = t.buf[len(t.buf)-4096:]
+	}
+	return len(p), nil
+}
+
+// LastLine returns the last non-empty line seen.
+func (t *tailBuffer) LastLine() string {
+	lines := strings.Split(strings.TrimRight(string(t.buf), "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			return l
+		}
+	}
+	return ""
+}
+
+// logTunnelFailure writes the single escalation audit entry for a relay that
+// keeps failing, with the distinguishing stderr line as the reason.
+func logTunnelFailure(hc hostConfig, fails int, stderrLine string) {
+	reason := fmt.Sprintf("relay %s: %d consecutive tunnel failures — last error: %s", hc.Rendezvous, fails, stderrLine)
+	fmt.Fprintf(os.Stderr, "⚠ %s (retrying with escalating backoff, up to 10m)\n", reason)
+	if logger, err := audit.NewLogger(getMemoryPath()); err == nil {
+		defer logger.Close()
+		logger.Log("host-tunnel", "system", "tunnel_failure", hc.Rendezvous, "", reason, "auto")
+	}
+}
+
+// cleanupStaleRelayPort best-effort kills whatever still holds the reverse port
+// on the relay. ponytail: POSIX relays only (fuser); a Windows relay just waits
+// out sshd's own timeout as before.
+func cleanupStaleRelayPort(ctx context.Context, hc hostConfig) {
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	args := []string{"-T",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ConnectTimeout=10",
+		"-o", "BatchMode=yes",
+	}
+	if hc.RendezvousPort != 0 && hc.RendezvousPort != defaultSSHPort {
+		args = append(args, "-p", strconv.Itoa(hc.RendezvousPort))
+	}
+	args = append(args, "--", hc.Rendezvous, fmt.Sprintf("fuser -k %d/tcp >/dev/null 2>&1 || true", hc.ReversePort))
+	_ = exec.CommandContext(cctx, "ssh", args...).Run()
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,6 +1278,49 @@ func recordHostProvision(hc hostConfig, action string) {
 // ---------------------------------------------------------------------------
 // Keep-alive service (per-OS)
 // ---------------------------------------------------------------------------
+
+// selfHealKeepAlive re-installs the keep-alive service when relays are
+// configured but the service is not loaded — the July 2026 field incident:
+// launchd silently dropped the agent and every tunnel stayed down for two days
+// with zero signal. Any long-lived auxly entrypoint (TUI, MCP server) calls
+// this on start, so the first thing that runs after the drop repairs it.
+// Idempotent, best-effort, opt-out via AUXLY_HOST_SELFHEAL=off.
+func selfHealKeepAlive() {
+	if os.Getenv("AUXLY_HOST_SELFHEAL") == "off" {
+		return
+	}
+	relays, ok, err := loadHostConfigs()
+	if err != nil || !ok || len(relays) == 0 {
+		return // not a host — nothing to heal
+	}
+	if loaded, _ := keepAliveStatus(); loaded {
+		return
+	}
+	// Every agent session on a host spawns its own mcp-server PROCESS, and a
+	// keep-alive drop is exactly when many reconnect at once — serialize the
+	// check+install across processes or their unload/load calls interleave and
+	// re-bounce the tunnel supervisor during the recovery window.
+	dir, derr := auxlyDir()
+	if derr != nil {
+		return
+	}
+	unlock, lerr := memory.LockVault(filepath.Join(dir, ".selfheal"))
+	if lerr != nil {
+		return // someone else is healing (or lock unavailable) — done either way
+	}
+	defer unlock()
+	if loaded, _ := keepAliveStatus(); loaded {
+		return // the process that held the lock before us already healed it
+	}
+	if err := installKeepAlive(); err != nil {
+		return // best-effort: broken service manager shouldn't break the TUI/MCP
+	}
+	if logger, lerr := audit.NewLogger(getMemoryPath()); lerr == nil {
+		defer logger.Close()
+		logger.Log("host-tunnel", "system", "keepalive_selfheal", "host.yaml", "",
+			"keep-alive service was not loaded with relays configured — reinstalled automatically", "auto")
+	}
+}
 
 func installKeepAlive() error {
 	exe, err := os.Executable()

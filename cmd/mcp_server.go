@@ -47,6 +47,10 @@ func runMCPServer(cmd *cobra.Command, args []string) error {
 		os.Setenv("AUXLY_REMOTE_HOST", mcpRemoteHost)
 	}
 
+	// A host machine's agents talk to this server constantly — make every MCP
+	// start a chance to repair a silently-unloaded keep-alive service.
+	go selfHealKeepAlive()
+
 	server := mcp.NewServer(getMemoryPath())
 	return server.Run()
 }
