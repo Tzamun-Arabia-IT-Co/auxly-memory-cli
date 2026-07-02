@@ -80,6 +80,17 @@ func AllowedReads(share *ClientShare, allVaultFiles []string) map[string]bool {
 		for _, f := range share.SharedFiles {
 			allowed[f] = true
 		}
+		// A grant naming "projects.md" predates (or intends) the whole projects
+		// CATEGORY: per-project sub-files carry the same shared tier and the
+		// host cannot pre-name slugs it doesn't know yet — without this, moving
+		// facts into projects/<slug>.md silently revokes an existing grant.
+		if allowed["projects.md"] {
+			for _, f := range allVaultFiles {
+				if strings.HasPrefix(f, "projects/") {
+					allowed[f] = true
+				}
+			}
+		}
 		return allowed
 	}
 	for _, f := range allVaultFiles {
@@ -109,6 +120,11 @@ func CanWrite(share *ClientShare, file string, allVaultFiles []string) bool {
 	if share != nil && len(share.WriteFiles) > 0 {
 		for _, f := range share.WriteFiles {
 			if f == file {
+				return true
+			}
+			// Same category expansion as AllowedReads: a projects.md write
+			// grant covers the directory-backed sub-files.
+			if f == "projects.md" && strings.HasPrefix(file, "projects/") {
 				return true
 			}
 		}

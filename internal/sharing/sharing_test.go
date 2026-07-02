@@ -208,3 +208,24 @@ func TestWithDefaultWrite(t *testing.T) {
 		}
 	})
 }
+
+// TestProjectsGrantCoversSubfiles locks the category expansion: an explicit
+// projects.md grant keeps covering projects/<slug>.md — the sprint that moved
+// facts into sub-files must not silently revoke existing §10 grants.
+func TestProjectsGrantCoversSubfiles(t *testing.T) {
+	vault := []string{"projects.md", "projects/auxly.md", "infra.md", "personal.md"}
+	share := &ClientShare{SharedFiles: []string{"projects.md"}, WriteFiles: []string{"projects.md"}}
+	if !CanRead(share, "projects/auxly.md", vault) {
+		t.Fatal("projects.md read grant must cover projects/ sub-files")
+	}
+	if !CanWrite(share, "projects/auxly.md", vault) {
+		t.Fatal("projects.md write grant must cover projects/ sub-files")
+	}
+	if CanRead(share, "infra.md", vault) {
+		t.Fatal("expansion must not widen beyond the projects category")
+	}
+	other := &ClientShare{SharedFiles: []string{"infra.md"}}
+	if CanRead(other, "projects/auxly.md", vault) {
+		t.Fatal("a grant without projects.md must not see sub-files")
+	}
+}

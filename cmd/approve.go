@@ -53,7 +53,9 @@ func selectPending(mgr *pending.Manager, all bool, agent, file string) ([]string
 		if ierr != nil {
 			continue
 		}
-		if agent != "" && info.Agent != agent {
+		// "--agent claude-code" also matches auto-captured entries from that
+		// agent ("capture:claude-code") — one flag covers one agent's queue.
+		if agent != "" && info.Agent != agent && info.Agent != "capture:"+agent {
 			continue
 		}
 		// Normalize both sides: writers store the target verbatim, so

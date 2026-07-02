@@ -139,3 +139,22 @@ func TestSweepDisabledByEnv(t *testing.T) {
 		t.Fatalf("entry missing: %+v", files)
 	}
 }
+
+// TestApproveFirstProjectSubfile locks the AtomicWriteFile parent-dir fix: the
+// FIRST-ever approve targeting projects/<slug>.md (fresh vault, no projects/
+// dir) must create the directory and apply — this failed with ENOENT before.
+func TestApproveFirstProjectSubfile(t *testing.T) {
+	root := t.TempDir()
+	m := NewManager(root)
+	name, err := m.WriteFrom("projects/widget-app.md", "+ - first fact\n", "claude-code")
+	if err != nil {
+		t.Fatalf("WriteFrom: %v", err)
+	}
+	if err := m.Approve(name); err != nil {
+		t.Fatalf("Approve of first sub-file pending: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "projects", "widget-app.md"))
+	if err != nil || !strings.Contains(string(data), "first fact") {
+		t.Fatalf("sub-file not written: %v %q", err, data)
+	}
+}

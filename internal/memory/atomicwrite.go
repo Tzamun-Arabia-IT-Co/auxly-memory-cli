@@ -16,6 +16,12 @@ import (
 // this instead of os.WriteFile.
 func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
+	// Directory-backed names (projects/<slug>.md) may target a not-yet-created
+	// parent; every write path (including pending approve) must succeed on the
+	// FIRST such write, so the helper owns parent creation.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(dir, ".auxly-tmp-*")
 	if err != nil {
 		return err

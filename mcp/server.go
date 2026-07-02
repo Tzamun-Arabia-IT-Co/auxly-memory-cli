@@ -1086,9 +1086,13 @@ func (s *Server) toolSkillSync(content, category, scope string) toolResult {
 	fileName := memory.FileForCategory(category)
 	// Per-project sub-files: a projects fact written from a workspace lands in
 	// that project's own file (projects/<repo-slug>.md) instead of the shared
-	// monolith, so two repos never interleave their notes.
+	// monolith, so two repos never interleave their notes. The slug ALREADY
+	// encodes the workspace, so the write is pinned to the global vault — a
+	// workspace-scoped copy of the same slug would shadow the global one only
+	// for callers inside that repo and split the fact history in two.
 	if category == "projects" {
 		fileName = memory.ProjectFile(s.store.WorkspaceRoot)
+		scope = "global"
 	}
 
 	// Dynamic trust verification
@@ -1320,8 +1324,20 @@ func (s *Server) toolSkillLearn(folder, topic string) toolResult {
 		fileName := ""
 		if _, ok := memory.CategoryBySlug(folder); ok {
 			fileName = memory.FileForCategory(folder)
+			// "learn projects" from a workspace means THIS project's facts —
+			// the per-project sub-file when it exists, monolith otherwise.
+			if folder == "projects" {
+				if pf := memory.ProjectFile(s.store.WorkspaceRoot); s.canRead(pf) && fileHasContent(s, pf) {
+					fileName = pf
+				}
+			}
 		} else if c, ok := memory.CategoryForFile(folder); ok {
 			fileName = c.File
+			// An explicit sub-file name ("projects/auxly.md") means that exact
+			// file — CategoryForFile only identifies its category.
+			if norm := strings.ReplaceAll(folder, "\\", "/"); strings.Contains(norm, "/") {
+				fileName = norm
+			}
 		}
 
 		if fileName == "" {

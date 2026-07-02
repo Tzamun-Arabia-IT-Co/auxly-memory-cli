@@ -1232,7 +1232,12 @@ func runConnectAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	_ = provisionRemote(p, backAddr)
+	if err := provisionRemote(p, backAddr); err != nil {
+		// The connect's actual goal is the memory link — a wiring failure must
+		// never hide behind a green summary (the box may be entirely unconfigured).
+		fmt.Printf("✗ memory-link wiring failed: %v\n", err)
+		return err
+	}
 	printConnectSummary(p)
 	return nil
 }
@@ -1317,7 +1322,12 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	_ = provisionRemote(p, backAddr)
+	if err := provisionRemote(p, backAddr); err != nil {
+		// The connect's actual goal is the memory link — a wiring failure must
+		// never hide behind a green summary (the box may be entirely unconfigured).
+		fmt.Printf("✗ memory-link wiring failed: %v\n", err)
+		return err
+	}
 	printConnectSummary(p)
 	return nil
 }
@@ -2138,7 +2148,10 @@ func runConnectWizard() error {
 	}
 
 	// Step 6: wire the box's agents to this machine's memory (or --standalone).
-	_ = provisionRemote(p, backAddr)
+	if err := provisionRemote(p, backAddr); err != nil {
+		fmt.Printf("✗ memory-link wiring failed: %v\n", err)
+		return err
+	}
 
 	// Step 7: summary.
 	printConnectSummary(p)

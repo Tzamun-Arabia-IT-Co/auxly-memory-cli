@@ -33,6 +33,21 @@ func (s *Server) maybeSupersede(file, diff string) string {
 	}
 
 	lines := strings.Split(diff, "\n")
+	// The MCP request loop is synchronous — every embed round-trip here stalls
+	// ALL of this agent's tool calls. Single-fact syncs (the contradiction
+	// case) get checked; bulk imports skip, and a slow endpoint can never hold
+	// a write hostage for more than the overall budget.
+	added := 0
+	for _, dl := range lines {
+		if strings.HasPrefix(dl, "+") && !strings.HasPrefix(dl, "+++") && strings.TrimSpace(strings.TrimPrefix(dl, "+")) != "" {
+			added++
+		}
+	}
+	if added == 0 || added > 3 {
+		return diff
+	}
+	deadline := time.Now().Add(6 * time.Second)
+
 	out := make([]string, 0, len(lines)+4)
 	for _, dl := range lines {
 		if !strings.HasPrefix(dl, "+") || strings.HasPrefix(dl, "+++") {
@@ -45,7 +60,11 @@ func (s *Server) maybeSupersede(file, diff string) string {
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		if time.Now().After(deadline) {
+			out = append(out, dl)
+			continue // overall budget spent — remaining lines append plainly
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		hits, err := s.store.Recall(ctx, fact, 3, emb, func(f string) bool { return f == file })
 		cancel()
 		if err != nil {

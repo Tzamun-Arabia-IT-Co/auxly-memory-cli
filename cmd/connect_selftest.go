@@ -38,7 +38,27 @@ type selftestToolContent struct {
 	Text string `json:"text"`
 }
 
+// runConnectSelftest probes the memory link end to end. It walks the SAME
+// host_bin fallback chain as the real launcher (runConnectMCP) — a probe that
+// only tries the configured host_bin would report FAIL hostbin for a link the
+// agents' launcher would transparently recover, poisoning every health surface
+// built on this signal (doctor, host clients, provisioning).
 func runConnectSelftest(p remoteProfile) error {
+	var lastErr error
+	for _, bin := range hostBinCandidates(p) {
+		err := runConnectSelftestWith(p, bin)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !strings.Contains(err.Error(), "selftest hostbin") {
+			return err // real failure — don't mask it behind candidate walking
+		}
+	}
+	return lastErr
+}
+
+func runConnectSelftestWith(p remoteProfile, bin string) error {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -66,7 +86,7 @@ func runConnectSelftest(p remoteProfile) error {
 	sshArgs = append(sshArgs, p.SSHArgs...)
 	sshArgs = append(sshArgs, "--", connTarget(p))
 	serverArgs := []string{
-		hostAuxlyBin(p),
+		bin,
 		"mcp-server",
 		"--provider", provider,
 		"--source", "ssh-remote",
