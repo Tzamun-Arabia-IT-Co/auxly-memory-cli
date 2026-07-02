@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-02
+
+The biggest release since 1.0: memory data-safety, per-project memory,
+seamless remote setup with self-healing links, passive auto-capture, and the
+groundwork for signed Windows releases. Every sprint shipped through an
+adversarial review pass — 26 findings caught and fixed before release.
+
+### Added
+
+- **Per-project memory files.** Project facts now live in `projects/<slug>.md`
+  (one file per repo/product) instead of one growing monolith. Agents route
+  project facts automatically from the workspace; list/recall/organize/sharing
+  all understand the new layout.
+- **`auxly organize --split-projects`.** One command migrates an existing
+  `projects.md` monolith into per-project files. Safety-first by construction:
+  the original is backed up, every piece goes through the pending queue for
+  your approval, a mechanical permutation check rejects any dropped or reworded
+  fact (no force override), and the monolith cleanup is only ever queued for
+  bullets already approved into a sub-file — a rejected split can never lose a
+  fact.
+- **Passive auto-capture (opt-in).** `auxly hooks install` adds a Claude Code
+  Stop hook that runs `auxly capture` after each session: an LLM pass extracts
+  durable facts from the transcript and queues them as pending changes — memory
+  learns from your sessions, you still approve every write.
+- **Session primer.** `skill_init` now returns a compact "who you are / top
+  preferences / this project / last 7 days" primer (~800 tokens, ACL-gated) so
+  every session starts grounded without a manual recall.
+- **Write-time supersede.** When a new fact contradicts an existing one in the
+  same file, the old line is replaced with a dated `(updated …; was: …)` trace
+  instead of piling up stale duplicates. Disable with `AUXLY_SUPERSEDE=off`.
+- **Pending queue, grown up.** `auxly pending` table (agent, target, age, ±);
+  agent attribution on every entry; bulk `auxly approve|reject --all / --agent
+  <name> / --file <target>`; expired entries auto-archive after 30 days
+  (`AUXLY_PENDING_TTL_DAYS`, 0 disables); trust changes are audit-logged.
+- **Seamless remote connect.** `auxly connect <box>` now provisions the box
+  end-to-end from the host's screen — installs auxly, wires its agents to THIS
+  machine's memory, and proves the link with a real end-to-end read
+  (`connect-mcp --selftest`) before claiming success. The old
+  standalone-vault behavior lives under `--standalone`.
+- **Self-healing remote links.** Keep-alive service self-heals on any long-
+  lived auxly start; tunnels reconnect with exponential backoff and audit after
+  repeated failures; an hourly reconciler re-wires drifted clients; a fallback
+  chain recovers moved host binaries; agents on a box show a "MEMORY LINK LOST"
+  banner instead of silently reading stale local files.
+- **Remote health at a glance.** `auxly host clients` health table
+  (reachable/auxly/wired/link/last-activity), `auxly host versions --health`,
+  live link verdicts in the TUI Remote tab, `auxly doctor` probes every remote
+  memory link with the real selftest and flags duplicate/orphan topology.
+- **Simpler connect wizard.** Three choices instead of five (relay / direct /
+  bastion) — "direct" auto-detects LAN vs public from the address; the OS
+  question is gone (auto-probed and persisted); the host field Tab-completes
+  from `~/.ssh/config`.
+- **Recall quality.** Relevance floor (default 0.35, `AUXLY_RECALL_MIN_SCORE`)
+  with substring fallback instead of confidently-wrong low-score hits; gentle
+  recency boost; index handle reuse + freshness signature make repeat recalls
+  markedly faster on large vaults.
+- **Windows trust groundwork.** Release pipeline carries a dormant SignPath
+  Authenticode signing hook (activates when credentials land) and RELEASING.md
+  documents the full $0 path: SignPath OSS signing, Defender false-positive
+  submission, winget distribution.
+
+### Fixed
+
+- **Data-safety core (Sprint 1).** Atomic vault writes, cross-process locking,
+  conflict detection on approve, and a fact-loss guard on organize.
+- `--force` combined with bulk approve flags is now rejected instead of
+  silently force-applying every conflicted entry.
+- Provisioning failures no longer hide behind a green "provisioned!" banner —
+  every wiring error surfaces and fails the command.
+- The first approve targeting a brand-new `projects/<slug>.md` no longer fails
+  with a missing-directory error.
+- An explicit sharing grant naming `projects.md` now also covers
+  `projects/<slug>.md` sub-files instead of silently revoking access after a
+  split.
+- OS auto-detection actually persists now — profiles no longer default to
+  "linux", which had blocked detection since the feature shipped.
+- Retrying a connection method no longer wipes a previously declared OS;
+  bracketed IPv6 addresses parse correctly in the wizard.
+- Windows release exe embeds PE version-info to reduce Defender false
+  positives.
+
 ## [1.1.5] - 2026-06-17
 
 Fixes Memory Organize hanging / failing with CLI agents. The organize code was

@@ -25,27 +25,18 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.1.5
+## 🆕 What's New in Version 1.2.0
 
-**Memory Organize works again across every CLI agent.** Newer agent CLIs had started *narrating* ("Let me read the files…", "the input was truncated") instead of returning the JSON the consolidation needs — so organize hung or failed with `invalid character 'L'`. Now a front-loaded **response contract** forces clean JSON-only output, a non-JSON reply **auto-retries once**, **Cursor** runs headless via read-only `--mode ask` + `--trust` (it was blocked on a workspace-trust prompt), and the default timeout is raised to **900s**. Verified end-to-end with **Claude, Codex, Gemini, Antigravity (agy), and Cursor**. Tip: for very large vaults, a direct-API provider (Gemini/OpenAI) is the fastest path.
+**The biggest release since 1.0** — memory that organizes itself, remote links that heal themselves, and sessions that teach your memory.
 
-## 🆕 What's New in Version 1.1.4
+- **📁 Per-project memory.** Project facts now live in `projects/<slug>.md` — one file per repo — routed automatically from your workspace. Migrate an existing monolith with `auxly organize --split-projects`: backed up first, every piece human-approved, and a mechanical fact-loss gate means the split *cannot* drop a fact.
+- **🪄 Passive auto-capture (opt-in).** `auxly hooks install` — after each Claude Code session, durable facts are extracted from the transcript and queued for your approval. Your memory learns while you work.
+- **🧠 Session primer + supersede.** Sessions start pre-grounded (who you are, top preferences, this project, last 7 days), and a new fact that contradicts an old one *replaces* it with a dated `was:` trace instead of piling up stale lines.
+- **🔗 Seamless remote connect.** `auxly connect <box>` provisions a box end-to-end from your screen — installs auxly, wires its agents to *your* memory, and proves the link with a real read before claiming success. Links self-heal: keep-alive auto-repairs, tunnels back off and reconnect, an hourly reconciler re-wires drift, and agents show **MEMORY LINK LOST** instead of silently reading stale data. Watch it all in `auxly host clients` or the dashboard's Remote tab health cells.
+- **✅ Pending queue, grown up.** `auxly pending` table with agent attribution, bulk `approve|reject --all / --agent / --file`, 30-day auto-archive, and better recall (relevance floor + recency, faster repeat queries).
+- **🪟 Windows trust groundwork.** PE version-info embedded in release exes and a dormant Authenticode signing hook — the $0 signed-release path (SignPath + Defender submission + winget) is staged in RELEASING.md.
 
-**Kimi Code CLI now gets skills too.** Kimi already auto-configured the Auxly MCP server; now `auxly setup`/`auxly connect` also install the Auxly slash-command skills (`/auxly-init`, `/auxly-sync`, `/auxly-memory`, …) and register them in Kimi's `config.toml` (`extra_skill_dirs`) — fully automatic, no manual steps, the same one-command experience as Claude and Cursor. Works on both the current `~/.kimi-code` and legacy `~/.kimi` installs.
-
-### 🪟 Windows fixes (1.1.2 – 1.1.3)
-
-**Windows, fixed end-to-end.** The full Windows experience now matches macOS/Linux — one installer command wires MCP, the statusline, and skills, with no manual steps. All changes are OS-gated, so macOS and Linux behavior is unchanged.
-
-
-- **MCP config now lands for Claude Desktop & every IDE.** Config paths resolve through the same detection helper with an `%APPDATA%`-empty fallback, so non-interactive / SSH-provisioned setups no longer silently skip Claude Desktop, Cursor, and Antigravity.
-- **The statusline now installs *and* renders.** `auxly setup` auto-installs the statusline (previously only `auxly connect` did), and the command is written with a forward-slash path so the agent's shell can actually launch it — a Windows backslash path was silently failing and rendering blank.
-- **Stable MCP for every provider.** Provider attribution is computed once per process instead of cold-starting PowerShell on every request, so strict clients no longer stall and drop the connection.
-- **Faster dashboard.** The TUI takes a single cached process snapshot per refresh instead of spawning one PowerShell per connection every second.
-- **Self-update, host-tunnel status, and agent detection** all work on Windows now (rename-aside over the locked `.exe`; `ssh.exe` tunnel detection instead of the Unix-only `pgrep`; `PATH`/`PATHEXT`-aware CLI discovery during onboarding).
-- **Cleaner updates (1.1.3).** `auxly update` now updates **npm/pip** installs through their package manager instead of a self-replace that fails on a locked binary, shows the Windows installer in its hints, and the dashboard `[U]` update works on Windows just like macOS.
-
-Looking for **Semantic Recall** (the `auxly_memory_recall` tool from 1.1.0) or the reconnect self-heal from 1.1.1? See the [CHANGELOG](CHANGELOG.md) for the full history — including 1.0.20's security hardening and signed releases.
+Looking for **1.1.x** (organize agent fixes, Kimi skills, the Windows end-to-end pass), **Semantic Recall** from 1.1.0, or 1.0.20's security hardening? See the [CHANGELOG](CHANGELOG.md) for the full history.
 
 ---
 
@@ -724,6 +715,12 @@ Auxly is a standard **stdio MCP server**, so *any* MCP-capable tool can share th
 | `auxly list` / `view <file>` | List or view memory files |
 | `auxly search <query>` | Search across all memory |
 | `auxly write …` | Write a change (used by agents/wrappers) |
+| `auxly pending` | List queued memory changes awaiting approval |
+| `auxly approve \| reject <id>` | Apply or discard a pending change (`--all`, `--agent <name>`, `--file <target>` for bulk) |
+| `auxly organize` | LLM consolidation of the vault (`--split-projects` migrates projects.md into per-project files) |
+| `auxly capture` | Extract durable facts from a session transcript into the pending queue |
+| `auxly hooks install \| uninstall` | Wire/unwire auto-capture into Claude Code |
+| `auxly doctor` | One-screen health check (vault, agents, remote links, host topology) |
 | `auxly trust list \| set <provider> <level>` | Manage access control |
 | `auxly tail` | Stream the audit log |
 | `auxly stats` | Memory & write statistics |
