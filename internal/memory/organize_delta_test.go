@@ -201,3 +201,34 @@ func TestDeltaMode_EnvOptIn(t *testing.T) {
 		t.Fatalf("delta delete did not run via env opt-in: %q", byName["projects.md"].NewContent)
 	}
 }
+
+// TestDeltaMode_LiftsChunkThreshold proves a vault that would normally chunk
+// (over organizeChunkThreshold but under deltaChunkThreshold) instead runs as
+// ONE whole-vault delta call when delta is on — the fix for the user's ~40k
+// vault paying N CLI-agent cold-starts.
+func TestDeltaMode_LiftsChunkThreshold(t *testing.T) {
+	t.Setenv("AUXLY_ORGANIZE_DELTA", "1")
+	root := t.TempDir()
+	s := &Store{Root: root}
+	// ~15k tokens: over the 12k default chunk threshold, under the 80k delta
+	// ceiling. Without the lift this chunks (per-file); with it, one delta call.
+	writeVaultFile(t, root, "projects.md", bullets(3200, "keep")+"- duplicate fact\n- duplicate fact\n")
+	writeVaultFile(t, root, "infra.md", bullets(1200, "infra"))
+
+	calls := 0
+	exec := func(ctx context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+		calls++
+		resp := deltaResp(deltaOp{Op: "delete", File: "projects.md", Bullet: "- duplicate fact"})
+		return organizeRun{jsonContent: resp, modelUsed: "fake", tokensUsed: 5}, OrganizeResult{}, true
+	}
+	if est := estimateVaultTokens([]organizeFile{{Content: bullets(3200, "keep")}, {Content: bullets(1200, "infra")}}); est <= organizeChunkThreshold() {
+		t.Fatalf("test vault too small to exercise the lift: est=%d threshold=%d", est, organizeChunkThreshold())
+	}
+	_, res := s.planOrganizeOpts(context.Background(), "", false, OrganizeRunOpts{}, exec)
+	if !res.Success {
+		t.Fatalf("plan failed: %s", res.Message)
+	}
+	if calls != 1 {
+		t.Fatalf("expected ONE whole-vault delta call, got %d (chunked per-file?)", calls)
+	}
+}

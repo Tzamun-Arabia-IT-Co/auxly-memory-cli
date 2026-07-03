@@ -975,12 +975,25 @@ func (s *Store) planOrganizeOpts(ctx context.Context, agentPath string, skipEncr
 
 	var prop OrganizeProposal
 	var res OrganizeResult
+	// The chunk threshold exists to stop a huge WHOLE-VAULT rewrite from
+	// degrading quality / hitting context limits (the v1.1.5 lesson) — but that
+	// risk was about the giant OUTPUT. Delta mode's output is a handful of ops
+	// regardless of input size, and modern models read 80k tokens easily, so a
+	// delta run lifts the chunk ceiling: a 40k vault does ONE whole-vault delta
+	// call (one CLI-agent cold-start) instead of one call per file (N cold-
+	// starts) — the actual reason a big vault felt slow. An explicit user
+	// AUXLY_ORGANIZE_CHUNK_TOKENS still wins.
+	deltaOn := opts.DeltaMode || organizeDeltaEnabled()
+	threshold := organizeChunkThreshold()
+	if deltaOn && os.Getenv("AUXLY_ORGANIZE_CHUNK_TOKENS") == "" && threshold < deltaChunkThreshold {
+		threshold = deltaChunkThreshold
+	}
 	switch {
-	case len(files) > 1 && estimateVaultTokens(files) > organizeChunkThreshold():
-		// Chunked path already pays its own cost-per-call in file count, not
-		// payload size, so DeltaMode (a payload-size lever) doesn't apply here.
+	case len(files) > 1 && estimateVaultTokens(files) > threshold:
+		// Above even the delta ceiling: fall back to one call per file so an
+		// enormous vault still fits. (Per-file delta is a future lever.)
 		prop, res = s.planOrganizeChunked(ctx, exec, files)
-	case opts.DeltaMode || organizeDeltaEnabled():
+	case deltaOn:
 		// Delta is the biggest single-run latency lever (op-based output instead
 		// of full-file rewrites). Opt-in via AUXLY_ORGANIZE_DELTA while it proves
 		// out on real vaults; organize is review-gated and planOrganizeDelta
@@ -1008,6 +1021,13 @@ func estimateVaultTokens(files []organizeFile) int {
 	}
 	return total/4 + 800
 }
+
+// deltaChunkThreshold is the raised whole-vault ceiling used when delta mode is
+// on. Delta's output is small ops regardless of input, so the payload-quality
+// risk that keeps the default threshold low doesn't apply — this lets a typical
+// multi-file vault (the ~40k the user hit) run as ONE whole-vault delta call
+// instead of N per-file calls, each with its own CLI-agent cold-start.
+const deltaChunkThreshold = 80000
 
 // organizeChunkThreshold is the estimated-token size above which organize
 // switches from one whole-vault model call to one call per file. Large vaults
