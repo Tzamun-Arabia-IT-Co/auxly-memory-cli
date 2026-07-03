@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-07-03
+
+A UX and performance follow-up to 1.3.0, driven by real-vault feedback. Faster
+memory organization, a simpler password-based encryption option, a stable
+dashboard, and full TUI parity — every organize mode and user-facing command is
+now reachable from the dashboard, not just the CLI. Each change shipped through
+an adversarial review pass; the temporary-decrypt path alone caught 6 findings
+(2 critical) before merge.
+
+### Added
+
+- **Password-based encryption.** `auxly encrypt init --passphrase` lets you
+  encrypt the vault with your own password (age scrypt) instead of managing a
+  keypair and a 60-character backup key. The password is cached in the OS
+  keychain so reads stay transparent, and `AUXLY_VAULT_PASSPHRASE` unlocks
+  headless runs. The keypair mode remains the default. A forgotten passphrase
+  has no recovery — the init prompt says so plainly.
+- **Organize encrypted files without a dead end.** When a CLI-agent organize run
+  meets encrypted files, you can now choose to skip them for that run, or
+  temporarily decrypt them — they are re-encrypted automatically when the run
+  finishes. A crash-recovery marker re-encrypts anything left plaintext by an
+  interrupted run on the next `auxly doctor` or dashboard open, and git sync
+  refuses to commit while a temporary decrypt is in progress.
+- **All organize modes in the TUI.** The Memory Org tab gained a mode selector —
+  Consolidate, Split projects, and Find contradictions all run from the
+  dashboard now, with results routed to the Approvals tab for review.
+- **Full TUI parity.** Vault encryption (status, init, per-file encrypt/decrypt),
+  index status and rebuild, trust-tuning suggestions, `auxly join` pairing, git
+  sync, capture-hook install/status, and the doctor report are all reachable
+  from the dashboard. Only inter-process plumbing stays CLI-only.
+
+### Changed
+
+- **Memory organize is much faster.** A content-hash ledger skips files that
+  haven't changed since the last run — a tidy vault now makes zero model calls
+  instead of always reprocessing everything — and the per-file (chunked) path
+  runs in parallel. A whole-vault run that previously reprocessed every file now
+  touches only what changed.
+
+### Fixed
+
+- **Splitting a bold-bulleted `projects.md` no longer fails every run.** The
+  split guard rejected any bullet the model returned with its `**bold**` markers
+  stripped, aborting the whole migration. It now matches on an emphasis-normalized
+  form while writing the original text verbatim; an unmatched bullet stays safely
+  in `projects.md` and is reported instead of killing the run, and nested bullets
+  move as a unit.
+- **The dashboard no longer hides sections at random.** A momentary empty audit
+  or store read used to blank the memory-by-category bars, last-write line, and
+  activity feed until the next refresh; populated sections are now retained, the
+  first paint shows structure instead of a blank skeleton, and the live activity
+  feed is the last thing dropped under height pressure so recent changes stay
+  visible.
+- **`auxly host invite` copies the token to your clipboard** on mint (and `[y]`
+  in the TUI), so a long single-use token no longer has to be selected by hand.
+
+### Security
+
+- The temporary-decrypt organize path was hardened before release: git sync and
+  auto-commit refuse while plaintext is exposed (a concurrent commit would
+  otherwise push it into history permanently), the crash-recovery marker is a
+  locked merged set so concurrent runs can't erase each other's recovery, consent
+  is explicit that decrypted content is briefly visible on the process command
+  line, and the TUI blocks quitting mid-re-encrypt.
+- TUI encryption input is isolated from global keys — entering a passphrase that
+  contains a digit or `q` can no longer switch tabs or quit the app mid-entry,
+  and key material is cleared from memory when you leave the panel.
+
 ## [1.3.0] - 2026-07-03
 
 The first release with vault encryption at rest, one-command SSH pairing,
