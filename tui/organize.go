@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +14,9 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/embed"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -30,6 +33,31 @@ const (
 	orgEditing
 	orgDone
 )
+
+// orgRunMode is the top-of-tab mode selector (Sprint 4): which of the three
+// `auxly organize` modes the idle screen is about to run. Split projects and
+// Find contradictions skip the provider/model picker entirely (both are
+// Direct LLM / embeddings only) and land their results in the pending queue
+// instead of this tab's own review pane — see orgRunModeInfos and
+// nonConsolidateIdleView.
+type orgRunMode int
+
+const (
+	orgRunModeConsolidate orgRunMode = iota
+	orgRunModeSplit
+	orgRunModeContradictions
+)
+
+type orgRunModeInfo struct {
+	label string
+	desc  string
+}
+
+var orgRunModeInfos = [...]orgRunModeInfo{
+	orgRunModeConsolidate:    {"Consolidate", "Merge, dedupe, and reorganize your memory files using a provider you choose."},
+	orgRunModeSplit:          {"Split projects", "Break projects.md into one file per project (Direct LLM) — queued in Approvals."},
+	orgRunModeContradictions: {"Find contradictions", "Find cross-file contradicting or duplicate facts (embeddings + Direct LLM) — queued in Approvals."},
+}
 
 type orgDecision int
 
@@ -98,6 +126,12 @@ type organizeModel struct {
 	mode       orgMode
 	width      int
 	height     int
+
+	// runMode selects which of the three `auxly organize` modes Enter runs
+	// from the idle screen (Sprint 4 mode selector); zero value is
+	// Consolidate, so every pre-Sprint-4 test that never touches runMode
+	// keeps exercising exactly the same path it always did.
+	runMode orgRunMode
 
 	provIdx     int
 	focus       orgFocus
@@ -549,6 +583,42 @@ func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
 		}
 	}
 	switch msg := msg.(type) {
+	case orgSplitRunMsg:
+		// A cancelled run already left orgRunning — drop a late result
+		// instead of flashing its summary/error over whatever the user did next.
+		if m.mode != orgRunning {
+			return m, nil
+		}
+		if m.runCancel != nil {
+			m.runCancel()
+			m.runCancel = nil
+		}
+		m.mode = orgIdle
+		if msg.err != "" {
+			m.errMsg = msg.err
+			m.status = ""
+		} else {
+			m.errMsg = ""
+			m.status = msg.summary
+		}
+		return m, nil
+	case orgContradictionsRunMsg:
+		if m.mode != orgRunning {
+			return m, nil
+		}
+		if m.runCancel != nil {
+			m.runCancel()
+			m.runCancel = nil
+		}
+		m.mode = orgIdle
+		if msg.err != "" {
+			m.errMsg = msg.err
+			m.status = ""
+		} else {
+			m.errMsg = ""
+			m.status = msg.summary
+		}
+		return m, nil
 	case orgTempDecryptedMsg:
 		if msg.err != nil {
 			m.errMsg = "Could not decrypt for this run: " + msg.err.Error()
@@ -918,6 +988,28 @@ func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 		return m, cmd
 	}
 
+	// Mode selector: h/l cycle Consolidate ↔ Split projects ↔ Find
+	// contradictions. Neither key is bound to anything else on this idle
+	// screen, so nothing below ever collides with it.
+	switch msg.String() {
+	case "h":
+		m.cycleRunMode(-1)
+		return m, nil
+	case "l":
+		m.cycleRunMode(1)
+		return m, nil
+	}
+
+	// Split projects / Find contradictions skip the provider/model picker
+	// entirely — Enter runs immediately (no argv/ps exposure to gate behind
+	// a choice like the agent path below: both are Direct LLM/embeddings).
+	if m.runMode != orgRunModeConsolidate {
+		if msg.String() == "enter" {
+			return m.startNonConsolidateRun()
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "up", "k":
 		if m.focus == focusModel {
@@ -1021,6 +1113,165 @@ func (m organizeModel) startRun() (organizeModel, tea.Cmd) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.runCancel = cancel
 	return m, tea.Batch(m.runPlanCmd(ctx), orgSpinTick())
+}
+
+// cycleRunMode moves the top-of-tab mode selector by delta, wrapping —
+// Consolidate ↔ Split projects ↔ Find contradictions. Switching modes clears
+// any stale status/error from a previous run so the new mode's idle screen
+// starts clean.
+func (m *organizeModel) cycleRunMode(delta int) {
+	n := len(orgRunModeInfos)
+	m.runMode = orgRunMode((int(m.runMode) + delta + n) % n)
+	m.status = ""
+	m.errMsg = ""
+}
+
+// startNonConsolidateRun launches the Split projects / Find contradictions
+// run: no provider/model picker (both are Direct LLM / embeddings only), so
+// Enter drops straight into the orgRunning spinner screen. The actual LLM /
+// embedding work happens inside the dispatched tea.Cmd — never here — so
+// Update never blocks.
+func (m organizeModel) startNonConsolidateRun() (organizeModel, tea.Cmd) {
+	m.mode = orgRunning
+	m.spin = 0
+	m.runProgress = 20
+	m.status = ""
+	m.errMsg = ""
+	m.runModel = ""
+	ctx, cancel := context.WithCancel(context.Background())
+	m.runCancel = cancel
+	switch m.runMode {
+	case orgRunModeSplit:
+		m.runProvider = "Direct LLM"
+		return m, tea.Batch(m.runSplitCmd(ctx), orgSpinTick())
+	case orgRunModeContradictions:
+		m.runProvider = "Embeddings + Direct LLM"
+		return m, tea.Batch(m.runContradictionsCmd(ctx), orgSpinTick())
+	}
+	return m, nil
+}
+
+// orgSplitRunMsg carries the result of the TUI's Split projects run —
+// tui-only counterpart to cmd/organize.go's runSplitProjects, built on the
+// same shared memory.Store.PlanSplitProjectsRun core.
+type orgSplitRunMsg struct {
+	summary string
+	err     string
+}
+
+// runSplitCmd runs memory.Store.PlanSplitProjectsRun (the same core
+// runSplitProjects uses) and queues whatever it computes via the pending
+// package — memory.Store can't do that itself (internal/pending already
+// imports internal/memory). No progress hooks: the orgRunning spinner is
+// this mode's only "still working" feedback.
+func (m organizeModel) runSplitCmd(ctx context.Context) tea.Cmd {
+	store := m.store
+	memPath := m.memoryPath
+	return func() tea.Msg {
+		result, err := store.PlanSplitProjectsRun(ctx, memPath, nil)
+		mgr := pending.NewManager(memPath)
+		// The cleanup diff (if any) was computed before the possibly-failing
+		// planning call — queue and report it regardless of err, matching
+		// runSplitProjects' cmd-side handling.
+		if result.CleanupWrite != nil {
+			if _, werr := mgr.WriteFrom(result.CleanupWrite.TargetFile, result.CleanupWrite.Diff, "organize-split"); werr != nil {
+				return orgSplitRunMsg{err: "queue projects.md cleanup: " + werr.Error()}
+			}
+		}
+		if err != nil {
+			return orgSplitRunMsg{err: err.Error()}
+		}
+		queuedBullets, queuedFiles := 0, 0
+		for _, w := range result.Writes {
+			if _, werr := mgr.WriteFrom(w.TargetFile, w.Diff, "organize-split"); werr != nil {
+				return orgSplitRunMsg{err: fmt.Sprintf("queue %s: %v", w.TargetFile, werr)}
+			}
+			queuedBullets += w.Count
+			queuedFiles++
+		}
+		return orgSplitRunMsg{summary: splitRunSummary(result, queuedBullets, queuedFiles)}
+	}
+}
+
+// splitRunSummary renders the TUI's one-line Split projects result,
+// mirroring runSplitProjects' CLI messages but always pointing at the
+// Approvals tab — results never get a bespoke review pane here (design: the
+// pending queue IS the review for both non-Consolidate modes).
+func splitRunSummary(result memory.SplitProjectsResult, queuedBullets, queuedFiles int) string {
+	if result.NothingToSplit {
+		return "Nothing to split — no bullets could be attributed to a specific project."
+	}
+	var lines []string
+	if result.CleanupWrite != nil {
+		lines = append(lines, fmt.Sprintf("Queued removal of %d bullet(s) already moved to sub-files from projects.md.", result.CleanupWrite.Count))
+	}
+	if !result.CleanupOnly {
+		msg := fmt.Sprintf("Queued %d addition(s) across %d project file(s)", queuedBullets, queuedFiles)
+		if result.SkippedCount > 0 {
+			msg += fmt.Sprintf("; %d bullet(s) couldn't be matched and stay in projects.md", result.SkippedCount)
+		}
+		lines = append(lines, msg+".")
+	}
+	lines = append(lines, "Review in Approvals (tab 4), approve with agent organize-split. Re-run to queue the monolith cleanup.")
+	return strings.Join(lines, " ")
+}
+
+// orgContradictionsRunMsg carries the result of the TUI's Find
+// contradictions run — tui-only counterpart to cmd/organize.go's
+// runContradictions, built on the same shared
+// memory.Store.PlanContradictionsRun core.
+type orgContradictionsRunMsg struct {
+	summary string
+	err     string
+}
+
+// contradictionsErrSummary maps a PlanContradictionsRun error to the TUI's
+// one-line message, mirroring cmd/organize.go's embeddings-unavailable /
+// vault-too-large messages exactly (both are clean, non-error stops there —
+// ok=true routes to m.status here, not m.errMsg). ok=false means it's a real
+// failure the CLI would also propagate as an error. Split out from
+// runContradictionsCmd so this mapping is testable without a live embedder.
+func contradictionsErrSummary(err error) (summary string, ok bool) {
+	if errors.Is(err, embed.ErrUnavailable) {
+		return "Contradiction check needs embeddings — configure a provider (auxly index status).", true
+	}
+	if errors.Is(err, memory.ErrVaultTooLarge) {
+		return err.Error(), true
+	}
+	return err.Error(), false
+}
+
+// runContradictionsCmd runs memory.Store.PlanContradictionsRun (the same
+// core runContradictions uses) and queues every non-skipped finding via the
+// pending package, mirroring cmd/organize.go's embeddings-unavailable /
+// vault-too-large / zero-findings messages.
+func (m organizeModel) runContradictionsCmd(ctx context.Context) tea.Cmd {
+	store := m.store
+	memPath := m.memoryPath
+	return func() tea.Msg {
+		result, err := store.PlanContradictionsRun(ctx, embed.New())
+		if err != nil {
+			if summary, ok := contradictionsErrSummary(err); ok {
+				return orgContradictionsRunMsg{summary: summary}
+			}
+			return orgContradictionsRunMsg{err: err.Error()}
+		}
+		if result.TotalFindings == 0 {
+			return orgContradictionsRunMsg{summary: "No cross-file contradictions or duplicates above the similarity floor."}
+		}
+		mgr := pending.NewManager(memPath)
+		queued := 0
+		for _, it := range result.Items {
+			if it.Skipped {
+				continue
+			}
+			if _, werr := mgr.WriteFrom(it.TargetFile, it.Diff, "organize-contradictions"); werr != nil {
+				return orgContradictionsRunMsg{err: fmt.Sprintf("queue %s for %s: %v", it.Verdict, it.TargetFile, werr)}
+			}
+			queued++
+		}
+		return orgContradictionsRunMsg{summary: fmt.Sprintf("Queued %d contradiction/duplicate finding(s) as pending; review in Approvals (tab 4).", queued)}
+	}
 }
 
 func (m *organizeModel) moveProvider(delta int) bool {
@@ -1619,6 +1870,11 @@ func (m organizeModel) idleView() string {
 	if m.confirming {
 		return m.confirmView()
 	}
+
+	modeHeader := StyleTitle.Render("Memory Organization") + "\n" + m.modeSelectorView() + "\n"
+	if m.runMode != orgRunModeConsolidate {
+		return modeHeader + m.nonConsolidateIdleView()
+	}
 	cp := m.currentProvider()
 
 	panelW := (m.width - 8) / 2
@@ -1662,8 +1918,7 @@ func (m organizeModel) idleView() string {
 	)
 
 	var b strings.Builder
-	b.WriteString(StyleTitle.Render("Memory Organization"))
-	b.WriteString("\n")
+	b.WriteString(modeHeader)
 	b.WriteString(orgDimStyle.Render("Pick a provider + model, then Enter. Nothing is saved until you approve."))
 	if m.estFiles > 0 {
 		b.WriteString("\n" + orgDimStyle.Render(fmt.Sprintf("Will send ~%s tokens across %s (user-memory files only).",
@@ -1711,7 +1966,42 @@ func (m organizeModel) idleView() string {
 			filesPart + orgDimStyle.Render(" · history in Audit Trail (0)") + "\n")
 	}
 
-	b.WriteString("\n" + StyleFooter.Render("↑↓ choose · Enter: Provider→Model→confirm · Tab switch · e edit URL · f refetch · 1-9/0 tabs"))
+	b.WriteString("\n" + StyleFooter.Render("h/l mode · ↑↓ choose · Enter: Provider→Model→confirm · Tab switch · e edit URL · f refetch · 1-9/0 tabs"))
+	return b.String()
+}
+
+// modeSelectorView renders the Consolidate / Split projects / Find
+// contradictions row at the top of the idle screen plus a one-line
+// description of whichever is selected.
+func (m organizeModel) modeSelectorView() string {
+	chips := make([]string, len(orgRunModeInfos))
+	for i, info := range orgRunModeInfos {
+		if orgRunMode(i) == m.runMode {
+			chips[i] = lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Render("[ " + info.label + " ]")
+		} else {
+			chips[i] = orgDimStyle.Render(info.label)
+		}
+	}
+	return strings.Join(chips, "   ") + "\n" + orgDimStyle.Render(orgRunModeInfos[m.runMode].desc)
+}
+
+// nonConsolidateIdleView renders the Split projects / Find contradictions
+// idle body: no provider picker (both run via Direct LLM/embeddings only,
+// design item 3/4) — just a run prompt plus any status/error from the last
+// run. Results always land in the pending queue (design item 5), so there's
+// no bespoke review pane to render here.
+func (m organizeModel) nonConsolidateIdleView() string {
+	var b strings.Builder
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(ColorPrimary).Padding(1, 3).
+		Render(orgGoodStyle.Render("[enter]") + " run " + orgRunModeInfos[m.runMode].label)
+	b.WriteString("\n" + box + "\n")
+	if m.errMsg != "" {
+		b.WriteString("\n" + orgBadStyle.Render(m.errMsg) + "\n")
+	}
+	if m.status != "" {
+		b.WriteString("\n" + orgGoodStyle.Render(m.status) + "\n")
+	}
+	b.WriteString("\n" + StyleFooter.Render("h/l mode · enter run · 1-9/0 tabs"))
 	return b.String()
 }
 

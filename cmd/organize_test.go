@@ -168,7 +168,7 @@ func TestSeedEncryptedProjectSubFile_ApprovedSplitStaysEncrypted(t *testing.T) {
 		t.Fatal("test premise broken: sub-file already exists")
 	}
 
-	created, err := seedEncryptedProjectSubFile(store, memPath, subFile, true)
+	created, err := store.SeedEncryptedProjectSubFile(memPath, subFile, true)
 	if err != nil {
 		t.Fatalf("seedEncryptedProjectSubFile: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestSeedEncryptedProjectSubFile_ApprovedSplitStaysEncrypted(t *testing.T) {
 		t.Fatalf("%s is not encrypted at rest after approval: %q", subFile, raw)
 	}
 
-	created2, err := seedEncryptedProjectSubFile(store, memPath, subFile, true)
+	created2, err := store.SeedEncryptedProjectSubFile(memPath, subFile, true)
 	if err != nil {
 		t.Fatal(err)
 	}

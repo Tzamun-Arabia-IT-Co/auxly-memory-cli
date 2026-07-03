@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/embed"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/vaultcrypt"
 	tea "github.com/charmbracelet/bubbletea"
@@ -331,6 +333,240 @@ func TestOrganizeEncChoice_YDecryptsThenRuns(t *testing.T) {
 // still in flight (m.restoring), this must report captures=true AND swallow
 // the quit key itself — never fall through to a mode handler that would
 // treat it as an ordinary "leave this screen" key.
+// TestOrgRunMode_CycleWraps proves h/l cycle the top-of-tab mode selector
+// Consolidate → Split projects → Find contradictions and wrap in both
+// directions, and that switching modes clears a stale status/error.
+func TestOrgRunMode_CycleWraps(t *testing.T) {
+	store := organizeTestStore(t)
+	m := newOrganizeModel(store, store.Root, nil)
+	if m.runMode != orgRunModeConsolidate {
+		t.Fatalf("default runMode = %v, want orgRunModeConsolidate", m.runMode)
+	}
+	m.status = "stale status from a previous run"
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if m.runMode != orgRunModeSplit {
+		t.Fatalf("l once = %v, want orgRunModeSplit", m.runMode)
+	}
+	if m.status != "" {
+		t.Errorf("switching mode must clear stale status, got %q", m.status)
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if m.runMode != orgRunModeContradictions {
+		t.Fatalf("l twice = %v, want orgRunModeContradictions", m.runMode)
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if m.runMode != orgRunModeConsolidate {
+		t.Fatalf("l three times should wrap back to Consolidate, got %v", m.runMode)
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	if m.runMode != orgRunModeContradictions {
+		t.Fatalf("h from Consolidate should wrap back to Contradictions, got %v", m.runMode)
+	}
+}
+
+// TestOrgRunMode_SplitEnterStartsRunning proves Enter on Split projects mode
+// skips the provider/model picker entirely and drops straight into
+// orgRunning with a command dispatched (bubbletea discipline: the LLM call
+// happens in that tea.Cmd, never inline in Update).
+func TestOrgRunMode_SplitEnterStartsRunning(t *testing.T) {
+	store := organizeTestStore(t)
+	m := newOrganizeModel(store, store.Root, nil)
+	m.runMode = orgRunModeSplit
+
+	um, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if um.mode != orgRunning {
+		t.Fatalf("mode = %v, want orgRunning", um.mode)
+	}
+	if cmd == nil {
+		t.Fatal("Enter on Split projects must dispatch the run command")
+	}
+	if um.runProvider != "Direct LLM" {
+		t.Errorf("runProvider = %q, want %q", um.runProvider, "Direct LLM")
+	}
+}
+
+// TestOrgRunMode_ContradictionsEnterStartsRunning mirrors the split case for
+// Find contradictions mode.
+func TestOrgRunMode_ContradictionsEnterStartsRunning(t *testing.T) {
+	store := organizeTestStore(t)
+	m := newOrganizeModel(store, store.Root, nil)
+	m.runMode = orgRunModeContradictions
+
+	um, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if um.mode != orgRunning {
+		t.Fatalf("mode = %v, want orgRunning", um.mode)
+	}
+	if cmd == nil {
+		t.Fatal("Enter on Find contradictions must dispatch the run command")
+	}
+	if um.runProvider != "Embeddings + Direct LLM" {
+		t.Errorf("runProvider = %q, want %q", um.runProvider, "Embeddings + Direct LLM")
+	}
+}
+
+// TestOrgRunMode_NonConsolidateIgnoresProviderKeys proves up/down/tab (the
+// provider/model picker's keys) are inert while a non-Consolidate mode is
+// selected — nothing to pick, so they must not silently mutate m.focus/
+// m.provIdx/m.modelIdx behind the (hidden) Consolidate picker.
+func TestOrgRunMode_NonConsolidateIgnoresProviderKeys(t *testing.T) {
+	store := organizeTestStore(t)
+	m := newOrganizeModel(store, store.Root, nil)
+	m.runMode = orgRunModeSplit
+	wantFocus, wantProvIdx, wantModelIdx := m.focus, m.provIdx, m.modelIdx
+
+	for _, k := range []tea.KeyMsg{
+		{Type: tea.KeyUp}, {Type: tea.KeyDown}, {Type: tea.KeyTab},
+		{Type: tea.KeyRunes, Runes: []rune("f")}, {Type: tea.KeyRunes, Runes: []rune("e")},
+	} {
+		m, _ = m.Update(k)
+	}
+	if m.focus != wantFocus || m.provIdx != wantProvIdx || m.modelIdx != wantModelIdx {
+		t.Fatalf("provider/model picker state changed while in Split mode: focus=%v provIdx=%d modelIdx=%d",
+			m.focus, m.provIdx, m.modelIdx)
+	}
+	if m.mode != orgIdle {
+		t.Fatalf("mode = %v, want orgIdle (none of those keys should start a run)", m.mode)
+	}
+}
+
+// TestSplitRunSummary_QueuedWithSkipped locks the design-item-3 wording:
+// "Queued N addition(s) across M project file(s); K bullet(s) couldn't be
+// matched..." — built from a stubbed memory.SplitProjectsResult so this
+// doesn't need a live LLM call.
+func TestSplitRunSummary_QueuedWithSkipped(t *testing.T) {
+	result := memory.SplitProjectsResult{
+		Writes:       []memory.PendingWrite{{TargetFile: "projects/auxly.md", Count: 3}, {TargetFile: "projects/widget.md", Count: 2}},
+		SkippedCount: 4,
+	}
+	got := splitRunSummary(result, 5, 2)
+	for _, want := range []string{"Queued 5 addition(s) across 2 project file(s)", "4 bullet(s) couldn't be matched", "Approvals (tab 4)", "organize-split"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary %q missing %q", got, want)
+		}
+	}
+}
+
+// TestSplitRunSummary_CleanupOnly and TestSplitRunSummary_NothingToSplit lock
+// the two clean (non-error) edge cases runSplitProjects also special-cases.
+func TestSplitRunSummary_CleanupOnly(t *testing.T) {
+	result := memory.SplitProjectsResult{
+		CleanupWrite: &memory.PendingWrite{TargetFile: "projects.md", Count: 3},
+		CleanupOnly:  true,
+	}
+	got := splitRunSummary(result, 0, 0)
+	if !strings.Contains(got, "Queued removal of 3 bullet(s)") {
+		t.Errorf("summary %q missing the cleanup line", got)
+	}
+	if strings.Contains(got, "addition(s)") {
+		t.Errorf("cleanup-only summary must not mention new additions, got %q", got)
+	}
+}
+
+func TestSplitRunSummary_NothingToSplit(t *testing.T) {
+	got := splitRunSummary(memory.SplitProjectsResult{NothingToSplit: true}, 0, 0)
+	if !strings.Contains(got, "Nothing to split") {
+		t.Errorf("summary %q, want the nothing-to-split message", got)
+	}
+}
+
+// TestOrgSplitRunMsg_SetsStatusAndReturnsIdle proves the TUI wiring: an
+// orgSplitRunMsg arriving while running returns the model to orgIdle and
+// surfaces its summary — mirroring how orgRunMsg/orgModelsFetchedMsg are
+// exercised elsewhere in this file (feed the async result message straight
+// into Update rather than mocking the LLM call itself).
+func TestOrgSplitRunMsg_SetsStatusAndReturnsIdle(t *testing.T) {
+	store := organizeTestStore(t)
+	m := newOrganizeModel(store, store.Root, nil)
+	m.mode = orgRunning
+	m.runCancel = func() {}
+
+	um, _ := m.Update(orgSplitRunMsg{summary: "Queued 1 addition(s) across 1 project file(s). Review in Approvals (tab 4)."})
+	if um.mode != orgIdle {
+		t.Fatalf("mode = %v, want orgIdle", um.mode)
+	}
+	if !strings.Contains(um.status, "Review in Approvals") {
+		t.Errorf("status = %q, want the run summary", um.status)
+	}
+	if um.errMsg != "" {
+		t.Errorf("errMsg = %q, want empty on success", um.errMsg)
+	}
+
+	// A late result after the user already left orgRunning must be dropped.
+	um2 := um
+	um2.mode = orgIdle
+	dropped, _ := um2.Update(orgSplitRunMsg{summary: "should be ignored"})
+	if dropped.status == "should be ignored" {
+		t.Error("a late orgSplitRunMsg after mode left orgRunning must be dropped")
+	}
+}
+
+// TestOrgContradictionsRunMsg_SetsStatusAndReturnsIdle mirrors the split
+// case, plus the error path (errMsg, not status).
+func TestOrgContradictionsRunMsg_SetsStatusAndReturnsIdle(t *testing.T) {
+	store := organizeTestStore(t)
+	m := newOrganizeModel(store, store.Root, nil)
+	m.mode = orgRunning
+	m.runCancel = func() {}
+
+	um, _ := m.Update(orgContradictionsRunMsg{summary: "Queued 2 contradiction/duplicate finding(s) as pending; review in Approvals (tab 4)."})
+	if um.mode != orgIdle {
+		t.Fatalf("mode = %v, want orgIdle", um.mode)
+	}
+	if !strings.Contains(um.status, "Queued 2 contradiction") {
+		t.Errorf("status = %q, want the run summary", um.status)
+	}
+
+	m2 := newOrganizeModel(store, store.Root, nil)
+	m2.mode = orgRunning
+	m2.runCancel = func() {}
+	um2, _ := m2.Update(orgContradictionsRunMsg{err: "boom"})
+	if um2.mode != orgIdle {
+		t.Fatalf("mode = %v, want orgIdle even on error", um2.mode)
+	}
+	if um2.errMsg != "boom" {
+		t.Errorf("errMsg = %q, want %q", um2.errMsg, "boom")
+	}
+	if um2.status != "" {
+		t.Errorf("status = %q, want empty on error", um2.status)
+	}
+}
+
+// TestContradictionsErrSummary_EmbeddingsUnavailable and
+// TestContradictionsErrSummary_VaultTooLarge lock the embeddings-unavailable
+// / vault-too-large messages mirroring cmd/organize.go's, deterministically
+// (no live embedder/network needed — contradictionsErrSummary is a pure
+// function over the sentinel errors).
+func TestContradictionsErrSummary_EmbeddingsUnavailable(t *testing.T) {
+	summary, ok := contradictionsErrSummary(fmt.Errorf("wrap: %w", embed.ErrUnavailable))
+	if !ok {
+		t.Fatal("embed.ErrUnavailable must be a clean stop (ok=true), not a hard error")
+	}
+	if !strings.Contains(summary, "needs embeddings") {
+		t.Errorf("summary = %q, want it to mention embeddings", summary)
+	}
+}
+
+func TestContradictionsErrSummary_VaultTooLarge(t *testing.T) {
+	summary, ok := contradictionsErrSummary(fmt.Errorf("swept 900 facts: %w", memory.ErrVaultTooLarge))
+	if !ok {
+		t.Fatal("memory.ErrVaultTooLarge must be a clean stop (ok=true), not a hard error")
+	}
+	if !strings.Contains(summary, "900 facts") {
+		t.Errorf("summary = %q, want the original error text preserved", summary)
+	}
+}
+
+func TestContradictionsErrSummary_OtherErrorIsHardFailure(t *testing.T) {
+	_, ok := contradictionsErrSummary(fmt.Errorf("model call failed"))
+	if ok {
+		t.Fatal("a non-sentinel error must be a hard failure (ok=false), routed to errMsg")
+	}
+}
+
 func TestOrganizeModel_QuitBlockedWhileRestoring(t *testing.T) {
 	store := organizeTestStore(t)
 	m := newOrganizeModel(store, store.Root, nil)
