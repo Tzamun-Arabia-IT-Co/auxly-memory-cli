@@ -1203,7 +1203,11 @@ func splitRunSummary(result memory.SplitProjectsResult, queuedBullets, queuedFil
 	}
 	var lines []string
 	if result.CleanupWrite != nil {
-		lines = append(lines, fmt.Sprintf("Queued removal of %d bullet(s) already moved to sub-files from projects.md.", result.CleanupWrite.Count))
+		unit := "bullet(s)"
+		if result.HeaderMode {
+			unit = "section(s)"
+		}
+		lines = append(lines, fmt.Sprintf("Queued removal of %d %s already moved to sub-files from projects.md.", result.CleanupWrite.Count, unit))
 	}
 	if !result.CleanupOnly {
 		msg := fmt.Sprintf("Queued %d addition(s) across %d project file(s)", queuedBullets, queuedFiles)
@@ -1735,11 +1739,15 @@ func (m organizeModel) runningView() string {
 	var b strings.Builder
 	b.WriteString(StyleTitle.Render("Memory Organization — Organizing"))
 	b.WriteString("\n\n")
-	// Shared loading bar (same ▰/▱ creeping meter as the Remote tab) with a moving glint,
-	// so even while the fill holds near the ceiling during the long model wait it keeps
-	// showing live activity.
-	b.WriteString("  " + renderLoadingBar(m.runProgress, 30, m.spin, ColorPrimary) +
-		orgDimStyle.Render(fmt.Sprintf("  %3d%%", m.runProgress)) + "\n\n")
+	// The model round-trip is a black box — a CLI agent streams no progress, so a
+	// determinate meter can only lie (it used to creep to ~97% and park there,
+	// reading as "almost done" through a two-minute wait). Show an INDETERMINATE
+	// sweep instead: an oscillating fill driven by the spinner tick conveys "still
+	// working" without implying a completion percentage, and the headline number is
+	// elapsed seconds — the only honest quantity we have during the wait.
+	sweep := 34 + (m.spin % 32) // oscillates ~34–66%, a back-and-forth scanner, never near-full
+	b.WriteString("  " + renderLoadingBar(sweep, 30, m.spin, ColorPrimary) +
+		orgDimStyle.Render(fmt.Sprintf("  %ds elapsed", elapsed)) + "\n\n")
 	for _, s := range steps {
 		switch s.state {
 		case 0:

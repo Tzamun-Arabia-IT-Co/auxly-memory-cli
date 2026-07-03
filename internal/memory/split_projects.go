@@ -279,3 +279,183 @@ func (s *Store) PlanProjectsSplitWithAgent(ctx context.Context, agentName, agent
 		return s.runOrganizeModel(c, agentName, agentPath, model, sys, user)
 	})
 }
+
+// ---- Header-structured projects.md (## sections) — deterministic split ----
+//
+// A projects.md organized with level-2 (`## `) headers, one per project,
+// splits WITHOUT any model call: the header text already names the project,
+// so there's no bullet-attribution ambiguity (a bullet like "- **License:**
+// MIT" is unreadable on its own, but its enclosing "## Odysseus Evaluation"
+// header is unambiguous) — and thus none of PlanProjectsSplit's
+// bold-stripping tolerance is needed; the section moves byte-for-byte.
+// PlanSplitProjectsRun (split_projects_run.go) prefers this path whenever
+// projects.md has at least one `## ` header; PlanProjectsSplit above remains
+// the fallback for flat files (no `## ` header at all).
+
+// projectSection is one `## ` header's VERBATIM span in projects.md — the
+// header line through the line before the next `## ` header (or EOF),
+// byte-for-byte: sub-headers, nested bullets, and blank lines all travel
+// together as one project unit. Two headers that sanitize to the same slug
+// (e.g. "## Foo" / "## foo") are MERGED into one section (bodies
+// concatenated in file order) — same slug means the same project file,
+// never one silently overwriting the other.
+type projectSection struct {
+	slug string
+	body string
+}
+
+// splitProjectsByHeaders detects header mode — at least one `## ` header at
+// column 0 — and returns one projectSection per header (post slug-merge), in
+// first-seen order. Returns nil for a flat file (no `## ` header at all),
+// telling the caller to fall back to PlanProjectsSplit's LLM path.
+//
+// A `## ` inside a fenced ``` code block is not a header — track fence state
+// while scanning so a code sample that happens to contain "## " text isn't
+// mistaken for a section boundary.
+//
+// Only the LAST section's tail is special-cased: a trailing run of top-level
+// bullets that immediately follows plain prose (not a header, not itself
+// part of an existing bullet list) is excluded from the section and left for
+// projects.md. This is the real vault's shape — a later `auxly sync` run
+// appends a dated fact straight to EOF with no header of its own:
+//
+//	_Updated: 2026-06-03_
+//	 - [2026-07-03] Smart Sync: ...
+//
+// A trailing run that instead directly abuts a header or another bullet is
+// left IN the section — that's an ordinary list, not an orphaned fact, and
+// telling the two apart with more precision isn't worth the complexity.
+func splitProjectsByHeaders(content string) []projectSection {
+	lines := strings.Split(content, "\n")
+	var headerIdx []int
+	inFence := false
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "```") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence && strings.HasPrefix(l, "## ") {
+			headerIdx = append(headerIdx, i)
+		}
+	}
+	if len(headerIdx) == 0 {
+		return nil
+	}
+
+	var order []string
+	bodies := map[string][]string{}
+	for si, start := range headerIdx {
+		end := len(lines)
+		if si+1 < len(headerIdx) {
+			end = headerIdx[si+1]
+		}
+		secLines := lines[start:end]
+		if si == len(headerIdx)-1 {
+			secLines = peelTrailingLoose(secLines)
+		}
+		slug := sanitizeSlug(strings.TrimPrefix(strings.TrimSpace(secLines[0]), "## "))
+		if slug == "" {
+			continue // unusable slug — same "no junk-named file" rule PlanProjectsSplit applies
+		}
+		if _, seen := bodies[slug]; !seen {
+			order = append(order, slug)
+		}
+		bodies[slug] = append(bodies[slug], secLines...)
+	}
+
+	sections := make([]projectSection, 0, len(order))
+	for _, slug := range order {
+		sections = append(sections, projectSection{slug: slug, body: strings.Join(bodies[slug], "\n")})
+	}
+	return sections
+}
+
+// peelTrailingLoose trims the trailing-loose-bullet run described in
+// splitProjectsByHeaders' doc off the end of a section's lines.
+func peelTrailingLoose(lines []string) []string {
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	cut := end
+	for cut > 0 {
+		t := strings.TrimSpace(lines[cut-1])
+		if strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "* ") {
+			cut--
+			continue
+		}
+		break
+	}
+	if cut == end {
+		return lines // nothing bullet-shaped at the tail
+	}
+	// cut >= 1 always: lines[0] is the "## " header line, which never matches
+	// the bullet prefix test above, so the backward scan can't reach index 0.
+	boundary := strings.TrimSpace(lines[cut-1])
+	if boundary == "" || strings.HasPrefix(boundary, "#") || strings.HasPrefix(boundary, "- ") || strings.HasPrefix(boundary, "* ") {
+		return lines // headed (or directly-continued) list — a real one, keep verbatim
+	}
+	return lines[:cut]
+}
+
+// sectionLines returns a section body's non-blank lines, UNTRIMMED (original
+// indentation kept) — the unit both the phase-2 "already moved" match and the
+// cleanup delete-diff operate on, mirroring bulletLines' role for the LLM path.
+func sectionLines(body string) []string {
+	var out []string
+	for _, l := range strings.Split(body, "\n") {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// MovedProjectSections is MovedProjectBullets' header-mode analog: the
+// `## ` sections of projects.md whose full verbatim content (every non-blank
+// line, normalized) already exists in some projects/ sub-file — i.e. an
+// earlier approved header-mode addition. Only these are safe to delete from
+// the monolith: presence in a sub-file is the mechanical proof no fact is
+// lost.
+func (s *Store) MovedProjectSections() ([]projectSection, error) {
+	content, err := s.View("projects.md")
+	if err != nil {
+		return nil, err
+	}
+	sections := splitProjectsByHeaders(content)
+	if len(sections) == 0 {
+		return nil, nil
+	}
+	files, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	inSub := map[string]bool{}
+	for _, f := range files {
+		if !strings.HasPrefix(f.Name, "projects/") {
+			continue
+		}
+		sub, verr := s.View(f.Name)
+		if verr != nil {
+			continue
+		}
+		for _, l := range sectionLines(sub) {
+			inSub[normalizeBullet(l)] = true
+		}
+	}
+	var moved []projectSection
+	for _, sec := range sections {
+		lines := sectionLines(sec.body)
+		found := len(lines) > 0
+		for _, l := range lines {
+			if !inSub[normalizeBullet(l)] {
+				found = false
+				break
+			}
+		}
+		if found {
+			moved = append(moved, sec)
+		}
+	}
+	return moved, nil
+}

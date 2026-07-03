@@ -42,13 +42,14 @@ type SplitProjectsHooks struct {
 // (bullets an earlier approved split already moved) and Writes (this run's
 // new groupings) are independent — either can be nil/empty.
 type SplitProjectsResult struct {
-	CleanupWrite   *PendingWrite  // non-nil: queue this to remove already-moved bullets from projects.md
-	Writes         []PendingWrite // one per new projects/<slug>.md this run groups
+	CleanupWrite   *PendingWrite  // non-nil: queue this to remove already-moved bullets/sections from projects.md
+	Writes         []PendingWrite // one per new projects/<slug>.md this run groups (one per section in header mode)
 	SeededFiles    []string       // sub-files created encrypted-at-rest this run
-	GeneralCount   int            // bullets staying in projects.md (cross-project/unattributable)
-	SkippedCount   int            // model bullets matching no original bullet (stay in projects.md)
+	GeneralCount   int            // bullets staying in projects.md (cross-project/unattributable) — LLM path only
+	SkippedCount   int            // model bullets matching no original bullet (stay in projects.md) — LLM path only
 	CleanupOnly    bool           // no new grouping this run; CleanupWrite (if any) is the whole job
-	NothingToSplit bool           // no bullets anywhere could be attributed to a project
+	NothingToSplit bool           // no bullets anywhere could be attributed to a project — LLM path only; header mode never sets this (a `## ` section always has somewhere to go)
+	HeaderMode     bool           // this run used the deterministic header-section split, not the LLM bullet path
 }
 
 // PlanSplitProjectsRun computes what one projects.md split run should queue
@@ -60,6 +61,17 @@ type SplitProjectsResult struct {
 // points the original single-caller version always did.
 func (s *Store) PlanSplitProjectsRun(ctx context.Context, memPath string, hooks *SplitProjectsHooks) (SplitProjectsResult, error) {
 	var result SplitProjectsResult
+
+	// Header-structured projects.md (## sections) splits deterministically —
+	// see planSplitProjectsRunHeaderMode. A flat file (no `## ` header at
+	// all) falls through to the LLM bullet-attribution path below, unchanged.
+	content, err := s.View("projects.md")
+	if err != nil {
+		return result, fmt.Errorf("read projects.md: %w", err)
+	}
+	if sections := splitProjectsByHeaders(content); len(sections) > 0 {
+		return s.planSplitProjectsRunHeaderMode(memPath, hooks, sections)
+	}
 
 	// Phase 2 first: bullets an earlier approved split already moved.
 	moved, merr := s.MovedProjectBullets()
@@ -141,6 +153,93 @@ func (s *Store) PlanSplitProjectsRun(ctx context.Context, memPath string, hooks 
 	}
 	result.GeneralCount = len(plan.General)
 	result.SkippedCount = len(plan.Skipped)
+	return result, nil
+}
+
+// planSplitProjectsRunHeaderMode is PlanSplitProjectsRun's deterministic path
+// for a projects.md organized with `## ` headers (see splitProjectsByHeaders
+// in split_projects.go): no model call, so it moves each section
+// byte-for-byte and needs none of the LLM path's bold-stripping tolerance.
+// Same two-phase shape as the LLM path — phase 2 (sections an earlier run
+// already got approved) is computed and queued first, phase 1 (this run's
+// new section additions) second — just built from
+// MovedProjectSections/projectSection instead of MovedProjectBullets/bullets.
+func (s *Store) planSplitProjectsRunHeaderMode(memPath string, hooks *SplitProjectsHooks, sections []projectSection) (SplitProjectsResult, error) {
+	result := SplitProjectsResult{HeaderMode: true}
+
+	// Phase 2 first: sections an earlier approved split already moved.
+	moved, merr := s.MovedProjectSections()
+	if merr == nil && len(moved) > 0 {
+		path, encrypted, err := s.BackupProjectsMonolith(memPath)
+		if err != nil {
+			return result, err
+		}
+		if hooks != nil && hooks.BackedUp != nil {
+			hooks.BackedUp(path, encrypted)
+		}
+		var delDiff strings.Builder
+		for _, sec := range moved {
+			for _, l := range sectionLines(sec.body) {
+				delDiff.WriteString("-" + l + "\n")
+			}
+		}
+		result.CleanupWrite = &PendingWrite{TargetFile: "projects.md", Diff: delDiff.String(), Count: len(moved)}
+	}
+
+	movedSlugs := map[string]bool{}
+	for _, sec := range moved {
+		movedSlugs[sec.slug] = true
+	}
+	var remaining []projectSection
+	for _, sec := range sections {
+		if !movedSlugs[sec.slug] {
+			remaining = append(remaining, sec)
+		}
+	}
+	if len(remaining) == 0 {
+		// Everything remaining was already moved — cleanup above (if any) is
+		// the whole job this run.
+		result.CleanupOnly = true
+		return result, nil
+	}
+
+	if len(moved) == 0 {
+		path, encrypted, berr := s.BackupProjectsMonolith(memPath)
+		if berr != nil {
+			return result, berr
+		}
+		if hooks != nil && hooks.BackedUp != nil {
+			hooks.BackedUp(path, encrypted)
+		}
+	}
+
+	// Same MAJOR 9 seeding rule as the LLM path: an encrypted projects.md
+	// means every NEW sub-file must be seeded empty-and-encrypted before its
+	// first pending addition is queued.
+	_, projectsEncrypted, encErr := s.ReadRawVaultBytes("projects.md")
+	if encErr != nil {
+		return result, fmt.Errorf("check projects.md encryption: %w", encErr)
+	}
+
+	for _, sec := range remaining {
+		subFile := "projects/" + sec.slug + ".md"
+		created, serr := s.SeedEncryptedProjectSubFile(memPath, subFile, projectsEncrypted)
+		if serr != nil {
+			return result, serr
+		}
+		if created {
+			result.SeededFiles = append(result.SeededFiles, subFile)
+			if hooks != nil && hooks.Seeded != nil {
+				hooks.Seeded(subFile)
+			}
+		}
+		lines := strings.Split(sec.body, "\n")
+		var addDiff strings.Builder
+		for _, l := range lines {
+			addDiff.WriteString("+" + l + "\n")
+		}
+		result.Writes = append(result.Writes, PendingWrite{TargetFile: subFile, Diff: addDiff.String(), Count: len(lines)})
+	}
 	return result, nil
 }
 

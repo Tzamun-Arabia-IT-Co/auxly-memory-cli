@@ -288,16 +288,24 @@ func runSplitProjects(store *memory.Store) error {
 	}
 
 	queued := 0
+	unit := "bullet(s)"
+	if result.HeaderMode {
+		unit = "line(s)"
+	}
 	for _, w := range result.Writes {
 		name, werr := mgr.WriteFrom(w.TargetFile, w.Diff, "organize-split")
 		if werr != nil {
 			return fmt.Errorf("queue split for %s: %w", w.TargetFile, werr)
 		}
 		queued += w.Count
-		fmt.Printf("   ⏳ %s ← %d bullet(s)  (%s)\n", w.TargetFile, w.Count, name)
+		fmt.Printf("   ⏳ %s ← %d %s  (%s)\n", w.TargetFile, w.Count, unit, name)
 	}
 
-	fmt.Printf("\n✅ Split planned: %d bullet(s) → %d project file(s), %d staying in projects.md.\n", queued, len(result.Writes), result.GeneralCount)
+	if result.HeaderMode {
+		fmt.Printf("\n✅ Split planned: %d section(s) queued as project file(s); H1 title and any content outside a `## ` header stay in projects.md.\n", len(result.Writes))
+	} else {
+		fmt.Printf("\n✅ Split planned: %d bullet(s) → %d project file(s), %d staying in projects.md.\n", queued, len(result.Writes), result.GeneralCount)
+	}
 	fmt.Println("   1. Review with `auxly pending`, apply with `auxly approve --agent organize-split`.")
 	fmt.Println("   2. Re-run `auxly organize --split-projects` — it queues the projects.md cleanup")
 	fmt.Println("      ONLY for bullets whose new sub-file copy was actually approved (no fact can be lost).")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -196,5 +197,140 @@ func TestPlanProjectsSplitKeepsNestedBulletsTogether(t *testing.T) {
 	}
 	if len(plan.General) != 1 || plan.General[0] != "- unrelated fact" {
 		t.Fatalf("unrelated fact should stay in general alone: %+v", plan.General)
+	}
+}
+
+// realShapeProjectsMD reproduces the user's live vault: three `## ` project
+// sections, nested `###` sub-headers, 2-space-indented children, and — after
+// the last section — a "_Updated:_" prose line followed directly by a dated
+// bullet appended by a later sync run with no header of its own.
+const realShapeProjectsMD = `# Projects & Active Plans
+
+## Auxly-CLI
+
+### Repositories
+- **Private umbrella:** ` + "`Tzamun-Arabia-IT-Co/Auxly`" + `
+- **Release Repositories:**
+  - Public release repo: ` + "`auxly-memory-cli`" + `
+  - Homebrew tap repo: ` + "`homebrew-tap`" + `
+
+### Stack
+- **Languages:** Go
+
+## Open-Source Publish Plan
+
+### Strategy
+- Publish only ` + "`auxly-cli`" + `
+
+## Odysseus Evaluation
+
+### Overview & Stack
+- **Repository:** ` + "`github.com/x/odysseus`" + `
+- **License:** MIT
+
+_Updated: 2026-06-03_
+ - [2026-07-03] Smart Sync: patch train complete on branch fix/v1.3.1
+`
+
+// TestSplitProjectsByHeaders_RealShape locks the reproduced live-vault gap:
+// 3 sections queue with VERBATIM bodies (sub-headers/nested children in
+// order), and the trailing loose bullet — appended after the last section
+// with no header of its own — is excluded from every section.
+func TestSplitProjectsByHeaders_RealShape(t *testing.T) {
+	sections := splitProjectsByHeaders(realShapeProjectsMD)
+	if len(sections) != 3 {
+		t.Fatalf("expected 3 sections, got %d: %+v", len(sections), sections)
+	}
+	wantSlugs := []string{"auxly-cli", "open-source-publish-plan", "odysseus-evaluation"}
+	for i, want := range wantSlugs {
+		if sections[i].slug != want {
+			t.Fatalf("section %d slug = %q, want %q", i, sections[i].slug, want)
+		}
+	}
+
+	auxly := sections[0].body
+	if !strings.Contains(auxly, "## Auxly-CLI") || !strings.Contains(auxly, "### Repositories") || !strings.Contains(auxly, "### Stack") {
+		t.Fatalf("auxly-cli body missing sub-headers, got:\n%s", auxly)
+	}
+	if strings.Index(auxly, "### Repositories") > strings.Index(auxly, "### Stack") {
+		t.Fatalf("sub-headers out of order in body:\n%s", auxly)
+	}
+	if !strings.Contains(auxly, "  - Public release repo: `auxly-memory-cli`") {
+		t.Fatalf("nested 2-space-indented child not preserved verbatim, got:\n%s", auxly)
+	}
+
+	odysseus := sections[2].body
+	if !strings.Contains(odysseus, "_Updated: 2026-06-03_") {
+		t.Fatalf("odysseus body should keep the _Updated:_ line, got:\n%s", odysseus)
+	}
+	for _, sec := range sections {
+		if strings.Contains(sec.body, "Smart Sync") {
+			t.Fatalf("trailing loose bullet leaked into section %q body:\n%s", sec.slug, sec.body)
+		}
+	}
+}
+
+// TestSplitProjectsByHeaders_FlatFileReturnsNil proves the LLM path's flat
+// fallback trigger: a projects.md with no `## ` header at all yields no
+// sections, so PlanSplitProjectsRun falls through to PlanProjectsSplit.
+func TestSplitProjectsByHeaders_FlatFileReturnsNil(t *testing.T) {
+	if got := splitProjectsByHeaders("# Projects\n- fact one\n- fact two\n"); got != nil {
+		t.Fatalf("flat file should yield no sections, got %+v", got)
+	}
+}
+
+// TestSplitProjectsByHeaders_CodeFenceNotAHeader: a "## " line inside a
+// fenced code block must not be mistaken for a section boundary.
+func TestSplitProjectsByHeaders_CodeFenceNotAHeader(t *testing.T) {
+	src := "# Title\n\n## Real Section\n- a\n\n```\n## not a header\n```\n\n## Another Section\n- b\n"
+	sections := splitProjectsByHeaders(src)
+	if len(sections) != 2 {
+		t.Fatalf("expected 2 sections, got %d: %+v", len(sections), sections)
+	}
+	if sections[0].slug != "real-section" || sections[1].slug != "another-section" {
+		t.Fatalf("unexpected slugs: %+v", sections)
+	}
+	if !strings.Contains(sections[0].body, "## not a header") {
+		t.Fatalf("fenced text should stay inside the enclosing section verbatim, got:\n%s", sections[0].body)
+	}
+}
+
+// TestSplitProjectsByHeaders_SlugCollisionMerges: two headers that sanitize
+// to the same slug merge into ONE section (bodies concatenated in file
+// order) rather than one silently clobbering the other's sub-file.
+func TestSplitProjectsByHeaders_SlugCollisionMerges(t *testing.T) {
+	src := "# Title\n\n## Foo\n- one\n\n## foo\n- two\n"
+	sections := splitProjectsByHeaders(src)
+	if len(sections) != 1 {
+		t.Fatalf("expected slug collision to merge into 1 section, got %d: %+v", len(sections), sections)
+	}
+	if sections[0].slug != "foo" {
+		t.Fatalf("slug = %q, want foo", sections[0].slug)
+	}
+	if !strings.Contains(sections[0].body, "- one") || !strings.Contains(sections[0].body, "- two") {
+		t.Fatalf("merged body missing content from one of the two headers:\n%s", sections[0].body)
+	}
+}
+
+// TestMovedProjectSections locks the header-mode phase-2 match: a section
+// whose full verbatim content already exists in its projects/<slug>.md is
+// "moved"; a section whose sub-file doesn't exist (or is missing content)
+// is not.
+func TestMovedProjectSections(t *testing.T) {
+	s := splitStore(t, "# Title\n\n## Foo\n- fact one\n\n## Bar\n- fact two\n")
+	if err := os.MkdirAll(filepath.Join(s.Root, "projects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fooBody := "## Foo\n- fact one"
+	if err := os.WriteFile(filepath.Join(s.Root, "projects", "foo.md"), []byte(fooBody+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	moved, err := s.MovedProjectSections()
+	if err != nil {
+		t.Fatalf("MovedProjectSections: %v", err)
+	}
+	if len(moved) != 1 || moved[0].slug != "foo" {
+		t.Fatalf("expected only foo moved, got %+v", moved)
 	}
 }
