@@ -439,3 +439,215 @@ func TestPrewarmCrypto_NoopWithoutEncryptedFilesElseWarmsCache(t *testing.T) {
 		t.Fatal("PrewarmCrypto did not cache identity/recipient despite an encrypted file present")
 	}
 }
+
+// TestTempDecryptForOrganize_RoundTrip is the happy path organize's "decrypt
+// temporarily" choice relies on: files read as plaintext while decrypted, the
+// crash-recovery sentinel exists for the duration, and restore() puts
+// everything back — ciphertext on disk, sentinel gone.
+func TestTempDecryptForOrganize_RoundTrip(t *testing.T) {
+	s := &Store{Root: t.TempDir()}
+	identity := testVaultIdentity(t)
+	seedCiphertext(t, s, "personal.md", identity, "- secret one\n")
+	seedCiphertext(t, s, "business.md", identity, "- secret two\n")
+
+	restore, err := s.TempDecryptForOrganize([]string{"personal.md", "business.md"})
+	if err != nil {
+		t.Fatalf("TempDecryptForOrganize: %v", err)
+	}
+
+	for _, name := range []string{"personal.md", "business.md"} {
+		raw, rerr := os.ReadFile(filepath.Join(s.Root, name))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if vaultcrypt.IsEncrypted(raw) {
+			t.Fatalf("%s is still encrypted after TempDecryptForOrganize", name)
+		}
+	}
+	if _, serr := os.Stat(s.reencryptSentinelPath()); serr != nil {
+		t.Fatalf("sentinel missing while files are decrypted: %v", serr)
+	}
+
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	for _, name := range []string{"personal.md", "business.md"} {
+		raw, rerr := os.ReadFile(filepath.Join(s.Root, name))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if !vaultcrypt.IsEncrypted(raw) {
+			t.Fatalf("%s not re-encrypted after restore", name)
+		}
+	}
+	if _, serr := os.Stat(s.reencryptSentinelPath()); !os.IsNotExist(serr) {
+		t.Fatal("sentinel not removed after a fully successful restore")
+	}
+}
+
+// TestTempDecryptForOrganize_RestoreFailureLeavesSentinel drives restore()'s
+// failure path deterministically: after decrypting successfully (with a
+// cached, valid identity), break key resolution before restore() runs — same
+// "invalid env value fails env parsing first" trick as
+// TestReadEncryptedFileNoKeyFailsClosed. EncryptFile's recipient resolution
+// isn't cached yet at this point (only DecryptFile's identity lookup ran),
+// so restore() genuinely fails, and the sentinel must survive so
+// ReencryptPending can retry later — a removed sentinel here would leave the
+// file plaintext with no path back to encrypted.
+func TestTempDecryptForOrganize_RestoreFailureLeavesSentinel(t *testing.T) {
+	s := &Store{Root: t.TempDir()}
+	identity := testVaultIdentity(t)
+	seedCiphertext(t, s, "personal.md", identity, "- secret\n")
+
+	restore, err := s.TempDecryptForOrganize([]string{"personal.md"})
+	if err != nil {
+		t.Fatalf("TempDecryptForOrganize: %v", err)
+	}
+
+	t.Setenv("AUXLY_VAULT_KEY", "not-a-valid-age-identity")
+
+	if err := restore(); err == nil {
+		t.Fatal("restore() succeeded despite a broken key, want error")
+	}
+
+	if _, serr := os.Stat(s.reencryptSentinelPath()); serr != nil {
+		t.Fatalf("sentinel removed despite restore failure: %v", serr)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(s.Root, "personal.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vaultcrypt.IsEncrypted(raw) {
+		t.Fatal("file was re-encrypted despite restore() reporting an error")
+	}
+}
+
+// TestReencryptPending_HealsSimulatedCrash simulates a TempDecryptForOrganize
+// run killed before its restore() ever ran: sentinel present, one file left
+// plaintext on disk. ReencryptPending must heal it, and must tolerate two
+// other cases in the same sentinel: a file that's already back to encrypted
+// (a previous partial heal) and a file that no longer exists (deleted
+// meanwhile) — neither is an error, both are simply nothing to do.
+func TestReencryptPending_HealsSimulatedCrash(t *testing.T) {
+	s := &Store{Root: t.TempDir()}
+	identity := testVaultIdentity(t)
+
+	if err := os.WriteFile(filepath.Join(s.Root, "personal.md"), []byte("- secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedCiphertext(t, s, "already-encrypted.md", identity, "- other secret\n")
+	// "gone.md" is listed in the sentinel but never created on disk.
+	if err := s.writeReencryptSentinel([]string{"personal.md", "already-encrypted.md", "gone.md"}); err != nil {
+		t.Fatal(err)
+	}
+
+	healed, err := s.ReencryptPending()
+	if err != nil {
+		t.Fatalf("ReencryptPending: %v", err)
+	}
+	if len(healed) != 1 || healed[0] != "personal.md" {
+		t.Fatalf("healed = %v, want exactly [personal.md]", healed)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(s.Root, "personal.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !vaultcrypt.IsEncrypted(raw) {
+		t.Fatal("personal.md still plaintext after ReencryptPending")
+	}
+
+	if _, serr := os.Stat(s.reencryptSentinelPath()); !os.IsNotExist(serr) {
+		t.Fatal("sentinel not cleared after a fully successful heal")
+	}
+
+	// Second call: sentinel is gone, nothing left to heal, no error.
+	healed2, err := s.ReencryptPending()
+	if err != nil {
+		t.Fatalf("second ReencryptPending: %v", err)
+	}
+	if len(healed2) != 0 {
+		t.Fatalf("second ReencryptPending healed something: %v", healed2)
+	}
+}
+
+// TestTempDecryptForOrganize_ConcurrentSentinelsDontClobber is CRITICAL 2's
+// regression: two overlapping TempDecryptForOrganize calls (simulated
+// sequentially — the sentinel is now a locked MERGED SET, so the interleaving
+// itself doesn't matter, only that neither call's write clobbers the other's)
+// must both survive; one run finishing must clear ONLY its own file from the
+// sentinel; and healing after the other gets killed (its restore() never
+// runs) must re-encrypt exactly the crashed leftover.
+func TestTempDecryptForOrganize_ConcurrentSentinelsDontClobber(t *testing.T) {
+	s := &Store{Root: t.TempDir()}
+	identity := testVaultIdentity(t)
+	seedCiphertext(t, s, "personal.md", identity, "- secret one\n")
+	seedCiphertext(t, s, "business.md", identity, "- secret two\n")
+
+	// Run A starts (decrypts personal.md).
+	restoreA, err := s.TempDecryptForOrganize([]string{"personal.md"})
+	if err != nil {
+		t.Fatalf("TempDecryptForOrganize A: %v", err)
+	}
+
+	// Run B starts WHILE A is still in flight (A's restore() hasn't run
+	// yet). Before CRITICAL 2's fix, writing B's sentinel would overwrite
+	// A's entry entirely — a last-write-wins race.
+	if _, err := s.TempDecryptForOrganize([]string{"business.md"}); err != nil {
+		t.Fatalf("TempDecryptForOrganize B: %v", err)
+	}
+
+	set, err := s.readSentinelSet()
+	if err != nil {
+		t.Fatalf("readSentinelSet: %v", err)
+	}
+	if !set["personal.md"] || !set["business.md"] {
+		t.Fatalf("sentinel = %v, want BOTH runs' files listed", set)
+	}
+
+	// Run A finishes normally: its restore() must clear ONLY personal.md,
+	// leaving run B's still-pending business.md entry untouched.
+	if err := restoreA(); err != nil {
+		t.Fatalf("restoreA: %v", err)
+	}
+	set2, err := s.readSentinelSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set2["personal.md"] {
+		t.Fatal("restoreA left its own file listed in the sentinel")
+	}
+	if !set2["business.md"] {
+		t.Fatal("restoreA clobbered run B's still-pending sentinel entry")
+	}
+	raw, err := os.ReadFile(filepath.Join(s.Root, "personal.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !vaultcrypt.IsEncrypted(raw) {
+		t.Fatal("personal.md not re-encrypted after restoreA")
+	}
+
+	// Run B gets killed: its restore() never runs. The next heal (doctor /
+	// TUI-open) must re-encrypt the leftover business.md and, once it's the
+	// only entry left, clear the sentinel entirely.
+	healed, herr := s.ReencryptPending()
+	if herr != nil {
+		t.Fatalf("ReencryptPending: %v", herr)
+	}
+	if len(healed) != 1 || healed[0] != "business.md" {
+		t.Fatalf("healed = %v, want exactly [business.md]", healed)
+	}
+	raw2, err := os.ReadFile(filepath.Join(s.Root, "business.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !vaultcrypt.IsEncrypted(raw2) {
+		t.Fatal("business.md not re-encrypted by the ReencryptPending heal")
+	}
+	if _, serr := os.Stat(s.reencryptSentinelPath()); !os.IsNotExist(serr) {
+		t.Fatal("sentinel not cleared after both runs resolved")
+	}
+}

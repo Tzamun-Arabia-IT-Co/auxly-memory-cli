@@ -35,7 +35,7 @@ func TestOrganizeE2E_RealAgent_TempVault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := store.OrganizeVaultWithAgent(agentName, path)
+	res := store.OrganizeVaultWithAgent(agentName, path, false)
 	t.Logf("Success=%v\nMessage=%s\nDiff=%s", res.Success, res.Message, res.Diff)
 
 	if !res.Success {

@@ -14,6 +14,7 @@ import (
 type ProjectsSplitPlan struct {
 	Groups  map[string][]string // sanitized slug → verbatim bullets moving to projects/<slug>.md
 	General []string            // bullets staying in projects.md (cross-project / unattributable)
+	Skipped []string            // model bullets that matched no original — dropped, fact stays in projects.md
 	Source  string              // projects.md content the plan was computed from
 }
 
@@ -26,6 +27,59 @@ RULES:
 - Group each bullet under the single project it belongs to. A slug is lowercase letters/digits/dashes naming that repo or product (e.g. "auxly-memory").
 - A bullet that spans several projects, or names no identifiable project, goes to "general".
 - COPY EVERY BULLET VERBATIM — never reword, merge, split, annotate, or drop. Every input bullet appears EXACTLY once somewhere in the output.`
+
+// normalizeBullet is normalizeFact (organize.go) plus tolerance for the
+// formatting loss models routinely introduce when copying a bullet back:
+// bold/underline emphasis markers stripped. Every bullet comparison in this
+// file — the split's own matching AND MovedProjectBullets' cleanup match —
+// goes through this one function so the two phases agree on what "the same
+// bullet" means.
+func normalizeBullet(b string) string {
+	b = strings.ReplaceAll(b, "**", "")
+	b = strings.ReplaceAll(b, "__", "")
+	return normalizeFact(b)
+}
+
+// bulletUnit is one projects.md bullet line together with the indentation of
+// the ORIGINAL line. bulletLines (organize.go) intentionally flattens that
+// indentation for the general dedup path; the split needs it preserved so a
+// nested sub-bullet can be traced back to its parent.
+type bulletUnit struct {
+	text   string // verbatim trimmed bullet line, "- ..." or "* ..."
+	indent int
+}
+
+// bulletUnits walks projects.md content the same way bulletLines does, but
+// keeps each line's leading-whitespace depth instead of discarding it.
+func bulletUnits(content string) []bulletUnit {
+	var out []bulletUnit
+	for _, l := range strings.Split(content, "\n") {
+		t := strings.TrimSpace(l)
+		if !strings.HasPrefix(t, "- ") && !strings.HasPrefix(t, "* ") {
+			continue
+		}
+		out = append(out, bulletUnit{text: t, indent: len(l) - len(strings.TrimLeft(l, " \t"))})
+	}
+	return out
+}
+
+// bulletParents maps a nested bullet's normalized form to the normalized form
+// of the nearest shallower bullet above it (its parent). A top-level bullet,
+// or one with no shallower bullet above it, has no entry.
+func bulletParents(units []bulletUnit) map[string]string {
+	parents := map[string]string{}
+	var stack []bulletUnit
+	for _, u := range units {
+		for len(stack) > 0 && stack[len(stack)-1].indent >= u.indent {
+			stack = stack[:len(stack)-1]
+		}
+		if len(stack) > 0 {
+			parents[normalizeBullet(u.text)] = normalizeBullet(stack[len(stack)-1].text)
+		}
+		stack = append(stack, u)
+	}
+	return parents
+}
 
 // MovedProjectBullets returns the projects.md bullets whose normalized form
 // already exists in some projects/ sub-file — i.e. bullets whose split
@@ -50,12 +104,12 @@ func (s *Store) MovedProjectBullets() ([]string, error) {
 			continue
 		}
 		for _, b := range bulletLines(sub) {
-			inSub[normalizeFact(b)] = true
+			inSub[normalizeBullet(b)] = true
 		}
 	}
 	var moved []string
 	for _, b := range bulletLines(content) {
-		if inSub[normalizeFact(b)] {
+		if inSub[normalizeBullet(b)] {
 			moved = append(moved, b)
 		}
 	}
@@ -63,13 +117,23 @@ func (s *Store) MovedProjectBullets() ([]string, error) {
 }
 
 // PlanProjectsSplit asks the model to group projects.md bullets by project,
-// then MECHANICALLY verifies the grouping is a perfect permutation of the
-// input (RULE 0): any dropped, invented, reworded, or duplicated bullet
-// rejects the whole plan — there is no force override for a migration.
+// then matches every model-returned bullet back to an original by NORMALIZED
+// form — tolerant of the bold/underline emphasis markers models routinely
+// drop (and any other cosmetic reformatting normalizeBullet absorbs). The
+// bullet actually queued for the sub-file is always the ORIGINAL verbatim
+// text, never the model's copy.
+//
+// A model bullet matching no original is dropped, not fatal: the two-phase
+// design already guarantees an un-moved bullet is never deleted, so it simply
+// stays in projects.md. These are collected in ProjectsSplitPlan.Skipped.
+// Only a response that matches NONE of the input bullets is a hard failure
+// (the model returned garbage). A nested bullet always shares its parent's
+// fate — moved together, or left together.
+//
 // Bullets already present in a sub-file (an earlier approved split) and
 // duplicate bullets are excluded from the model input: the first are handled
 // by the cleanup phase, and duplicates would otherwise be merged by any
-// reasonable model and fail the permutation gate forever.
+// reasonable model.
 func (s *Store) PlanProjectsSplit(ctx context.Context, exec organizeExecutor) (ProjectsSplitPlan, error) {
 	content, err := s.View("projects.md")
 	if err != nil {
@@ -81,17 +145,23 @@ func (s *Store) PlanProjectsSplit(ctx context.Context, exec organizeExecutor) (P
 	}
 	movedSet := map[string]bool{}
 	for _, b := range moved {
-		movedSet[normalizeFact(b)] = true
+		movedSet[normalizeBullet(b)] = true
 	}
+
+	units := bulletUnits(content)
+	parentOf := bulletParents(units)
+
 	seen := map[string]bool{}
+	orig := map[string]string{} // normalized -> original verbatim bullet text
 	var bullets []string
-	for _, b := range bulletLines(content) {
-		n := normalizeFact(b)
+	for _, u := range units {
+		n := normalizeBullet(u.text)
 		if movedSet[n] || seen[n] {
 			continue
 		}
 		seen[n] = true
-		bullets = append(bullets, b)
+		orig[n] = u.text
+		bullets = append(bullets, u.text)
 	}
 	if len(bullets) == 0 {
 		return ProjectsSplitPlan{}, fmt.Errorf("projects.md has no bullets to split")
@@ -115,61 +185,71 @@ func (s *Store) PlanProjectsSplit(ctx context.Context, exec organizeExecutor) (P
 		return ProjectsSplitPlan{}, fmt.Errorf("split response is not the contracted JSON: %w", err)
 	}
 
-	plan := ProjectsSplitPlan{Groups: map[string][]string{}, General: out.General, Source: content}
-	for key, group := range out.Projects {
-		slug := sanitizeSlug(key)
-		if slug == "" {
-			// Unusable slug — those bullets stay in the monolith rather than
-			// landing in a junk-named file.
-			plan.General = append(plan.General, group...)
+	dest := map[string]string{} // normalized original -> destination slug ("" = general)
+	var skipped []string
+	matchedAny := false
+	assign := func(modelBullets []string, slug string) {
+		for _, mb := range modelBullets {
+			mb = strings.TrimSpace(mb)
+			n := normalizeBullet(mb)
+			if _, ok := orig[n]; !ok {
+				skipped = append(skipped, mb)
+				continue
+			}
+			if _, already := dest[n]; already {
+				continue // duplicate model bullet — keep first slug
+			}
+			dest[n] = slug
+			matchedAny = true
+		}
+	}
+	var keys []string
+	for key := range out.Projects {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		// sanitizeSlug("") folds an unusable slug's bullets to general rather
+		// than a junk-named file.
+		assign(out.Projects[key], sanitizeSlug(key))
+	}
+	assign(out.General, "")
+	if !matchedAny {
+		return ProjectsSplitPlan{}, fmt.Errorf("split REJECTED: model output matched none of the %d input bullet(s) — response looks like garbage", len(bullets))
+	}
+
+	// A nested bullet always follows its parent's fate. This walks in source
+	// order so a grandchild picks up its parent's already-resolved
+	// destination rather than a stale one.
+	for _, u := range units {
+		n := normalizeBullet(u.text)
+		parent, hasParent := parentOf[n]
+		if !hasParent {
 			continue
 		}
-		plan.Groups[slug] = append(plan.Groups[slug], group...)
+		if _, ok := orig[n]; !ok {
+			continue // excluded earlier (already moved, or a duplicate original)
+		}
+		if pd, ok := dest[parent]; ok {
+			dest[n] = pd
+		} else {
+			delete(dest, n) // parent stayed — leave the child too
+		}
 	}
 
-	if err := validateSplitPermutation(bullets, plan); err != nil {
-		return ProjectsSplitPlan{}, err
+	plan := ProjectsSplitPlan{Groups: map[string][]string{}, Source: content, Skipped: skipped}
+	for _, b := range bullets {
+		slug, ok := dest[normalizeBullet(b)]
+		if !ok {
+			continue // unmatched, or a child left behind with an unmoved parent
+		}
+		if slug == "" {
+			plan.General = append(plan.General, b)
+		} else {
+			plan.Groups[slug] = append(plan.Groups[slug], b)
+		}
 	}
 	return plan, nil
-}
-
-// validateSplitPermutation is the mechanical RULE-0 gate: the output must be a
-// perfect permutation of the input bullets (normalized like the dedup layer,
-// so cosmetic whitespace can't fail an honest grouping).
-func validateSplitPermutation(input []string, plan ProjectsSplitPlan) error {
-	counts := map[string]int{}
-	for _, b := range input {
-		counts[normalizeFact(b)]++
-	}
-	consume := func(bs []string) error {
-		for _, b := range bs {
-			n := normalizeFact(b)
-			if counts[n] == 0 {
-				return fmt.Errorf("split REJECTED: model invented or reworded a bullet: %q", b)
-			}
-			counts[n]--
-		}
-		return nil
-	}
-	var slugs []string
-	for slug := range plan.Groups {
-		slugs = append(slugs, slug)
-	}
-	sort.Strings(slugs)
-	for _, slug := range slugs {
-		if err := consume(plan.Groups[slug]); err != nil {
-			return err
-		}
-	}
-	if err := consume(plan.General); err != nil {
-		return err
-	}
-	for n, c := range counts {
-		if c > 0 {
-			return fmt.Errorf("split REJECTED: model dropped %d bullet(s), e.g. %q — no fact may be lost in a migration", c, n)
-		}
-	}
-	return nil
 }
 
 // sanitizeSlug normalizes a model-proposed project key to the slug charset

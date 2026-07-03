@@ -325,7 +325,12 @@ func TestDashboardRichSectionsFullMode(t *testing.T) {
 }
 
 // TestDashboardRichSectionsSuppressedWhenCompact locks the responsive contract: on a
-// short terminal the rich sections are dropped so the dashboard still fits.
+// short terminal the LOWEST-priority rich sections (composition detail) are dropped
+// so the dashboard still fits. The "what just happened" feed is a higher-priority
+// section (see TestDashboardFeedSurvivesHeightPressure) and is intentionally NOT
+// asserted absent here — this specific fixture (12 cards, 5 sessions) is dense enough
+// that there is genuinely no room left for it at 140x30, which this test also locks
+// via the height budget below.
 func TestDashboardRichSectionsSuppressedWhenCompact(t *testing.T) {
 	m := populatedDashboard(t)
 	m.dashboard.stats.LastWriteTime = time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
@@ -341,8 +346,8 @@ func TestDashboardRichSectionsSuppressedWhenCompact(t *testing.T) {
 	if lipgloss.Height(out) > 30 {
 		t.Errorf("compact dashboard height %d exceeds terminal 30", lipgloss.Height(out))
 	}
-	if strings.Contains(out, "Recent Memory Changes") || strings.Contains(out, "Memory by category") {
-		t.Error("rich sections must be suppressed in compact mode to preserve the fit")
+	if strings.Contains(out, "Memory by category") {
+		t.Error("composition detail must be suppressed in compact mode to preserve the fit")
 	}
 }
 

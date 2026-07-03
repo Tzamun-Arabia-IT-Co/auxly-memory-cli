@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/embed"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
@@ -21,6 +23,10 @@ import (
 
 var organizeSplitProjects bool
 var organizeContradictions bool
+var organizeAgent string
+var organizeSkipEncrypted bool
+var organizeDecryptTemporarily bool
+var organizeAssumeYes bool
 
 var organizeCmd = &cobra.Command{
 	Use:   "organize",
@@ -33,6 +39,14 @@ func init() {
 		"split the projects.md monolith into projects/<slug>.md files (queued as pending changes for review)")
 	organizeCmd.Flags().BoolVar(&organizeContradictions, "contradictions", false,
 		"find cross-file contradicting or duplicate facts via embedding similarity (queued as pending changes for review)")
+	organizeCmd.Flags().StringVar(&organizeAgent, "agent", "",
+		"run via an installed CLI agent instead of the Direct LLM provider (e.g. claude, codex, gemini — see `auxly agents`)")
+	organizeCmd.Flags().BoolVar(&organizeSkipEncrypted, "skip-encrypted", false,
+		"with --agent: exclude encrypted file(s) from this run instead of refusing")
+	organizeCmd.Flags().BoolVar(&organizeDecryptTemporarily, "decrypt-temporarily", false,
+		"with --agent: decrypt encrypted file(s) for this run only, re-encrypting automatically when it finishes — "+decryptTempPSWarning)
+	organizeCmd.Flags().BoolVarP(&organizeAssumeYes, "yes", "y", false,
+		"don't prompt before --decrypt-temporarily decrypts files (required when stdin isn't a terminal)")
 	rootCmd.AddCommand(organizeCmd)
 }
 
@@ -43,6 +57,9 @@ func runOrganize(cmd *cobra.Command, args []string) error {
 	if organizeSplitProjects && organizeContradictions {
 		return fmt.Errorf("--split-projects and --contradictions: one mode at a time")
 	}
+	if organizeSkipEncrypted && organizeDecryptTemporarily {
+		return fmt.Errorf("--skip-encrypted and --decrypt-temporarily: one mode at a time")
+	}
 	store := memory.NewStore(getMemoryPath())
 	if organizeContradictions {
 		return runContradictions(store)
@@ -50,6 +67,12 @@ func runOrganize(cmd *cobra.Command, args []string) error {
 	if organizeSplitProjects {
 		return runSplitProjects(store)
 	}
+
+	agentName, agentPath, aerr := resolveHeadlessAgent(organizeAgent)
+	if aerr != nil {
+		return aerr
+	}
+
 	// Chunked organize (large vaults) runs one model call per file and can take
 	// minutes each — show progress so a headless run never looks hung.
 	store.OrganizeProgress = func(current, total int, file string) {
@@ -61,13 +84,144 @@ func runOrganize(cmd *cobra.Command, args []string) error {
 	fmt.Printf("📊 Estimated Token Cost: ~%d tokens\n", estTokens)
 	fmt.Printf("⌛ Contacting active LLM provider for batch consolidation...\n\n")
 
-	res := store.OrganizeVault()
-	if !res.Success {
-		return fmt.Errorf("organize failed: %s", res.Message)
+	if agentPath == "" {
+		res := store.OrganizeVault()
+		if !res.Success {
+			return fmt.Errorf("organize failed: %s", res.Message)
+		}
+		fmt.Println(res.Message)
+		return nil
 	}
 
+	// CLI-agent path: an encrypted file rides the spawned process's argv for
+	// the whole run (ps-visible). Check BEFORE spending time on a model call
+	// so a refusal — or the chosen way around it — is immediate.
+	enc := store.EncryptedOrganizableFiles()
+	switch {
+	case len(enc) == 0 || organizeSkipEncrypted:
+		res := store.OrganizeVaultWithAgent(agentName, agentPath, organizeSkipEncrypted)
+		if !res.Success {
+			return fmt.Errorf("organize failed: %s", res.Message)
+		}
+		fmt.Println(res.Message)
+		return nil
+	case organizeDecryptTemporarily:
+		return runOrganizeDecryptTemporarily(store, agentName, agentPath, enc)
+	default:
+		return fmt.Errorf(
+			"organize via %s would expose decrypted content on the process command line (encrypted: %s)\n"+
+				"Choose one: --skip-encrypted to exclude them, --decrypt-temporarily to decrypt just for this run "+
+				"(re-encrypted automatically after), or drop --agent to use the Direct LLM provider instead",
+			agentName, strings.Join(enc, ", "))
+	}
+}
+
+// resolveHeadlessAgent maps --agent's value (a provider key like "claude", or
+// a substring of an installed agent's display name) to that agent's canonical
+// name + executable path, via the same detection the TUI's provider picker
+// uses (buildOrgProviders in tui/organize.go). Empty name means "no agent" —
+// the Direct LLM default, unaffected by anything below.
+func resolveHeadlessAgent(name string) (agentName, agentPath string, err error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", "", nil
+	}
+	for _, a := range detect.InstalledAgents() {
+		isCLI := strings.Contains(a.Name, "CLI") || strings.Contains(a.Name, "Code") || a.Connection == "MCP+Shell" || a.Connection == "Shell"
+		if !isCLI || a.Command == "" {
+			continue
+		}
+		if strings.EqualFold(a.Provider, name) || strings.Contains(strings.ToLower(a.Name), strings.ToLower(name)) {
+			return a.Name, a.Command, nil
+		}
+	}
+	return "", "", fmt.Errorf("no installed CLI agent matches --agent %q (see `auxly agents`)", name)
+}
+
+// isStdinTTY reports whether stdin is an interactive terminal — used to
+// decide whether --decrypt-temporarily may prompt for confirmation, or must
+// refuse instead of hanging on a read that will never come.
+func isStdinTTY() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// decryptTempPSWarning is the informed-consent line MAJOR 3 requires
+// everywhere --decrypt-temporarily can decrypt a file: the flag help, the
+// interactive prompt, and the --yes non-interactive path all state it — none
+// of them may let the user consent without knowing the decrypted content
+// rides the process command line (visible via `ps` to other local users) for
+// the whole run. Mirrors the TUI's encChoiceView() warning.
+const decryptTempPSWarning = "decrypted content is visible on the process command line (ps) to other local users for the run"
+
+// decryptTemporarilyPromptText builds the [y/N] confirmation prompt for
+// --decrypt-temporarily. Split out from runOrganizeDecryptTemporarily so the
+// consent wording is directly testable without capturing stdout.
+func decryptTemporarilyPromptText(files []string) string {
+	return fmt.Sprintf("decrypt %d file(s) for this run and re-encrypt after — %s? [y/N] (%s): ",
+		len(files), decryptTempPSWarning, strings.Join(files, ", "))
+}
+
+// runOrganizeDecryptTemporarily implements --decrypt-temporarily: confirm
+// (a TTY prompt, or --yes for non-interactive runs — both stating the ps/argv
+// exposure, MAJOR 3), decrypt the encrypted files in place, run the
+// CLI-agent organize, then ALWAYS re-encrypt — success or failure, via
+// defer, so no exit path skips it (MAJOR 4: a re-encrypt failure must also
+// make this return a non-nil error, or the process exits 0 with plaintext
+// left on disk).
+func runOrganizeDecryptTemporarily(store *memory.Store, agentName, agentPath string, files []string) error {
+	if !organizeAssumeYes {
+		if !isStdinTTY() {
+			return fmt.Errorf("--decrypt-temporarily needs confirmation and stdin isn't a terminal — re-run with --yes to confirm non-interactively")
+		}
+		fmt.Print(decryptTemporarilyPromptText(files))
+		resp, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		if a := strings.ToLower(strings.TrimSpace(resp)); a != "y" && a != "yes" {
+			fmt.Println("Aborted — nothing changed.")
+			return nil
+		}
+	} else {
+		fmt.Printf("⚠ %s\n", decryptTempPSWarning)
+	}
+
+	restore, derr := store.TempDecryptForOrganize(files)
+	if derr != nil {
+		return fmt.Errorf("decrypt for organize: %w", derr)
+	}
+	return runOrganizeWithRestore(func() memory.OrganizeResult {
+		return store.OrganizeVaultWithAgent(agentName, agentPath, false)
+	}, restore, files)
+}
+
+// runOrganizeWithRestore runs the organize call then ALWAYS restores
+// (re-encrypts) via defer, and folds a restore failure into the returned
+// error.
+//
+// MAJOR 4: the previous version's deferred restore only printed on failure
+// and always returned nil — a re-encrypt failure left plaintext on disk but
+// the process still exited 0, looking like success to any script or CI
+// checking the exit code. The named return + defer-sets-err here makes a
+// restore failure propagate no matter how the organize call itself went.
+func runOrganizeWithRestore(run func() memory.OrganizeResult, restore func() error, files []string) (err error) {
+	defer func() {
+		if rerr := restore(); rerr != nil {
+			fmt.Printf("⚠ RE-ENCRYPT FAILED after organize — %s may still be PLAINTEXT on disk: %v\n   Run `auxly encrypt file <name>` on each to fix.\n", strings.Join(files, ", "), rerr)
+			err = errors.Join(err, fmt.Errorf("re-encrypt after organize failed: %w", rerr))
+		} else {
+			fmt.Printf("🔒 re-encrypted %d file(s) after organize.\n", len(files))
+		}
+	}()
+
+	res := run()
+	if !res.Success {
+		err = fmt.Errorf("organize failed: %s", res.Message)
+		return
+	}
 	fmt.Println(res.Message)
-	return nil
+	return
 }
 
 // runSplitProjects migrates the projects.md monolith into per-project

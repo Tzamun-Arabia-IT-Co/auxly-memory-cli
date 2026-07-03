@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 )
 
 // Per-file chunked organize: each category file is tidied by its OWN model call
@@ -35,11 +37,88 @@ type routedMove struct {
 	fromIdx int
 }
 
-// planOrganizeChunked runs one exec call per file, sequentially (agent CLIs
-// don't parallelize well), merges the per-file results and routed moves into a
-// single OrganizeProposal, and validates it with the same fact-loss guard as
-// the whole-vault path.
+// organizeChunkMaxWorkers bounds per-file organize concurrency. Each worker
+// forks/execs a full CLI-agent process (Claude Code, Codex, …) or opens an
+// HTTP connection to a provider — scaling with runtime.NumCPU alone could
+// fork-bomb a laptop on a big vault or blow through a provider's rate limit,
+// so this caps the pool at a small fixed ceiling regardless of core count.
+const organizeChunkMaxWorkers = 4
+
+// organizeChunkWorkers returns the worker pool size: min(organizeChunkMaxWorkers,
+// NumCPU), never less than 1.
+func organizeChunkWorkers() int {
+	n := runtime.NumCPU()
+	if n < 1 {
+		return 1
+	}
+	if n > organizeChunkMaxWorkers {
+		return organizeChunkMaxWorkers
+	}
+	return n
+}
+
+// chunkCallResult is one worker's outcome for one file, collected by index
+// (not completion order) so the merge pass below stays deterministic
+// regardless of which goroutine finishes first.
+type chunkCallResult struct {
+	newContent string
+	moves      []chunkMove
+	modelUsed  string
+	tokensUsed int
+	err        error // non-nil = this file's call failed; collected, not fatal to the batch
+}
+
+// planOrganizeChunked runs one exec call per file over a small bounded worker
+// pool (organizeChunkWorkers), merges the per-file results and routed moves
+// into a single OrganizeProposal, and validates it with the same fact-loss
+// guard as the whole-vault path.
+//
+// Each call is independent: runOrganizeModel allocates its own stdout/stderr
+// buffers, temp dir, and HTTP client per invocation (verified — nothing
+// shared across calls), so no extra locking is needed around exec itself.
+// s.OrganizeProgress may be called from multiple workers concurrently, so
+// calls to it are serialized with progressMu — the callback's own internals
+// (e.g. a TUI redraw) are not assumed to be goroutine-safe.
+//
+// One file's call failing must not sink the batch: its error is collected
+// and the file is left out of the proposal (so it stays untouched on disk and
+// the dirty-file ledger never marks it seen — it's simply retried next run),
+// while every other file's result still gets applied.
 func (s *Store) planOrganizeChunked(ctx context.Context, exec organizeExecutor, files []organizeFile) (OrganizeProposal, OrganizeResult) {
+	results := make([]chunkCallResult, len(files))
+	var progressMu sync.Mutex
+	sem := make(chan struct{}, organizeChunkWorkers())
+	var wg sync.WaitGroup
+
+	for i, f := range files {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, f organizeFile) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if s.OrganizeProgress != nil {
+				progressMu.Lock()
+				s.OrganizeProgress(i+1, len(files), f.Name)
+				progressMu.Unlock()
+			}
+
+			user := fmt.Sprintf("Here is the single memory file to organize:\n\n=== FILE: %s ===\n%s\n=== END ===", f.Name, f.Content)
+			run, res, proceed := exec(ctx, organizeChunkSystemPrompt(f.Name), user)
+			if !proceed {
+				results[i] = chunkCallResult{err: fmt.Errorf("organize of %s failed: %s", f.Name, res.Message)}
+				return
+			}
+			newContent, moves, err := parseChunkResponse(f.Name, run.jsonContent)
+			if err != nil {
+				results[i] = chunkCallResult{err: fmt.Errorf("organize of %s: %w", f.Name, err)}
+				return
+			}
+			results[i] = chunkCallResult{newContent: newContent, moves: moves, modelUsed: run.modelUsed, tokensUsed: run.tokensUsed}
+		}(i, f)
+	}
+	wg.Wait()
+
 	byName := make(map[string]int, len(files)) // file name → index in changes
 	var changes []ProposedChange
 	var pendingMoves []routedMove
@@ -47,34 +126,22 @@ func (s *Store) planOrganizeChunked(ctx context.Context, exec organizeExecutor, 
 	modelUsed := ""
 	tokensUsed := 0
 
-	// ponytail: sequential calls, each bounded by the per-call organize timeout —
-	// worst case N×timeout wall-clock for N files. Parallel per-file calls (or a
-	// scaled aggregate deadline) if huge vaults make this bite in practice.
+	// Merge results IN INDEX ORDER (not completion order) so output is
+	// deterministic regardless of goroutine scheduling.
 	for i, f := range files {
-		if s.OrganizeProgress != nil {
-			s.OrganizeProgress(i+1, len(files), f.Name)
+		r := results[i]
+		if r.err != nil {
+			skipNotes = append(skipNotes, fmt.Sprintf("⚠ organize: %v — %s left unchanged this run, will retry next time", r.err, f.Name))
+			continue
 		}
-		user := fmt.Sprintf("Here is the single memory file to organize:\n\n=== FILE: %s ===\n%s\n=== END ===", f.Name, f.Content)
-		run, res, proceed := exec(ctx, organizeChunkSystemPrompt(f.Name), user)
-		if !proceed {
-			// Any per-file failure aborts the whole plan — a half-planned vault
-			// proposal is worse than none, and nothing has been written yet.
-			res.Message = fmt.Sprintf("organize of %s failed: %s", f.Name, res.Message)
-			res.Success = false
-			return OrganizeProposal{}, res
-		}
-		modelUsed = run.modelUsed
-		tokensUsed += run.tokensUsed
-
-		newContent, moves, err := parseChunkResponse(f.Name, run.jsonContent)
-		if err != nil {
-			return OrganizeProposal{}, OrganizeResult{Success: false, Message: fmt.Sprintf("organize of %s: %v", f.Name, err)}
-		}
+		modelUsed = r.modelUsed
+		tokensUsed += r.tokensUsed
+		newContent := r.newContent
 
 		// Enforce the one-way sink + valid targets mechanically, whatever the
 		// model said: a discarded move puts its fact straight back in the file.
 		var kept []chunkMove
-		for _, mv := range moves {
+		for _, mv := range r.moves {
 			mv.Fact = ensureBullet(mv.Fact)
 			switch {
 			case f.Name == "personal.md":
@@ -102,6 +169,12 @@ func (s *Store) planOrganizeChunked(ctx context.Context, exec organizeExecutor, 
 		for _, mv := range kept {
 			pendingMoves = append(pendingMoves, routedMove{chunkMove: mv, fromIdx: fromIdx})
 		}
+	}
+
+	// Every file failed — nothing to propose, so report it as a hard failure
+	// rather than a silent empty success.
+	if len(changes) == 0 && len(skipNotes) > 0 {
+		return OrganizeProposal{}, OrganizeResult{Success: false, Message: strings.Join(skipNotes, "\n")}
 	}
 
 	// Mechanical routing pass: append every flagged fact to its target file's

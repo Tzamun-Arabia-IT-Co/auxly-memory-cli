@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"filippo.io/age"
@@ -15,12 +16,17 @@ import (
 )
 
 // fakeExec returns a canned per-file organize response keyed by the file name
-// found in the user prompt, and records which files were sent.
+// found in the user prompt, and records which files were sent. Guarded by a
+// mutex: planOrganizeChunked now calls exec from a worker pool (Optimization
+// 2), so *called is written from multiple goroutines concurrently.
 func fakeExec(t *testing.T, responses map[string]string, called *[]string) organizeExecutor {
+	var mu sync.Mutex
 	return func(ctx context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
 		for name, resp := range responses {
 			if strings.Contains(user, "=== FILE: "+name+" ===") {
+				mu.Lock()
 				*called = append(*called, name)
+				mu.Unlock()
 				return organizeRun{jsonContent: resp, modelUsed: "fake", tokensUsed: 10}, OrganizeResult{}, true
 			}
 		}
@@ -62,7 +68,7 @@ func TestChunkedOrganizePerFileWithMoves(t *testing.T) {
 		"infra.md": chunkResp("infra.md", "- server ip 192.168.1.24\n"),
 	}, &called)
 
-	prop, res := s.planOrganize(context.Background(), "", exec)
+	prop, res := s.planOrganize(context.Background(), "", false, exec)
 	if !res.Success {
 		t.Fatalf("plan failed: %s", res.Message)
 	}
@@ -103,7 +109,7 @@ func TestChunkedOrganizePersonalSinkOneWay(t *testing.T) {
 		"business.md": chunkResp("business.md", "- company contract with client X\n"),
 	}, &called)
 
-	prop, res := s.planOrganize(context.Background(), "", exec)
+	prop, res := s.planOrganize(context.Background(), "", false, exec)
 	if !res.Success {
 		t.Fatalf("plan failed: %s", res.Message)
 	}
@@ -134,7 +140,7 @@ func TestChunkedOrganizeInvalidMoveTargetKeepsFact(t *testing.T) {
 		"infra.md": chunkResp("infra.md", "- box one\n"),
 	}, &called)
 
-	prop, res := s.planOrganize(context.Background(), "", exec)
+	prop, res := s.planOrganize(context.Background(), "", false, exec)
 	if !res.Success {
 		t.Fatalf("plan failed: %s", res.Message)
 	}
@@ -192,7 +198,7 @@ func TestChunkedOrganize_SkipsMoveToUnreadableEncryptedTarget(t *testing.T) {
 		"infra.md": chunkResp("infra.md", "- server ip 10.0.0.5\n"),
 	}, &called)
 
-	prop, res := s.planOrganize(context.Background(), "", exec)
+	prop, res := s.planOrganize(context.Background(), "", false, exec)
 	if !res.Success {
 		t.Fatalf("plan failed: %s", res.Message)
 	}
@@ -240,7 +246,7 @@ func TestSmallVaultStaysWholeVault(t *testing.T) {
 		return organizeRun{jsonContent: resp, modelUsed: "fake", tokensUsed: 10}, OrganizeResult{}, true
 	}
 
-	_, res := s.planOrganize(context.Background(), "", exec)
+	_, res := s.planOrganize(context.Background(), "", false, exec)
 	if !res.Success {
 		t.Fatalf("plan failed: %s", res.Message)
 	}
@@ -249,9 +255,13 @@ func TestSmallVaultStaysWholeVault(t *testing.T) {
 	}
 }
 
-// TestChunkedOrganizeAbortsOnFileFailure: one failed per-file call aborts the
-// whole plan — never a half-planned proposal.
-func TestChunkedOrganizeAbortsOnFileFailure(t *testing.T) {
+// TestChunkedOrganizePartialFailureAppliesSuccesses: one failed per-file call
+// must NOT sink the batch — the failing file is left out (untouched on disk,
+// retried next run) while every other file's result still applies. Updated
+// from the prior "aborts the whole plan" behavior as part of parallelizing
+// the chunked path (organize_chunk.go): sequential-abort made every file pay
+// for one bad call, which no longer holds once calls run concurrently.
+func TestChunkedOrganizePartialFailureAppliesSuccesses(t *testing.T) {
 	root := t.TempDir()
 	s := &Store{Root: root}
 	writeVaultFile(t, root, "identity.md", "- name wael\n")
@@ -266,15 +276,15 @@ func TestChunkedOrganizeAbortsOnFileFailure(t *testing.T) {
 		return organizeRun{jsonContent: chunkResp("identity.md", "- name wael\n"), modelUsed: "fake"}, OrganizeResult{}, true
 	}
 
-	prop, res := s.planOrganize(context.Background(), "", exec)
-	if res.Success {
-		t.Fatal("expected failure result")
+	prop, res := s.planOrganize(context.Background(), "", false, exec)
+	if !res.Success {
+		t.Fatalf("a partial failure must not fail the whole plan: %s", res.Message)
 	}
-	if len(prop.Changes) != 0 {
-		t.Fatalf("failed plan must carry no changes, got %d", len(prop.Changes))
+	if len(prop.Changes) != 1 || prop.Changes[0].Name != "identity.md" {
+		t.Fatalf("expected only identity.md's successful result, got %+v", prop.Changes)
 	}
-	if !strings.Contains(res.Message, "infra.md") {
-		t.Fatalf("failure should name the file: %s", res.Message)
+	if !strings.Contains(prop.Warning, "infra.md") {
+		t.Fatalf("failure should be reported in Warning and name the file: %s", prop.Warning)
 	}
 }
 

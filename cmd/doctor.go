@@ -131,6 +131,24 @@ func doctorReport(memPath string, probeLinks bool) string {
 		if shadows := encryptedWorkspaceShadows(store); len(shadows) > 0 {
 			line("⚠", fmt.Sprintf("workspace override(s) shadow %d encrypted file(s) in plaintext: %s", len(shadows), strings.Join(shadows, ", ")), "an agent in this workspace reads/writes plaintext, bypassing encryption — remove the workspace copy or encrypt it too")
 		}
+
+		// 4d. Crash-recovery heal: organize's "decrypt temporarily" CLI-agent
+		// path (Store.TempDecryptForOrganize) writes a sentinel before
+		// decrypting anything, so a kill -9 mid-run can't leave a vault file
+		// silently plaintext forever. doctor REPAIRS on every run rather than
+		// just reporting — the sentinel exists precisely so healing doesn't
+		// depend on the user remembering it does.
+		// MINOR 6: ReencryptPending serializes its sentinel bookkeeping under
+		// LockVault, so this can't race/clobber a LIVE TempDecryptForOrganize
+		// or its restore() running concurrently — see the doc comment on
+		// Store.ReencryptPending.
+		if healed, herr := store.ReencryptPending(); herr != nil {
+			line("✗", fmt.Sprintf("interrupted organize re-encrypt failed: %v", herr), "run `auxly encrypt file <name>` on the affected file(s) manually")
+		} else if len(healed) > 0 {
+			line("⚠", fmt.Sprintf("healed %d file(s) left plaintext by an interrupted organize: %s", len(healed), strings.Join(healed, ", ")), "")
+		} else {
+			line("✓", "no interrupted organize to heal", "")
+		}
 	}
 
 	// 5. Agents + MCP wiring

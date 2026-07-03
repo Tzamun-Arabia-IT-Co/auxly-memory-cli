@@ -118,7 +118,7 @@ func TestOrganizeAgent_NotGated(t *testing.T) {
 	if err := store.Write("identity.md", "# Identity\n- Name: Test\n"); err != nil {
 		t.Fatal(err)
 	}
-	_, res := store.PlanOrganizeWithAgent(context.Background(), "Claude Code / CLI", "/bin/echo", "")
+	_, res := store.PlanOrganizeWithAgent(context.Background(), "Claude Code / CLI", "/bin/echo", "", false)
 	if strings.Contains(res.Message, "isn't available") {
 		t.Errorf("agent plan path must not be gated, got: %s", res.Message)
 	}
@@ -140,7 +140,7 @@ func TestPlanOrganize_RefusesCLIAgentWithEncryptedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, res := store.PlanOrganizeWithAgent(context.Background(), "Claude Code / CLI", "/definitely/not/a/real/binary", "")
+	_, res := store.PlanOrganizeWithAgent(context.Background(), "Claude Code / CLI", "/definitely/not/a/real/binary", "", false)
 	if res.Success {
 		t.Fatal("organize via a CLI agent succeeded despite an encrypted file present")
 	}
@@ -149,6 +149,82 @@ func TestPlanOrganize_RefusesCLIAgentWithEncryptedFile(t *testing.T) {
 	}
 	if strings.Contains(res.Message, "not runnable") {
 		t.Fatal("guard was bypassed — got an exec-failure message instead of the pre-exec refusal (a subprocess was spawned)")
+	}
+}
+
+// TestGatherOrganizeFiles_SkipEncryptedExcludes locks skipEncrypted's
+// contract: an excluded file is neither gathered (so its plaintext never
+// leaves the vault) nor silently dropped from view — its name comes back in
+// skipped so callers can report it.
+func TestGatherOrganizeFiles_SkipEncryptedExcludes(t *testing.T) {
+	s := NewStore(t.TempDir())
+	testVaultIdentity(t)
+	if err := s.Write("identity.md", "# Identity\n- Name: Test\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write("personal.md", "# Personal\n- secret\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EncryptFile("personal.md"); err != nil {
+		t.Fatal(err)
+	}
+
+	files, skipped, err := s.gatherOrganizeFiles(true)
+	if err != nil {
+		t.Fatalf("gatherOrganizeFiles(true): %v", err)
+	}
+	for _, f := range files {
+		if f.Name == "personal.md" {
+			t.Fatal("personal.md was not excluded with skipEncrypted=true")
+		}
+	}
+	if len(skipped) != 1 || skipped[0] != "personal.md" {
+		t.Fatalf("skipped = %v, want [personal.md]", skipped)
+	}
+
+	filesAll, skippedAll, err := s.gatherOrganizeFiles(false)
+	if err != nil {
+		t.Fatalf("gatherOrganizeFiles(false): %v", err)
+	}
+	if len(skippedAll) != 0 {
+		t.Fatalf("skipped = %v with skipEncrypted=false, want none", skippedAll)
+	}
+	found := false
+	for _, f := range filesAll {
+		if f.Name == "personal.md" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("personal.md missing when skipEncrypted=false")
+	}
+}
+
+// TestPlanOrganize_SkipEncryptedBypassesRefusal proves skipEncrypted lets a
+// CLI-agent plan proceed instead of hitting the CRITICAL 3 refusal, and that
+// the skipped file is surfaced on the resulting proposal.
+func TestPlanOrganize_SkipEncryptedBypassesRefusal(t *testing.T) {
+	store := NewStore(t.TempDir())
+	testVaultIdentity(t)
+	if err := store.Write("identity.md", "# Identity\n- Name: Test\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write("personal.md", "# Personal\n- secret\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EncryptFile("personal.md"); err != nil {
+		t.Fatal(err)
+	}
+
+	exec := func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+		return organizeRun{jsonContent: `{"files":[{"name":"identity.md","content":"# Identity\n- Name: Test\n"}]}`}, OrganizeResult{}, true
+	}
+	prop, res := store.planOrganize(context.Background(), "/bin/echo", true, exec)
+	if !res.Success {
+		t.Fatalf("plan with skipEncrypted should not be refused, got: %s", res.Message)
+	}
+	if len(prop.SkippedEncrypted) != 1 || prop.SkippedEncrypted[0] != "personal.md" {
+		t.Fatalf("SkippedEncrypted = %v, want [personal.md]", prop.SkippedEncrypted)
 	}
 }
 
@@ -162,7 +238,7 @@ func TestPlanOrganize_DoesNotWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _ = store.PlanOrganizeWithAgent(context.Background(), "Some Future Agent", "/bin/echo", "")
+	_, _ = store.PlanOrganizeWithAgent(context.Background(), "Some Future Agent", "/bin/echo", "", false)
 	if c, _ := store.View("identity.md"); c != "# Identity\n- Name: Test\n" {
 		t.Errorf("planning must not write identity.md; got: %q", c)
 	}

@@ -188,6 +188,17 @@ type OrganizeProposal struct {
 	// prompt promises zero loss but a weak model can drop facts silently).
 	// Review UIs MUST show it before the user applies anything.
 	Warning string
+	// SkippedEncrypted lists organizable files excluded from this run because
+	// the caller passed skipEncrypted=true to planOrganize (the CLI-agent
+	// "skip encrypted file(s)" choice) — surfaced so callers can tell the
+	// user which files never left the vault.
+	SkippedEncrypted []string
+	// DroppedDeltaOps lists delta-mode (organize_delta.go) ops that were
+	// discarded because their bullet text wasn't found verbatim in the source
+	// file — informational only. Deliberately NOT folded into Warning: a
+	// dropped op leaves the fact exactly where it already was, so it is never
+	// a fact-loss signal and must not block headless auto-apply.
+	DroppedDeltaOps []string
 }
 
 // buildProposalFromJSON parses an organize model's JSON output into a set of
@@ -396,10 +407,16 @@ func (s *Store) ApplyOrganizeChanges(changes []ProposedChange) string {
 	}
 	defer unlock()
 
+	// justSeen (Optimization 1) collects the post-apply content hash of every
+	// file this run actually confirmed current — written successfully, or
+	// already matching the plan with zero drift — merged into the dirty-file
+	// ledger below so the NEXT organize skips it until it's actually edited
+	// again. A file that hits any abort/skip/fail branch below is
+	// DELIBERATELY left out: it must stay "dirty" so the next run retries it,
+	// never silently marked done on a change that never actually landed.
+	justSeen := make(map[string]string, len(changes))
+
 	for _, c := range changes {
-		if !c.Changed() {
-			continue
-		}
 		current, viewErr := s.View(c.Name)
 		if viewErr != nil {
 			if !errors.Is(viewErr, os.ErrNotExist) {
@@ -418,13 +435,28 @@ func (s *Store) ApplyOrganizeChanges(changes []ProposedChange) string {
 			diffBuilder.WriteString(fmt.Sprintf("⚠ skipped %s: file changed while organize was planning — re-run organize\n", c.Name))
 			continue
 		}
+		if !c.Changed() {
+			// Model/ops decided this file needed no edits — it's still fully
+			// "organized" as of its current (verified-fresh) content, so mark
+			// it seen without touching disk.
+			justSeen[c.Name] = hashText(current)
+			continue
+		}
 		if werr := s.writeScopedNoLock(c.Name, c.NewContent, c.Scope); werr != nil {
 			diffBuilder.WriteString(fmt.Sprintf("⚠ failed %s: %v\n", c.Name, werr))
 			continue
 		}
+		justSeen[c.Name] = hashText(c.NewContent)
 		if d := generateDiff(c.Name, c.OldContent, c.NewContent); d != "" {
 			diffBuilder.WriteString(d + "\n")
 		}
+	}
+	if len(justSeen) > 0 {
+		seen := loadOrganizeSeen(s.Root)
+		for name, h := range justSeen {
+			seen[name] = h
+		}
+		saveOrganizeSeen(s.Root, seen)
 	}
 	// unified_memory.md recompiles lazily on next read (Store.View mtime check).
 	return diffBuilder.String()
@@ -534,7 +566,7 @@ func (s *Store) GetEstimatedTokens() int {
 
 // OrganizeVault executes a smart LLM consolidation batch across all memory files.
 func (s *Store) OrganizeVault() OrganizeResult {
-	return s.OrganizeVaultWithAgent("Direct LLM", "")
+	return s.OrganizeVaultWithAgent("Direct LLM", "", false)
 }
 
 // organizeRun is the raw model output of one consolidation run, before it is
@@ -552,18 +584,49 @@ type organizeFile struct {
 	Encrypted bool // true when this file is encrypted at rest (see planOrganize's CLI-agent guard)
 }
 
-// gatherOrganizeFiles snapshots every USER-MEMORY taxonomy file. Setup/
+// gatherOrganizeFiles snapshots every USER-MEMORY taxonomy file that has
+// changed since the last successful organize (see organize_seen.go). This is
+// the stable wrapper kept for existing callers/tests — it always applies the
+// dirty-file skip (forceAll=false); planOrganizeOpts is the entry point that
+// can bypass it. See gatherOrganizeFilesOpts for the full contract.
+func (s *Store) gatherOrganizeFiles(skipEncrypted bool) (files []organizeFile, skipped []string, err error) {
+	files, skipped, _, err = s.gatherOrganizeFilesOpts(skipEncrypted, false)
+	return files, skipped, err
+}
+
+// gatherOrganizeFilesOpts snapshots every USER-MEMORY taxonomy file. Setup/
 // instruction files (CLAUDE.md, AGENTS.md, providers.md, …), the generated
 // aggregate, and the agent-activity log (agents.md) are never read or
 // reorganized.
-func (s *Store) gatherOrganizeFiles() ([]organizeFile, error) {
-	files, err := s.List()
+//
+// skipEncrypted, when true, excludes encrypted-at-rest files entirely
+// (neither decrypted nor sent anywhere) instead of including their plaintext
+// — the CLI-agent "skip encrypted file(s) this run" choice. Excluded names
+// are returned in skipped.
+//
+// forceAll, when false (the default — Optimization 1), additionally excludes
+// any file whose current content hash matches organize-seen.json: it hasn't
+// changed since it was last successfully organized, so re-sending it to a
+// model would just pay the (dominant) model-call cost for a no-op result.
+// cleanCount reports how many organizable files were excluded this way, so
+// callers can tell "nothing dirty" apart from "vault is empty". forceAll=true
+// restores today's whole-vault behavior — the TUI "re-run everything" case.
+func (s *Store) gatherOrganizeFilesOpts(skipEncrypted, forceAll bool) (files []organizeFile, skipped []string, cleanCount int, err error) {
+	all, err := s.List()
 	if err != nil {
-		return nil, err
+		return nil, nil, 0, err
 	}
-	var out []organizeFile
-	for _, f := range files {
+	var seen map[string]string
+	if !forceAll {
+		seen = loadOrganizeSeen(s.Root)
+	}
+	for _, f := range all {
 		if !IsOrganizableFile(f.Name) {
+			continue
+		}
+		encrypted := s.fileIsEncrypted(f.Name)
+		if skipEncrypted && encrypted {
+			skipped = append(skipped, f.Name)
 			continue
 		}
 		// ponytail: View decrypts an encrypted file, and its plaintext then
@@ -573,14 +636,41 @@ func (s *Store) gatherOrganizeFiles() ([]organizeFile, error) {
 		// path still accepts that risk; planOrganize refuses the CLI-agent
 		// path outright when any gathered file is encrypted (CRITICAL 3 —
 		// that path would additionally expose the decrypted content on the
-		// spawned process's argv, ps-visible for the run's whole duration).
-		content, err := s.View(f.Name)
-		if err != nil {
+		// spawned process's argv, ps-visible for the run's whole duration)
+		// unless skipEncrypted excluded it above or the caller ran
+		// TempDecryptForOrganize first (so it's plaintext on disk already).
+		content, verr := s.View(f.Name)
+		if verr != nil {
 			continue
 		}
-		out = append(out, organizeFile{Name: f.Name, Content: content, Encrypted: s.fileIsEncrypted(f.Name)})
+		if !forceAll {
+			if h, ok := seen[f.Name]; ok && h == hashText(content) {
+				cleanCount++
+				continue
+			}
+		}
+		files = append(files, organizeFile{Name: f.Name, Content: content, Encrypted: encrypted})
 	}
-	return out, nil
+	return files, skipped, cleanCount, nil
+}
+
+// EncryptedOrganizableFiles returns the names of organizable vault files (see
+// IsOrganizableFile) that are currently encrypted at rest — a cheap header
+// sniff, no key required. Callers (the TUI organize tab, `auxly organize`)
+// use this to warn/offer choices BEFORE picking a CLI-agent provider, since
+// planOrganize's guard refuses outright once any are present.
+func (s *Store) EncryptedOrganizableFiles() []string {
+	files, err := s.List()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, f := range files {
+		if IsOrganizableFile(f.Name) && s.fileIsEncrypted(f.Name) {
+			out = append(out, f.Name)
+		}
+	}
+	return out
 }
 
 // encryptedOrganizeFileNames returns the names of gathered files that are
@@ -803,10 +893,34 @@ func (s *Store) runOrganizeModel(ctx context.Context, agentName string, agentPat
 // (CLI agent, provider chat API, custom endpoint) is the closure's business.
 type organizeExecutor func(ctx context.Context, systemPrompt, userPrompt string) (organizeRun, OrganizeResult, bool)
 
-// planOrganize is the shared organize planner: snapshot the vault, then either
-// one whole-vault model call (small vaults — existing behavior) or one call PER
-// FILE when the payload exceeds the chunk threshold, so organize scales to any
-// vault size instead of hitting model context limits.
+// OrganizeRunOpts are the opt-in knobs for a single organize run, layered on
+// top of the stable planOrganize/PlanOrganizeWithAgent signatures so every
+// existing caller (cmd/, tui/, tests) keeps compiling untouched. Both default
+// false — see planOrganizeOpts and organize_delta.go for why DeltaMode ships
+// OFF this release.
+type OrganizeRunOpts struct {
+	// ForceAll bypasses the dirty-file ledger (organize_seen.go) and replans
+	// every organizable file, not just ones changed since the last successful
+	// organize. Wired for the TUI's "re-run everything" action.
+	ForceAll bool
+	// DeltaMode asks the model for small move/merge/delete OPERATIONS instead
+	// of rewriting every file's full content (organize_delta.go) — the
+	// biggest latency lever, and the highest risk, so it stays opt-in.
+	DeltaMode bool
+}
+
+// planOrganize is the shared organize planner, forceAll/deltaMode both off —
+// kept as the stable entry point for existing callers/tests. See
+// planOrganizeOpts for the full contract.
+func (s *Store) planOrganize(ctx context.Context, agentPath string, skipEncrypted bool, exec organizeExecutor) (OrganizeProposal, OrganizeResult) {
+	return s.planOrganizeOpts(ctx, agentPath, skipEncrypted, OrganizeRunOpts{}, exec)
+}
+
+// planOrganizeOpts is planOrganize with OrganizeRunOpts: snapshot the vault
+// (honoring the dirty-file ledger unless ForceAll), then either one whole-vault
+// model call (small vaults — existing behavior, or DeltaMode's op-based
+// variant), or one call PER FILE when the payload exceeds the chunk threshold,
+// so organize scales to any vault size instead of hitting model context limits.
 //
 // agentPath mirrors runOrganizeModel's: non-empty means a CLI agent will run
 // this plan as a subprocess. CRITICAL 3: that subprocess receives the whole
@@ -815,32 +929,57 @@ type organizeExecutor func(ctx context.Context, systemPrompt, userPrompt string)
 // duration (up to organizeTimeout, 900s by default) — unlike the Direct LLM/
 // API path, which only sends it over an HTTPS body. So a CLI-agent run is
 // refused outright when any gathered file is encrypted, BEFORE either the
-// whole-vault or the chunked call is made (one guard covers both).
-func (s *Store) planOrganize(ctx context.Context, agentPath string, exec organizeExecutor) (OrganizeProposal, OrganizeResult) {
-	files, err := s.gatherOrganizeFiles()
+// whole-vault or the chunked call is made (one guard covers both) — UNLESS
+// skipEncrypted already excluded them (gatherOrganizeFiles) or the caller
+// ran TempDecryptForOrganize first so nothing gathered is encrypted anymore.
+func (s *Store) planOrganizeOpts(ctx context.Context, agentPath string, skipEncrypted bool, opts OrganizeRunOpts, exec organizeExecutor) (OrganizeProposal, OrganizeResult) {
+	files, skipped, cleanCount, err := s.gatherOrganizeFilesOpts(skipEncrypted, opts.ForceAll)
 	if err != nil {
 		return OrganizeProposal{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to list files: %v", err)}
 	}
 	if len(files) == 0 {
-		return OrganizeProposal{}, OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}
+		switch {
+		case cleanCount > 0:
+			// Optimization 1's payoff: nothing dirty since the last successful
+			// organize — skip the model call entirely instead of re-sending an
+			// already-tidy vault.
+			return OrganizeProposal{}, OrganizeResult{Success: true, Message: fmt.Sprintf("already tidy — %d file(s) unchanged since last run", cleanCount)}
+		case len(skipped) > 0:
+			return OrganizeProposal{}, OrganizeResult{Success: true, Message: fmt.Sprintf("Nothing to organize — %d encrypted file(s) skipped: %s", len(skipped), strings.Join(skipped, ", "))}
+		default:
+			return OrganizeProposal{}, OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}
+		}
 	}
 	if agentPath != "" {
 		if enc := encryptedOrganizeFileNames(files); len(enc) > 0 {
 			return OrganizeProposal{}, OrganizeResult{Success: false, Message: fmt.Sprintf(
-				"organize via a CLI agent would expose decrypted content on the process command line; use the Direct LLM provider or decrypt first (encrypted: %s)",
+				"organize via a CLI agent would expose decrypted content on the process command line; "+
+					"use the Direct LLM provider, skip them with --skip-encrypted, decrypt just for this run with "+
+					"--decrypt-temporarily, or decrypt first (encrypted: %s)",
 				strings.Join(enc, ", "))}
 		}
 	}
 
-	if len(files) > 1 && estimateVaultTokens(files) > organizeChunkThreshold() {
-		return s.planOrganizeChunked(ctx, exec, files)
+	var prop OrganizeProposal
+	var res OrganizeResult
+	switch {
+	case len(files) > 1 && estimateVaultTokens(files) > organizeChunkThreshold():
+		// Chunked path already pays its own cost-per-call in file count, not
+		// payload size, so DeltaMode (a payload-size lever) doesn't apply here.
+		prop, res = s.planOrganizeChunked(ctx, exec, files)
+	case opts.DeltaMode:
+		prop, res = s.planOrganizeDelta(ctx, exec, files)
+	default:
+		run, r, proceed := exec(ctx, organizeSystemPrompt(), vaultUserPrompt(files))
+		if !proceed {
+			return OrganizeProposal{}, r
+		}
+		prop, res = s.buildProposalFromJSON(run.jsonContent, run.modelUsed, run.tokensUsed)
 	}
-
-	run, res, proceed := exec(ctx, organizeSystemPrompt(), vaultUserPrompt(files))
-	if !proceed {
-		return OrganizeProposal{}, res
+	if res.Success {
+		prop.SkippedEncrypted = skipped
 	}
-	return s.buildProposalFromJSON(run.jsonContent, run.modelUsed, run.tokensUsed)
+	return prop, res
 }
 
 func estimateVaultTokens(files []organizeFile) int {
@@ -864,14 +1003,22 @@ func organizeChunkThreshold() int {
 	return 12000
 }
 
-func (s *Store) PlanOrganizeWithAgent(ctx context.Context, agentName, agentPath, model string) (OrganizeProposal, OrganizeResult) {
-	return s.planOrganize(ctx, agentPath, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+func (s *Store) PlanOrganizeWithAgent(ctx context.Context, agentName, agentPath, model string, skipEncrypted bool) (OrganizeProposal, OrganizeResult) {
+	return s.PlanOrganizeWithAgentOpts(ctx, agentName, agentPath, model, skipEncrypted, OrganizeRunOpts{})
+}
+
+// PlanOrganizeWithAgentOpts is PlanOrganizeWithAgent with OrganizeRunOpts —
+// the TUI's "re-run everything" (ForceAll) and the dark-launched delta
+// response contract (DeltaMode) both thread through here without touching
+// PlanOrganizeWithAgent's stable signature.
+func (s *Store) PlanOrganizeWithAgentOpts(ctx context.Context, agentName, agentPath, model string, skipEncrypted bool, opts OrganizeRunOpts) (OrganizeProposal, OrganizeResult) {
+	return s.planOrganizeOpts(ctx, agentPath, skipEncrypted, opts, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
 		return s.runOrganizeModel(c, agentName, agentPath, model, sys, user)
 	})
 }
 
-func (s *Store) OrganizeVaultWithAgent(agentName, agentPath string) OrganizeResult {
-	prop, res := s.PlanOrganizeWithAgent(context.Background(), agentName, agentPath, "")
+func (s *Store) OrganizeVaultWithAgent(agentName, agentPath string, skipEncrypted bool) OrganizeResult {
+	prop, res := s.PlanOrganizeWithAgent(context.Background(), agentName, agentPath, "", skipEncrypted)
 	if !res.Success {
 		return res
 	}
@@ -882,7 +1029,11 @@ func (s *Store) OrganizeVaultWithAgent(agentName, agentPath string) OrganizeResu
 		return br
 	}
 	diff := s.ApplyOrganizeChanges(prop.Changes)
-	return OrganizeResult{Success: true, Message: fmt.Sprintf("✓ Memory vault organized successfully using %s!", prop.ModelUsed), Diff: diff, TokensUsed: prop.TokensUsed, Warning: prop.Warning}
+	msg := fmt.Sprintf("✓ Memory vault organized successfully using %s!", prop.ModelUsed)
+	if len(prop.SkippedEncrypted) > 0 {
+		msg += fmt.Sprintf(" (%d encrypted file(s) skipped: %s)", len(prop.SkippedEncrypted), strings.Join(prop.SkippedEncrypted, ", "))
+	}
+	return OrganizeResult{Success: true, Message: msg, Diff: diff, TokensUsed: prop.TokensUsed, Warning: prop.Warning}
 }
 
 // blockOnFactLoss enforces RULE 0 on the HEADLESS organize paths: these apply
@@ -1169,13 +1320,13 @@ func (s *Store) PlanOrganizeWithProvider(ctx context.Context, provider, customUR
 	if !ok {
 		return OrganizeProposal{}, res
 	}
-	return s.planOrganize(ctx, "", func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+	return s.planOrganize(ctx, "", false, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
 		return s.runOrganizeChat(c, strings.TrimRight(baseURL, "/")+"/v1/chat/completions", model, apiKey, sys, user)
 	})
 }
 
 func (s *Store) PlanOrganizeWithCustom(ctx context.Context, endpoint, model string) (OrganizeProposal, OrganizeResult) {
-	return s.planOrganize(ctx, "", func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+	return s.planOrganize(ctx, "", false, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
 		return s.runOrganizeChat(c, normalizeOrganizeChatURL(endpoint), model, os.Getenv("AUXLY_LLM_KEY"), sys, user)
 	})
 }

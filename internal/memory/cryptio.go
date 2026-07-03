@@ -2,10 +2,12 @@ package memory
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"filippo.io/age"
 
@@ -365,4 +367,267 @@ func (s *Store) PrewarmCrypto() {
 	}
 	_, _ = s.vaultIdentity()
 	_, _ = s.vaultRecipient()
+}
+
+// --- organize's "decrypt temporarily" escape hatch ---------------------
+//
+// Organize via a CLI agent puts the vault content on the spawned process's
+// argv (see organize.go's planOrganize). A user who explicitly consents can
+// have Auxly decrypt the affected files for the duration of one run instead
+// of refusing outright — TempDecryptForOrganize/ReencryptPending are that
+// path's crash-safe plumbing.
+
+// reencryptSentinelPath is the crash-recovery marker for an in-flight
+// TempDecryptForOrganize: while it exists, the listed files are expected to
+// be plaintext on disk and NEED re-encrypting. Living under .index/ mirrors
+// the embeddings.db sidecar (see indexDBPath) — vault-internal bookkeeping,
+// never a memory content file.
+func (s *Store) reencryptSentinelPath() string {
+	return filepath.Join(s.Root, ".index", "reencrypt-pending.json")
+}
+
+type reencryptSentinel struct {
+	Files []string `json:"files"`
+}
+
+// readSentinelSet reads the current sentinel as a set. A missing file is an
+// empty set (not an error); a corrupt one IS an error — callers must not
+// silently treat corrupt bookkeeping as "nothing pending".
+func (s *Store) readSentinelSet() (map[string]bool, error) {
+	data, err := os.ReadFile(s.reencryptSentinelPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return map[string]bool{}, nil
+		}
+		return nil, err
+	}
+	var sentinel reencryptSentinel
+	if err := json.Unmarshal(data, &sentinel); err != nil {
+		return nil, fmt.Errorf("corrupt reencrypt sentinel: %w", err)
+	}
+	set := make(map[string]bool, len(sentinel.Files))
+	for _, f := range sentinel.Files {
+		set[f] = true
+	}
+	return set, nil
+}
+
+// writeSentinelSetLocked persists set, or removes the sentinel file entirely
+// once it's empty. Caller must hold LockVault.
+func (s *Store) writeSentinelSetLocked(set map[string]bool) error {
+	if len(set) == 0 {
+		err := os.Remove(s.reencryptSentinelPath())
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	names := make([]string, 0, len(set))
+	for f := range set {
+		names = append(names, f)
+	}
+	sort.Strings(names) // deterministic on-disk content
+	data, err := json.Marshal(reencryptSentinel{Files: names})
+	if err != nil {
+		return err
+	}
+	return AtomicWriteFile(s.reencryptSentinelPath(), data, 0o600)
+}
+
+// writeReencryptSentinel MERGES files into whatever the sentinel already
+// lists, under LockVault.
+//
+// CRITICAL 2: writing the sentinel used to be an unlocked last-write-wins
+// overwrite — two overlapping TempDecryptForOrganize calls (two organize
+// runs, or an organize run racing a doctor heal) would stomp each other's
+// file list, so a process killed after the SECOND write left the FIRST
+// run's files plaintext with no crash-recovery record at all. Locking the
+// read-modify-write and treating the sentinel as a set (never a raw
+// overwrite) means every in-flight run's files stay listed until THAT run's
+// own restore()/heal removes exactly its own entries.
+func (s *Store) writeReencryptSentinel(files []string) error {
+	unlock, err := LockVault(s.Root)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	set, err := s.readSentinelSet()
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		set[f] = true
+	}
+	return s.writeSentinelSetLocked(set)
+}
+
+// removeFromSentinel removes exactly `files` from the shared sentinel set
+// (never a blind overwrite/delete — see writeReencryptSentinel), deleting the
+// sentinel file only once the set becomes empty. Locked, so it can't race a
+// concurrent add/remove.
+func (s *Store) removeFromSentinel(files []string) error {
+	if len(files) == 0 {
+		return nil
+	}
+	unlock, err := LockVault(s.Root)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	set, err := s.readSentinelSet()
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		delete(set, f)
+	}
+	return s.writeSentinelSetLocked(set)
+}
+
+// healAndClearSentinel re-encrypts every currently-plaintext name in names
+// and removes ONLY the names that resolved (re-encrypted, already-encrypted,
+// or deleted meanwhile) from the shared crash-recovery sentinel. A name that
+// still fails to re-encrypt stays listed so the next heal (doctor, TUI-open,
+// or another restore) retries it. Shared by TempDecryptForOrganize's
+// rollback/restore AND ReencryptPending, so there is exactly one place that
+// mutates the sentinel after resolving files (CRITICAL 2b/2c).
+func (s *Store) healAndClearSentinel(names []string) (healed []string, errs []error) {
+	var resolved []string
+	for _, name := range names {
+		ok, err := s.reencryptIfPlaintext(name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		resolved = append(resolved, name)
+		if ok {
+			healed = append(healed, name)
+		}
+	}
+	if err := s.removeFromSentinel(resolved); err != nil {
+		errs = append(errs, fmt.Errorf("update reencrypt sentinel: %w", err))
+	}
+	return healed, errs
+}
+
+// reencryptIfPlaintext re-encrypts name IF it currently exists on disk AND is
+// plaintext; a missing file (deleted meanwhile) or an already-encrypted one
+// (e.g. a second heal attempt) is a no-op, never an error — both are fine
+// end states, not failures to report.
+func (s *Store) reencryptIfPlaintext(name string) (healed bool, err error) {
+	path, err := s.resolvePath(name)
+	if err != nil {
+		return false, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if vaultcrypt.IsEncrypted(raw) {
+		return false, nil
+	}
+	if err := s.EncryptFile(name); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// TempDecryptForOrganize decrypts each of files IN PLACE on disk so a CLI
+// agent's organize run can read them as plaintext for one run. The caller
+// has already obtained explicit user consent (the TUI/CLI choice) —
+// Store.DecryptFile itself never prompts, so this just drives it per file.
+//
+// SAFETY-CRITICAL: before decrypting ANYTHING, a crash-recovery sentinel is
+// written listing every file about to be touched. If the process dies
+// mid-run (kill -9, power loss — the caller's deferred restore() never
+// runs), that sentinel survives on disk and ReencryptPending — called from
+// `auxly doctor` and on every TUI organize-tab open — heals it later.
+// Without this, an interrupted run could leave a file like personal.md
+// silently plaintext forever.
+//
+// Callers MUST defer the returned restore() across every exit path. restore
+// re-encrypts every file and clears the sentinel ONLY once all of them
+// succeed; on partial failure the sentinel is left in place (so the next
+// ReencryptPending retries) and the failing files are named in the error.
+func (s *Store) TempDecryptForOrganize(files []string) (restore func() error, err error) {
+	if len(files) == 0 {
+		return func() error { return nil }, nil
+	}
+	if err := s.writeReencryptSentinel(files); err != nil {
+		return nil, fmt.Errorf("write crash-recovery sentinel: %w", err)
+	}
+	for i, f := range files {
+		if err := s.DecryptFile(f); err != nil {
+			// Roll back whatever we already decrypted before surfacing the
+			// error — restore() never runs (the caller's defer only starts
+			// once this function returns successfully), so any file this
+			// loop already touched must be put back itself.
+			// CRITICAL 2: healAndClearSentinel clears ONLY the entries it
+			// resolved (files[:i]) from the shared sentinel — a concurrent
+			// TempDecryptForOrganize's own files, if any, are untouched.
+			_, _ = s.healAndClearSentinel(files[:i])
+			return nil, fmt.Errorf("decrypt %s for organize: %w", f, err)
+		}
+	}
+	return func() error {
+		_, errs := s.healAndClearSentinel(files)
+		if len(errs) == 0 {
+			return nil
+		}
+		return fmt.Errorf("re-encrypt after organize (run `auxly encrypt file <name>` on each): %w", errors.Join(errs...))
+	}, nil
+}
+
+// ReencryptPending reads the crash-recovery sentinel (if any) and
+// re-encrypts every listed file that is still plaintext on disk — healing a
+// TempDecryptForOrganize run that was interrupted before its restore() could
+// run. Tolerates files that are already encrypted (e.g. a previous partial
+// heal) or no longer exist (deleted meanwhile). Returns the names it
+// actually re-encrypted, for a caller (doctor, the TUI) to report.
+//
+// MINOR 6: this runs unprompted on every `auxly doctor` and every TUI
+// organize-tab open, which could otherwise race a LIVE
+// TempDecryptForOrganize run and re-encrypt a file the CLI agent is mid-read
+// on. Reading the sentinel snapshot under LockVault, and routing every
+// resolve+clear through healAndClearSentinel/removeFromSentinel (which are
+// themselves locked), serializes this heal's BOOKKEEPING against a
+// concurrent TempDecrypt/restore call — it can never lose or clobber that
+// run's sentinel entries. The one narrow residual window — this heal
+// observing a file that TempDecrypt's own DecryptFile call just finished,
+// microseconds before the CLI agent has actually read it — is accepted as a
+// MINOR (not CRITICAL) risk: TempDecryptForOrganize always writes the
+// sentinel BEFORE touching any file, so that window is vanishingly small
+// compared to the run's overall duration, and a "spurious refusal" there is
+// merely re-runnable, never a data-loss event.
+func (s *Store) ReencryptPending() ([]string, error) {
+	unlock, err := LockVault(s.Root)
+	if err != nil {
+		return nil, err
+	}
+	set, err := s.readSentinelSet()
+	unlock()
+	if err != nil {
+		// A corrupt sentinel can never heal itself — remove it rather than
+		// get permanently stuck; a human can re-check with `auxly encrypt
+		// status` for any straggler.
+		_ = os.Remove(s.reencryptSentinelPath())
+		return nil, fmt.Errorf("corrupt reencrypt sentinel (removed): %w", err)
+	}
+	if len(set) == 0 {
+		return nil, nil
+	}
+	names := make([]string, 0, len(set))
+	for f := range set {
+		names = append(names, f)
+	}
+	sort.Strings(names)
+
+	healed, errs := s.healAndClearSentinel(names)
+	if len(errs) > 0 {
+		return healed, fmt.Errorf("re-encrypt pending files (run `auxly encrypt file <name>` on each): %w", errors.Join(errs...))
+	}
+	return healed, nil
 }

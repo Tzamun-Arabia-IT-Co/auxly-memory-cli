@@ -113,6 +113,23 @@ type organizeModel struct {
 	urlEditing bool
 	confirming bool // [y]/[n] confirmation popup is up before a run
 
+	// Encrypted-file choice: shown instead of starting a CLI-agent run when
+	// the vault has encrypted organizable files (a CLI agent's subprocess
+	// would otherwise carry decrypted content on its argv for the run).
+	encChoice           bool         // [s]/[y]/[esc] choice modal is up
+	encFiles            []string     // encrypted organizable files driving the modal
+	skipEncryptedRun    bool         // [s]: this run excludes encrypted files from the payload
+	pendingRestore      func() error // TempDecryptForOrganize's restore, set after [y] until the run completes/cancels
+	pendingRestoreFiles []string     // the files pendingRestore covers (for the status/error message)
+	restoreFailure      string       // LOUD banner text when restore failed after a decrypt-temporarily run
+	// restoring is true from the moment consumeRestoreCmd dispatches the
+	// re-encrypt tea.Cmd until orgRestoredMsg lands (MAJOR 5): the run's mode
+	// flips back to orgIdle/orgReview as soon as the model call returns, but
+	// the async re-encrypt goroutine can still be in flight — capturesInput
+	// must keep blocking quit/tab-switch through that window too, or `q`
+	// exits the whole app while a vault file is still plaintext on disk.
+	restoring bool
+
 	lastRun          string
 	lastTokensUsed   int
 	lastFilesChanged int
@@ -199,6 +216,15 @@ func newOrganizeModel(store *memory.Store, memoryPath string, logger *audit.Logg
 		editor:           editor,
 	}
 	mdl.refreshEstimate()
+	// Auto-heal: a prior "decrypt temporarily" run that got killed mid-way
+	// (see Store.TempDecryptForOrganize) can leave a file plaintext on disk
+	// with its restore never having run. Check on every organize-tab open so
+	// it never depends on the user remembering `auxly doctor` exists.
+	if healed, herr := store.ReencryptPending(); herr != nil {
+		mdl.errMsg = "auto-heal of an interrupted organize failed: " + herr.Error()
+	} else if len(healed) > 0 {
+		mdl.status = fmt.Sprintf("re-encrypted %d file(s) left plaintext by an interrupted organize: %s", len(healed), strings.Join(healed, ", "))
+	}
 	return mdl
 }
 
@@ -310,8 +336,9 @@ func (m organizeModel) Refresh() tea.Cmd { return nil }
 func (m organizeModel) capturesInput() bool {
 	// orgRunning captures input so esc/ctrl+c route here to cancel the run rather than
 	// quitting the app or switching tabs; the screen is focus-locked until the run
-	// finishes or the user cancels.
-	return m.mode == orgEditing || m.urlEditing || m.confirming || m.mode == orgRunning
+	// finishes or the user cancels. restoring (MAJOR 5) keeps that lock held past the
+	// mode transition back to orgIdle/orgReview while the async re-encrypt is in flight.
+	return m.mode == orgEditing || m.urlEditing || m.confirming || m.encChoice || m.mode == orgRunning || m.restoring
 }
 
 func readOrganizeStats(memoryPath string) (lastRun string, tokens, filesChanged int) {
@@ -456,11 +483,12 @@ func (m organizeModel) runPlanCmd(ctx context.Context) tea.Cmd {
 	store := m.store
 	provider, target, model := m.planTarget()
 	prov := m.currentProvider()
+	skipEncrypted := m.skipEncryptedRun
 	return func() tea.Msg {
 		var prop memory.OrganizeProposal
 		var res memory.OrganizeResult
 		if prov.kind == "agent" {
-			prop, res = store.PlanOrganizeWithAgent(ctx, provider, target, model)
+			prop, res = store.PlanOrganizeWithAgent(ctx, provider, target, model, skipEncrypted)
 		} else {
 			prop, res = store.PlanOrganizeWithProvider(ctx, provider, target, model)
 		}
@@ -468,8 +496,81 @@ func (m organizeModel) runPlanCmd(ctx context.Context) tea.Cmd {
 	}
 }
 
+// orgTempDecryptedMsg carries the result of TempDecryptForOrganize, dispatched
+// after the user chooses [y] on the encrypted-file choice modal.
+type orgTempDecryptedMsg struct {
+	restore func() error
+	err     error
+}
+
+func (m organizeModel) tempDecryptCmd(files []string) tea.Cmd {
+	store := m.store
+	return func() tea.Msg {
+		restore, err := store.TempDecryptForOrganize(files)
+		return orgTempDecryptedMsg{restore: restore, err: err}
+	}
+}
+
+// orgRestoredMsg carries the result of re-encrypting files that were
+// temporarily decrypted for one CLI-agent run.
+type orgRestoredMsg struct {
+	err   error
+	files []string
+}
+
+// consumeRestoreCmd returns a tea.Cmd that runs the pending restore() (if
+// any) off the Update goroutine and clears it from the model, so a run that
+// finishes OR is cancelled always re-encrypts exactly once. Safe to call even
+// when nothing is pending (returns nil).
+func (m *organizeModel) consumeRestoreCmd() tea.Cmd {
+	if m.pendingRestore == nil {
+		return nil
+	}
+	restore := m.pendingRestore
+	files := m.pendingRestoreFiles
+	m.pendingRestore = nil
+	m.pendingRestoreFiles = nil
+	m.restoring = true // MAJOR 5: held until orgRestoredMsg lands
+	return func() tea.Msg {
+		return orgRestoredMsg{err: restore(), files: files}
+	}
+}
+
 func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
+	// MAJOR 5: while a re-encrypt is in flight, swallow quit/cancel keys here
+	// instead of letting them reach app.go's global "q"/"ctrl+c" quit (which
+	// capturesInput() now routes through this model) — the process must never
+	// exit while a vault file is still plaintext on disk mid-restore.
+	if km, ok := msg.(tea.KeyMsg); ok && m.restoring {
+		switch km.String() {
+		case "q", "ctrl+c", "esc":
+			m.status = "re-encrypting, please wait…"
+			return m, nil
+		}
+	}
 	switch msg := msg.(type) {
+	case orgTempDecryptedMsg:
+		if msg.err != nil {
+			m.errMsg = "Could not decrypt for this run: " + msg.err.Error()
+			m.pendingRestoreFiles = nil
+			return m, nil
+		}
+		m.pendingRestore = msg.restore
+		return m.startRun()
+	case orgRestoredMsg:
+		m.restoring = false // MAJOR 5: quit/tab-switch unblock now that the re-encrypt landed
+		if msg.err != nil {
+			m.restoreFailure = fmt.Sprintf("RE-ENCRYPT FAILED after organize — %s may still be PLAINTEXT on disk: %v. Run `auxly encrypt file <name>` on each to fix.",
+				strings.Join(msg.files, ", "), msg.err)
+		} else if len(msg.files) > 0 {
+			note := fmt.Sprintf("re-encrypted %d file(s) ✓", len(msg.files))
+			if m.status == "" {
+				m.status = note
+			} else {
+				m.status += "  ·  " + note
+			}
+		}
+		return m, nil
 	case orgModelsFetchedMsg:
 		m.fetching = false
 		if msg.success {
@@ -511,11 +612,15 @@ func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
 			m.runCancel()
 			m.runCancel = nil
 		}
+		// A "decrypt temporarily" run always re-encrypts once the planning
+		// call returns, success or failure — the CLI agent's subprocess has
+		// already run by now, so nothing further needs the plaintext.
+		restoreCmd := m.consumeRestoreCmd()
 		if !msg.res.Success {
 			m.mode = orgIdle
 			m.errMsg = msg.res.Message
 			m.status = ""
-			return m, nil
+			return m, restoreCmd
 		}
 		filtered := make([]memory.ProposedChange, 0, len(msg.prop.Changes))
 		for _, c := range msg.prop.Changes {
@@ -527,7 +632,7 @@ func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
 			m.mode = orgIdle
 			m.status = "Nothing to organize."
 			m.errMsg = ""
-			return m, nil
+			return m, restoreCmd
 		}
 		m.proposal = msg.prop
 		m.changes = append([]memory.ProposedChange(nil), filtered...)
@@ -541,9 +646,17 @@ func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
 		if msg.prop.Warning != "" {
 			m.status = strings.SplitN(msg.prop.Warning, "\n", 2)[0]
 		}
+		if len(msg.prop.SkippedEncrypted) > 0 {
+			skipNote := fmt.Sprintf("%d encrypted file(s) skipped this run: %s", len(msg.prop.SkippedEncrypted), strings.Join(msg.prop.SkippedEncrypted, ", "))
+			if m.status == "" {
+				m.status = skipNote
+			} else {
+				m.status += "  ·  " + skipNote
+			}
+		}
 		m.errMsg = ""
 		m.loadCurrentChange()
-		return m, nil
+		return m, restoreCmd
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
@@ -574,10 +687,14 @@ func (m organizeModel) updateRunning(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 			m.runCancel()
 			m.runCancel = nil
 		}
+		// A cancelled "decrypt temporarily" run still must re-encrypt — the
+		// subprocess may already have read the plaintext by the time esc is
+		// pressed, but nothing should stay decrypted on disk either way.
+		restoreCmd := m.consumeRestoreCmd()
 		m.mode = orgIdle
 		m.status = "Run cancelled."
 		m.errMsg = ""
-		return m, nil
+		return m, restoreCmd
 	}
 	return m, nil
 }
@@ -730,11 +847,43 @@ func (m *organizeModel) advanceToNextUndecided() {
 }
 
 func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
+	// The encrypted-file choice modal owns the keyboard while it is up —
+	// takes priority over the plain confirm popup since it only appears
+	// AFTER that popup's [y].
+	if m.encChoice {
+		switch msg.String() {
+		case "s", "S":
+			m.encChoice = false
+			m.skipEncryptedRun = true
+			return m.startRun()
+		case "y", "Y":
+			m.encChoice = false
+			files := append([]string(nil), m.encFiles...)
+			m.pendingRestoreFiles = files
+			return m, m.tempDecryptCmd(files)
+		case "esc", "n", "N", "q":
+			m.encChoice = false
+			m.encFiles = nil
+		}
+		return m, nil
+	}
 	// Confirmation popup owns the keyboard while it is up.
 	if m.confirming {
 		switch msg.String() {
 		case "y", "Y", "enter":
 			m.confirming = false
+			// CLI agents receive the vault content on their subprocess's argv
+			// (ps-visible for the run) — offer a choice instead of letting the
+			// run hit planOrganize's hard refusal when encrypted files exist.
+			// Direct LLM/API providers never expose argv, so they skip straight
+			// to the run.
+			if m.currentProvider().kind == "agent" {
+				if enc := m.store.EncryptedOrganizableFiles(); len(enc) > 0 {
+					m.encFiles = enc
+					m.encChoice = true
+					return m, nil
+				}
+			}
 			return m.startRun()
 		case "n", "N", "esc", "q":
 			m.confirming = false
@@ -845,6 +994,7 @@ func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 			m.picked = modelValueForProvider(m.currentProvider(), firstModelLabel(m.currentProvider(), nil))
 		}
 		m.confirming = true
+		m.skipEncryptedRun = false // fresh run — any earlier [s] choice doesn't carry over
 		return m, nil
 	}
 	return m, nil
@@ -859,6 +1009,7 @@ func (m organizeModel) startRun() (organizeModel, tea.Cmd) {
 	m.runProgress = 20
 	m.status = ""
 	m.errMsg = ""
+	m.restoreFailure = "" // fresh run — an old decrypt-temporarily failure banner shouldn't linger forever
 	m.runProvider = m.currentProvider().label
 	if mdl := strings.TrimSpace(m.picked); mdl != "" {
 		m.runModel = mdl
@@ -1121,6 +1272,8 @@ func (m *organizeModel) reset() {
 	m.status = ""
 	m.errMsg = ""
 	m.confirming = false
+	m.encChoice = false
+	m.encFiles = nil
 	m.editor.Blur()
 }
 
@@ -1271,6 +1424,19 @@ func (m *organizeModel) resizeCustomInput() {
 }
 
 func (m organizeModel) View() string {
+	body := m.renderMode()
+	// restoreFailure means a "decrypt temporarily" run left a file plaintext
+	// on disk — this must stay visible no matter which screen the user is on
+	// (they may have already moved into review by the time it fires), so it's
+	// prepended here rather than folded into any one mode's status line.
+	if m.restoreFailure != "" {
+		banner := lipgloss.NewStyle().Bold(true).Foreground(ColorDanger).Render("⚠ " + m.restoreFailure)
+		return banner + "\n\n" + body
+	}
+	return body
+}
+
+func (m organizeModel) renderMode() string {
 	switch m.mode {
 	case orgRunning:
 		return m.runningView()
@@ -1419,7 +1585,37 @@ func (m organizeModel) confirmView() string {
 	return b.String()
 }
 
+// encChoiceView renders the [s]/[y]/[esc] choice shown when the user picked a
+// CLI-agent provider and the vault has encrypted organizable files: that
+// agent's subprocess would otherwise carry the decrypted content on its argv
+// for the run (planOrganize's hard refusal), so this offers a way forward
+// instead of a dead end.
+func (m organizeModel) encChoiceView() string {
+	subject := strings.Join(m.encFiles, ", ") + " is"
+	if len(m.encFiles) > 1 {
+		subject = strings.Join(m.encFiles, ", ") + " are"
+	}
+
+	var inner strings.Builder
+	inner.WriteString(orgPanelTitleStyle.Render("Encrypted at rest") + "\n\n")
+	inner.WriteString(subject + " encrypted at rest.\n")
+	inner.WriteString("A CLI agent receives decrypted content on its command line for the run.\n\n")
+	inner.WriteString(orgGoodStyle.Render("[s]") + " skip encrypted file(s) this run\n")
+	inner.WriteString(orgGoodStyle.Render("[y]") + " decrypt temporarily — re-encrypted automatically when the run finishes\n")
+	inner.WriteString(orgDimStyle.Render("[esc] cancel (Direct LLM has no exposure)"))
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(ColorWarning).Padding(1, 3).Render(inner.String())
+
+	var b strings.Builder
+	b.WriteString(StyleTitle.Render("Memory Organization"))
+	b.WriteString("\n\n")
+	b.WriteString(box)
+	return b.String()
+}
+
 func (m organizeModel) idleView() string {
+	if m.encChoice {
+		return m.encChoiceView()
+	}
 	if m.confirming {
 		return m.confirmView()
 	}

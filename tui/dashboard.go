@@ -271,9 +271,14 @@ func newDashboardModel(logger *audit.Logger, mgr *pending.Manager, memoryPath st
 		feedCursor, _ = logger.LatestEventID()
 	}
 	return dashboardModel{
-		logger:           logger,
-		pendingMgr:       mgr,
-		memoryPath:       memoryPath,
+		logger:     logger,
+		pendingMgr: mgr,
+		memoryPath: memoryPath,
+		// Seed a non-nil (zero) Stats at construction so the very first paint
+		// renders the full box layout (System Diagnostics, Memory Store, Active
+		// Connections) instead of the "Loading dashboard..." skeleton — avoids a
+		// layout jump between the pre-refresh and post-refresh frames.
+		stats:            &audit.Stats{ByProvider: map[string]int{}, ByAction: map[string]int{}},
 		blinkCycle:       0,
 		animationStarted: false,
 		mcpError:         "",
@@ -308,6 +313,15 @@ func initialActivity(logger *audit.Logger) []string {
 // gate every tick would re-write the same day's row for no reason.
 func shouldRecordVaultSize(lastBytes int64, lastDay string, bytes int64, today string) bool {
 	return today != lastDay || bytes != lastBytes
+}
+
+// statsLooksBlank reports whether s looks like an empty/zeroed snapshot — the
+// shape audit.Logger.Stats returns on an internal query hiccup (it swallows
+// SQL errors and returns a technically-valid, all-zero struct rather than a
+// real error). Used by the dashboardRefreshMsg handler to avoid trusting such
+// a snapshot over a previously-populated one.
+func statsLooksBlank(s *audit.Stats) bool {
+	return s == nil || (s.TotalEntries == 0 && s.LastWriteTime == "")
 }
 
 func (m dashboardModel) Refresh() tea.Cmd {
@@ -406,13 +420,33 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 	case dashboardRefreshMsg:
-		m.stats = msg.stats
+		// Guard against a transient read hiccup clobbering a section that was
+		// already showing real content. The underlying reads
+		// (audit.Logger.Stats/TailWrites, memory.Store.List) swallow their own
+		// internal errors and return a valid-looking empty/zeroed result instead
+		// of a real error (e.g. Stats() never returns err != nil even when its
+		// SQL queries fail) — so this can't be caught via `err != nil` upstream.
+		// It's caught here instead: a read that regresses straight from
+		// populated to blank/empty is treated as a hiccup and discarded in favor
+		// of the last-known-good data; a read that stays blank (nothing to lose)
+		// or brings real content is always accepted.
+		// ponytail: value-only heuristic, no debounce/counter. A genuine "vault
+		// just emptied" won't be reflected live this way — it lands on the next
+		// dashboard open (a fresh model starts blank). Upgrade path if that ever
+		// matters: require N consecutive empty reads before trusting the drop.
+		if !statsLooksBlank(msg.stats) || statsLooksBlank(m.stats) {
+			m.stats = msg.stats
+		}
 		m.pendingCnt = msg.pendingCnt
 		m.trustCfg = msg.trustCfg
 		m.activeProviders = msg.activeProviders
-		m.recentWrites = msg.recentWrites
-		m.composition = msg.composition
-		m.unreadableCategories = msg.unreadableCategories
+		if len(msg.recentWrites) > 0 || len(m.recentWrites) == 0 {
+			m.recentWrites = msg.recentWrites
+		}
+		if len(msg.composition) > 0 || len(m.composition) == 0 {
+			m.composition = msg.composition
+			m.unreadableCategories = msg.unreadableCategories
+		}
 		m.pendingFiles = msg.pendingFiles
 		m.remoteScope = msg.remoteScope
 		m.sessions = msg.sessions
@@ -808,6 +842,20 @@ func (m dashboardModel) View() string {
 	return m.renderBody(m.bodyCompact())
 }
 
+// dashboardChromeFull approximates the vertical chrome OUTSIDE the dashboard's
+// own render (the app shell's tab bar + footer + blank separators, full/
+// non-compact layout) — used both to decide compact vs full (bodyCompact) and,
+// in compact mode, to size the feed sections so the rendered body fits the
+// tighter clamp app.go enforces around dashboard content, instead of being
+// silently truncated from the bottom (see renderBody).
+const dashboardChromeFull = 6 // tabs(2) + footer(1) + blank separators in the full layout
+
+// dashboardChromeTight is the same idea as dashboardChromeFull but for the
+// TIGHT (compact) layout specifically, which app.go renders with zero blank
+// separators (see its `tight` branch) — so it's 2 rows less than the full
+// figure above. Used only by renderBody's compact-mode shrink loop.
+const dashboardChromeTight = 4 // tabs(2) + footer(1) + no blank separator, +1 safety margin
+
 // bodyCompact decides, by MEASURING, whether the dashboard body must tighten to
 // fit the terminal height beneath the always-full logo. The dashboard is the one
 // screen that fits rather than scrolls (a fixed overview), so it tightens the body
@@ -821,15 +869,58 @@ func (m dashboardModel) bodyCompact() bool {
 	if m.height <= 0 {
 		return false
 	}
-	const chromeFull = 6 // tabs(2) + footer(1) + blank separators in the full layout
 	bFull := lipgloss.Height(renderBanner(m.width))
-	if bFull+chromeFull+lipgloss.Height(m.renderBody(false)) <= m.height {
+	if bFull+dashboardChromeFull+lipgloss.Height(m.renderBody(false)) <= m.height {
 		return false
 	}
 	return true
 }
 
+// dashboardEnrichN scales how many rows of enrichment (composition breakdown,
+// recent/live feeds) the dashboard shows, based on terminal height — taller
+// panes show more. It's also compact mode's STARTING point before renderBody
+// shrinks it further (feedRows) to actually fit the tight-layout clamp.
+func dashboardEnrichN(height int) int {
+	switch {
+	case height > 0 && height < 56:
+		return 4
+	case height > 0 && height < 64:
+		return 6
+	default:
+		return 9
+	}
+}
+
+// renderBody renders the dashboard body. Full mode fits by construction —
+// bodyCompact only picks it when the whole thing already fits — but compact
+// mode must additionally be sized to fit app.go's TIGHT layout clamp on its
+// own: that clamp keeps only the top N lines of an overflowing body, so an
+// unbounded feed section would get silently cut off from the bottom instead
+// of gracefully shrinking (the reported bug — see renderBodyAt, the feeds are
+// the LAST thing that should ever disappear). This shrinks the feed row
+// budget until the render actually fits, falling back to 0 (no feed — the
+// pre-fix compact baseline) only if nothing else does.
 func (m dashboardModel) renderBody(compact bool) string {
+	enrichN := dashboardEnrichN(m.height)
+	if !compact || m.height <= 0 {
+		return m.renderBodyAt(compact, enrichN)
+	}
+	bFull := lipgloss.Height(renderBanner(m.width))
+	budget := m.height - bFull - dashboardChromeTight
+	for feedRows := enrichN; feedRows >= 0; feedRows-- {
+		body := m.renderBodyAt(true, feedRows)
+		if lipgloss.Height(body) <= budget {
+			return body
+		}
+	}
+	return m.renderBodyAt(true, 0)
+}
+
+// renderBodyAt is renderBody's implementation, parameterized on feedRows — the
+// row cap for the "what just happened" feeds specifically (see renderBody's
+// compact-mode shrink loop above). Every other enrichment tier keys off
+// enrichN as before.
+func (m dashboardModel) renderBodyAt(compact bool, feedRows int) string {
 	title := StyleTitle.Render("📊 Auxly-Memory CLI Dashboard")
 
 	clockStr := time.Now().Format("02/01/2006 15:04:05")
@@ -891,13 +982,7 @@ func (m dashboardModel) renderBody(compact bool) string {
 	)
 	// Enrichment depth scales with terminal height so the rich dashboard fits more
 	// terminals before falling back to compact: taller panes show more rows.
-	enrichN := 9
-	switch {
-	case m.height > 0 && m.height < 56:
-		enrichN = 4
-	case m.height > 0 && m.height < 64:
-		enrichN = 6
-	}
+	enrichN := dashboardEnrichN(m.height)
 	// Memory-by-category breakdown sits in the left column's spare height — full
 	// mode only, so compact panes don't grow.
 	if !compact {
@@ -960,21 +1045,32 @@ func (m dashboardModel) renderBody(compact bool) string {
 	}
 
 	rightCol := fmt.Sprintf("%s\n%s", StyleHeader.Render("📡 Connected Agent Brands"), gridSection)
-	// Pending approvals (when any) and the "what just happened" feed fill the space
-	// under the grid — full mode only. Pending sits first: it's actionable.
+	// Pending approvals are decorative/supplementary enrichment — dropped first
+	// under height pressure, full mode only (same tier as the composition
+	// breakdown and charts in the left column above).
 	if !compact {
 		if pend := m.renderPendingInline(5); pend != "" {
-			rightCol += "\n\n" + pend
+			rightCol += sep + pend
 		}
-		if feed := m.renderRecentFeed(enrichN); feed != "" {
-			rightCol += "\n\n" + feed
+	}
+	// The "what just happened" feeds are the HIGHEST-priority enrichment — they
+	// answer "is anything happening right now" — so they render regardless of
+	// compact, as long as there's data AND feedRows > 0 (renderBody's shrink
+	// loop only falls back to 0 — matching the pre-fix compact baseline of no
+	// feed at all — when even a 1-row feed can't fit). Reported bug: a single
+	// `compact` bit used to gate ALL enrichment (charts, composition, AND the
+	// feed) at once, and bodyCompact()'s fit check measures the CURRENT
+	// content's height — so as connections/composition/feed data grew across
+	// ticks, the same terminal size could flip into compact mid-session and
+	// blank the feed right along with the decorative charts. Compact still
+	// tightens spacing (sep) and drops composition detail / vault chart / write
+	// bars / pending above; it just never drops these while there's room.
+	if feedRows > 0 {
+		if feed := m.renderRecentFeed(feedRows); feed != "" {
+			rightCol += sep + feed
 		}
-		// Same height-scaling budget as the other enrichment rows above — a
-		// fixed 8 rows regardless of terminal height was what pushed a fully
-		// populated body (all three chart sections + a full feed) out of the
-		// zero-spare-rows budget (see TestDashboardRichFitsTallWideTerminal).
-		if live := m.renderActivityFeed(enrichN); live != "" {
-			rightCol += "\n\n" + live
+		if live := m.renderActivityFeed(feedRows); live != "" {
+			rightCol += sep + live
 		}
 	}
 
