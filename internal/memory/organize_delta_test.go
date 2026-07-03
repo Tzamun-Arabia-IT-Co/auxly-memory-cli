@@ -173,3 +173,31 @@ func TestDeltaMode_DefaultOff(t *testing.T) {
 		t.Fatal("default (non-opt-in) path must never send the delta-ops prompt")
 	}
 }
+
+// TestDeltaMode_EnvOptIn proves AUXLY_ORGANIZE_DELTA routes a plain run (no
+// OrganizeRunOpts{DeltaMode}) through the delta path — the opt-in the user
+// flips to get the single-run speedup without every caller passing the flag.
+func TestDeltaMode_EnvOptIn(t *testing.T) {
+	t.Setenv("AUXLY_ORGANIZE_DELTA", "1")
+	root := t.TempDir()
+	s := &Store{Root: root}
+	writeVaultFile(t, root, "projects.md", bullets(30, "keep")+"- duplicate fact\n- duplicate fact\n")
+
+	exec := func(ctx context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+		resp := deltaResp(deltaOp{Op: "delete", File: "projects.md", Bullet: "- duplicate fact"})
+		return organizeRun{jsonContent: resp, modelUsed: "fake", tokensUsed: 5}, OrganizeResult{}, true
+	}
+
+	// DeltaMode deliberately UNSET on opts — the env alone must route to delta.
+	prop, res := s.planOrganizeOpts(context.Background(), "", false, OrganizeRunOpts{}, exec)
+	if !res.Success {
+		t.Fatalf("env-opt-in delta plan failed: %s", res.Message)
+	}
+	byName := map[string]ProposedChange{}
+	for _, c := range prop.Changes {
+		byName[c.Name] = c
+	}
+	if strings.Count(byName["projects.md"].NewContent, "duplicate fact") != 1 {
+		t.Fatalf("delta delete did not run via env opt-in: %q", byName["projects.md"].NewContent)
+	}
+}

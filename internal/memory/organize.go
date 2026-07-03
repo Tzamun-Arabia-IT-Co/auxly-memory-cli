@@ -57,6 +57,19 @@ func scrubbedOrganizeEnv() []string {
 // AUXLY_ORGANIZE_TIMEOUT (whole seconds) for slow models or big vaults.
 const defaultOrganizeTimeout = 900 * time.Second
 
+// organizeDeltaEnabled reports whether the whole-vault organize should ask the
+// model for small move/merge/delete OPERATIONS instead of rewriting every
+// file's full content (organize_delta.go) — the biggest single-run latency
+// lever. Opt-in via AUXLY_ORGANIZE_DELTA={1,true,on,yes} while it proves out;
+// default off so existing behavior and tests are untouched.
+func organizeDeltaEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AUXLY_ORGANIZE_DELTA"))) {
+	case "1", "true", "on", "yes":
+		return true
+	}
+	return false
+}
+
 // organizeTimeout returns the CLI-agent execution timeout, honoring
 // AUXLY_ORGANIZE_TIMEOUT (seconds) when set to a positive integer.
 func organizeTimeout() time.Duration {
@@ -967,7 +980,13 @@ func (s *Store) planOrganizeOpts(ctx context.Context, agentPath string, skipEncr
 		// Chunked path already pays its own cost-per-call in file count, not
 		// payload size, so DeltaMode (a payload-size lever) doesn't apply here.
 		prop, res = s.planOrganizeChunked(ctx, exec, files)
-	case opts.DeltaMode:
+	case opts.DeltaMode || organizeDeltaEnabled():
+		// Delta is the biggest single-run latency lever (op-based output instead
+		// of full-file rewrites). Opt-in via AUXLY_ORGANIZE_DELTA while it proves
+		// out on real vaults; organize is review-gated and planOrganizeDelta
+		// reverts any file its guard flags, so the worst case is a rejected
+		// proposal, never a bad write. Env gate here (not the default) keeps every
+		// existing whole-file test — which never sets the var — unchanged.
 		prop, res = s.planOrganizeDelta(ctx, exec, files)
 	default:
 		run, r, proceed := exec(ctx, organizeSystemPrompt(), vaultUserPrompt(files))
