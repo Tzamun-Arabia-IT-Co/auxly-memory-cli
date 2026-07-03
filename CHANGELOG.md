@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-03
+
+The first release with vault encryption at rest, one-command SSH pairing,
+interactive recall playgrounds, fact decay & review, and automated contradiction
+sweeps. Vault security, analytics privacy, and agent trust-tuning are front and
+center. Every sprint shipped through an adversarial review pass — 70+ findings
+across ten sprints, every one fixed before merge.
+
+### Added
+
+- **Vault encryption at rest.** Run `auxly encrypt init` to initialize standard `age` X25519 encryption. Keys live securely in the macOS Keychain (using stdin via `security -i` to avoid argv exposure) or a `0600` file fallback outside the vault, making git sync safe for ciphertext. Supports per-file encryption, decryption, and status checks. It is strictly fail-closed: decryption failure never returns empty content, and CLI-agent organize passes are refused on encrypted files.
+- **One-command pairing.** Pair a consumer box to a memory host via `auxly host invite` (TUI `[i]`), generating a secure single-use token pinned to the host SSH key. Joining with `auxly join <token>` validates the pin directly on the connection using temporary `known_hosts` and strict host-key checking, provisioning the link and burning the invite atomically. Note that pairing authorizes Auxly access, not OS-level user accounts.
+- **Fact decay & review.** Prevent memory bloat with `auxly review` and the TUI Review tab (`-` key). Both list stale facts (old and recall-silent) tracked via a first-seen ledger so consolidation rewrites do not reset fact age, allowing you to archive them to `.archive/` (never deleted) or restamp them.
+- **Recall playground.** Access the playground with `?` in the TUI Memory tab to run experimental queries through the real recall pipeline. Displays score bars and floor cuts, and lets you cycle via `Tab` to preview what specific client ACL lenses allow them to read. Experimental queries never write to recall analytics.
+- **Recall analytics.** Every agent recall is recorded as query and per-fact SHA256 hashes only — raw text never touches the database. Powers per-file hit stats, fallback-rate health indicators, and `auxly stats --recall` metrics.
+- **Contradiction sweep.** Spot conflicting or redundant facts across files using `auxly organize --contradictions`. Leverages embeddings to find similar pairs judged by a single LLM call; losing sides are queued as pending with verdict comments, and superseded facts retain a dated trace instead of being erased.
+- **Trust auto-tuning.** Approve/reject decisions accumulate as per-agent evidence; `auxly trust suggest` recommends promotions to `auto` (≥50 decisions, ≥95% approved) or demotions to `read_only` (≥30% rejected), surfaced in `auxly doctor` and the TUI settings. Opt out via `tuning: off`.
+- **Memory browser.** Browse and edit your entire memory vault directly inside the TUI's Memory tab (`=` key). Edits and deletions flow through the pending queue for verification, and duplicate-content deletions are rejected.
+- **Approvals upgrade.** Features colorized diffs, TTL countdown badges, and bulk approvals by agent (`A`) or file (`F`) with conflict-skip safety. TUI approval actions now count toward trust evidence.
+- **Dashboard upgrades.** Introduces a 1-second incremental, deduped live activity feed, a 30-day vault-size sparkline, and 7-day per-agent write bars.
+- **Capture parity.** `auxly hooks install --agent claude|codex|gemini|kimi` extracts message text only, filters tool output, and generates injection-safe shell wrappers.
+
+### Fixed
+
+- **System hardening.** Configures SQLite `audit.db` write-ahead logging (WAL) and `busy_timeout` for reliable multi-process operations.
+- Over 70 adversarial-review findings fixed across sprints S12 to S21 before merging.
+
 ## [1.2.0] - 2026-07-02
 
 The biggest release since 1.0: memory data-safety, per-project memory,

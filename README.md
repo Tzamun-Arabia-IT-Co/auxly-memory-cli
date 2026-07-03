@@ -25,18 +25,20 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.2.0
+## 🆕 What's New in Version 1.3.0
 
-**The biggest release since 1.0** — memory that organizes itself, remote links that heal themselves, and sessions that teach your memory.
+**A major security and usability milestone** — vault encryption at rest, one-command SSH pairing, real-time recall playgrounds, fact decay & review, and contradiction sweeps.
 
-- **📁 Per-project memory.** Project facts now live in `projects/<slug>.md` — one file per repo — routed automatically from your workspace. Migrate an existing monolith with `auxly organize --split-projects`: backed up first, every piece human-approved, and a mechanical fact-loss gate means the split *cannot* drop a fact.
-- **🪄 Passive auto-capture (opt-in).** `auxly hooks install` — after each Claude Code session, durable facts are extracted from the transcript and queued for your approval. Your memory learns while you work.
-- **🧠 Session primer + supersede.** Sessions start pre-grounded (who you are, top preferences, this project, last 7 days), and a new fact that contradicts an old one *replaces* it with a dated `was:` trace instead of piling up stale lines.
-- **🔗 Seamless remote connect.** `auxly connect <box>` provisions a box end-to-end from your screen — installs auxly, wires its agents to *your* memory, and proves the link with a real read before claiming success. Links self-heal: keep-alive auto-repairs, tunnels back off and reconnect, an hourly reconciler re-wires drift, and agents show **MEMORY LINK LOST** instead of silently reading stale data. Watch it all in `auxly host clients` or the dashboard's Remote tab health cells.
-- **✅ Pending queue, grown up.** `auxly pending` table with agent attribution, bulk `approve|reject --all / --agent / --file`, 30-day auto-archive, and better recall (relevance floor + recency, faster repeat queries).
-- **🪟 Windows trust groundwork.** PE version-info embedded in release exes and a dormant Authenticode signing hook — the $0 signed-release path (SignPath + Defender submission + winget) is staged in RELEASING.md.
+- **🔒 Vault encryption at rest.** Run `auxly encrypt init` to secure memory files via `age` X25519 encryption, storing keys in the macOS Keychain or `0600` file fallback outside the vault. It operates fail-closed, prunes index plaintext, and allows safe git syncing of ciphertext.
+- **🔑 One-command pairing.** Mints secure, single-use invitation tokens via `auxly host invite` (TUI `[i]`), which consumer machines join atomically using `auxly join <token>` over safe host-key-pinned SSH connections.
+- **🎮 Recall playground.** Hit `?` in the TUI Memory tab to test queries against the real recall pipeline with live score bars, relevance floor indicators, and provider lenses showing exactly what connected ACLs permit.
+- **⏳ Fact decay & review.** Keep your vault clean. `auxly review` and TUI Review (`-`) identify stale, recall-silent facts using a first-seen ledger, allowing you to archive them to `.archive/` (never deleted) or restamp them.
+- **🧹 Contradiction sweep.** `auxly organize --contradictions` spots cross-file similar facts using embeddings, resolves duplicates/clashes via a single LLM call, and queues them for pending review with dated traces.
+- **📈 Trust auto-tuning.** Suggests promotions (to `auto`) or demotions (to `read_only`) for agents automatically as approval evidence accumulates.
+- **🗂️ Memory browser.** Browse and edit your full memory vault directly inside the TUI's Memory tab ('=' key), with all changes flowing through the pending queue for security.
+- **📊 Dashboard & approvals upgrades.** Richer live activity feeds, sparklines, write bars, colorized diffs, TTL badges, and batch approvals by agent or file with conflict-skip capability.
 
-Looking for **1.1.x** (organize agent fixes, Kimi skills, the Windows end-to-end pass), **Semantic Recall** from 1.1.0, or 1.0.20's security hardening? See the [CHANGELOG](CHANGELOG.md) for the full history.
+Looking for **1.2.0** (per-project memory, remote keep-alive, auto-capture), **Semantic Recall** from 1.1.0, or past Windows fixes? See the [CHANGELOG](CHANGELOG.md) for the full history.
 
 ---
 
@@ -48,7 +50,7 @@ Looking for **1.1.x** (organize agent fixes, Kimi skills, the Windows end-to-end
 - [Uninstall](#uninstall)
 - [Quick start](#quick-start)
 - [The memory vault](#the-memory-vault)
-- [Memory insights & review (1.3)](#memory-insights--review-13)
+- [Memory insights & review](#memory-insights--review)
 - [Trust & access control](#trust--access-control)
 - [Skills (slash commands)](#skills-slash-commands)
 - [Supported agents](#supported-agents)
@@ -316,9 +318,9 @@ Edit any of these by hand at any time — Auxly treats the files as the source o
 
 ---
 
-## Memory insights & review (1.3)
+## Memory insights & review
 
-v1.3 makes memory visible and self-maintaining — the vault tracks which facts agents actually use (hashes only, never query text), ages out stale facts through a human-approved review queue, and flags cross-file contradictions.
+Auxly makes memory visible and self-maintaining — the vault tracks which facts agents actually use (hashes only, never query text), ages out stale facts through a human-approved review queue, and flags cross-file contradictions.
 
 ### `auxly stats --recall`
 
@@ -343,14 +345,26 @@ auxly review --keep-all     # re-stamp every flagged fact and move on
 auxly review --archive-all  # archive every flagged fact
 ```
 
-- **Keep** re-stamps the fact's date, so it won't come up for review again until it's stale once more.
+- **Keep** re-stamps the fact's date via a first-seen ledger (consolidation rewrites do not reset fact age), so it won't come up for review again until it's stale once more.
 - **Archive** moves the fact into `.archive/` — never deleted, still plain text, still greppable.
 - `personal.md` is excluded by default; pass `--include-personal` to include it too.
-- Same queue lives in the dashboard's **Review** tab (`-`) — `K` keeps, `a` archives.
+- Same queue lives in the dashboard's **Review** tab (`-`) — `K` keeps, `a` archives. All actions are audit-logged.
 
 ### `auxly organize --contradictions`
 
-`auxly organize --contradictions` embeds your facts and pairs up suspiciously-similar ones across files, then has an LLM judge each pair as a contradiction or a plain duplicate. Resolutions land in the normal pending queue tagged with the model's reason — **review them first with `auxly pending`, then `auxly approve <name>` to see each diff**. Bulk `auxly approve --agent organize-contradictions` applies every queued resolution **without a preview**, so only run it after you've reviewed. The pass needs an embeddings provider configured to run.
+`auxly organize --contradictions` embeds your facts and pairs up suspiciously-similar ones across files, then has an LLM judge each pair as a contradiction, duplicate, or distinct. Resolutions land in the normal pending queue tagged with the model's reason — **review them first with `auxly pending`, then `auxly approve <name>` to see each diff**. Bulk `auxly approve --agent organize-contradictions` applies every queued resolution **without a preview**, so only run it after you've reviewed. The pass needs an embeddings provider configured to run. When contradicted, facts are superseded with a dated trace and never erased.
+
+### Memory Browser (`=`)
+
+The full vault can be browsed and edited directly inside the TUI's Memory tab by pressing `=`. Every edit or deletion flows through the pending queue for verification, and duplicate-content deletions are rejected.
+
+### Recall Playground (`?`)
+
+Press `?` in the TUI's Memory tab to launch the recall playground. Run any query through the real recall pipeline with visual score bars, floor cuts, and press `Tab` to cycle through client provider ACL lenses to see exactly what each connected client is permitted to view. Experimental queries in the playground never pollute analytics.
+
+### Trust Auto-Tuning (`auxly trust suggest`)
+
+Approve/reject decisions accumulate as evidence. The `auxly trust suggest` command (also surfaced in `auxly doctor` and TUI settings) proposes promoting agents to `auto` (when at least 50 writes have been decided and at least 95% approved) or demoting them to `read_only` (when 30% or more are rejected). You can opt out via setting `tuning: off` in config.
 
 Everything above is read-only until a human approves it — analytics never mutate the vault.
 
@@ -590,6 +604,15 @@ auxly host down        # stop serving
 
 **Multiple boxes stay connected at the same time** — each gets its own independent, self-healing tunnel, supervised by a single keep-alive. Connecting one box never disconnects another.
 
+### One-command pairing
+
+Pairing a consumer machine with a memory host is as simple as generating an invite token on the host and joining from the client. Note that the joiner must already have SSH login access to the host; the invite authorizes the Auxly memory pairing, not OS-level user access.
+
+1. On the **host**, run `auxly host invite` (or press `i` in the TUI's Remote tab). This mints a secure, single-use token pinned to the host's SSH public key, complete with a configurable time-to-live (TTL). You can manage invites with `auxly host invite --list` and `auxly host invite --revoke`.
+2. On the **consumer**, run `auxly join <token>`.
+
+The join command connects to the host, verifies the host key pin directly on the connection carrying the secret (utilizing temporary `known_hosts` and `StrictHostKeyChecking=yes` for injection safety), provisions the consumer via the existing self-test path, and atomically burns the invite token on the host. Token fields are strictly validated and shell-quoted as hostile input to prevent exploit vectors.
+
 ### Choose what each box can see
 
 A remote never gets your whole vault by default — every served box carries its **own** per-remote file-sharing allow-list. You set it at connect time in the relay wizard's **permissions** step, and you can change it anytime: in the dashboard's **Remote** tab, highlight a connected box and press **`s`** to open its **Share files** checklist (listed in taxonomy order), then toggle individual files and set **Off / Read / Read+Write** for that box specifically.
@@ -765,16 +788,21 @@ Auxly is a standard **stdio MCP server**, so *any* MCP-capable tool can share th
 | `auxly write …` | Write a change (used by agents/wrappers) |
 | `auxly pending` | List queued memory changes awaiting approval |
 | `auxly approve \| reject <id>` | Apply or discard a pending change (`--all`, `--agent <name>`, `--file <target>` for bulk) |
-| `auxly organize` | LLM consolidation of the vault (`--split-projects` migrates projects.md into per-project files) |
+| `auxly review` | Walk the review queue interactively to prune or restamp stale facts |
+| `auxly organize` | LLM consolidation of the vault (`--split-projects` migrates project files; `--contradictions` runs embeddings-based sweep) |
+| `auxly organize --contradictions` | Spot similar pairs using embeddings, resolve duplicates/clashes via LLM, queue for pending review |
 | `auxly capture` | Extract durable facts from a session transcript into the pending queue |
 | `auxly hooks install \| uninstall \| status` | Wire/unwire auto-capture (`--agent claude\|codex\|gemini\|kimi`); status shows what's wired |
 | `auxly doctor` | One-screen health check (vault, agents, remote links, host topology) |
 | `auxly trust list \| set <provider> <level>` | Manage access control |
+| `auxly trust suggest` | Propose trust level promotions or demotions based on approval stats |
 | `auxly tail` | Stream the audit log |
-| `auxly stats` | Memory & write statistics |
+| `auxly stats` | Memory & recall statistics (`stats --recall` for hit statistics) |
 | `auxly sync` | Commit + push memory to Git |
 | `auxly connect …` | Link this machine to a remote memory host |
 | `auxly host …` | Serve this machine's memory to other boxes |
+| `auxly host invite` | Mint a single-use token pinned to host SSH key for one-command pairing |
+| `auxly join <token>` | Pair with an inviting memory host securely in one command |
 | `auxly usage show \| auth` | Live agent quota (opt-in) |
 | `auxly index rebuild` | Wipe and rebuild the semantic recall index from the vault |
 | `auxly index status` | Show semantic index stats (provider, model, chunk count) |
@@ -824,6 +852,15 @@ Auto-update polls `auxly.io/version` and, when a newer release exists, prints a 
 - **Credentials stay put.** Auxly stores no SSH keys, VPN config, or network secrets. Usage tokens are read in place and never persisted or logged.
 - **Auditable by design.** Every read and write is recorded with who/what/when/why and reviewable in the dashboard.
 - **You hold the keys.** Trust levels and the approval queue mean no agent writes anything you didn't allow.
+
+### Vault encryption at rest
+
+Auxly supports file-level encryption at rest for the memory vault using the `age` X25519 standard. This ensures that Git sync commands can securely ship ciphertext without exposing your secrets, as the keys reside outside the vault.
+
+- **Initialization & Keys:** Run `auxly encrypt init` to generate a key. The key is securely stored in the macOS Keychain (using stdin via `security -i` to avoid command-line argument exposure) or falls back to a `0600` permissions file outside the vault. A backup key is printed once during initialization with a hard warning. Keys cannot be overwritten once set to prevent orphaned ciphertext.
+- **Commands:** Manage encryption with `auxly encrypt file <name>`, `auxly decrypt file <name>`, and `auxly encrypt status`. Once encrypted, an `age` header in the file ensures all future writes stay encrypted automatically.
+- **Security & Fail-Closed:** The implementation is strictly fail-closed: decryption failures never fall back to treating files as empty, CLI-agent organization commands are refused for encrypted content, backups and archives keep the ciphertext encrypted, and `auxly export` skips encrypted files (with a manifest note) rather than writing plaintext copies. The sqlite recall index is pruned and VACUUMed on encryption; recall commands will report how many encrypted files were excluded from search.
+- **v1 Limitations:** While the vault files themselves are encrypted, current workspace copies of memory files and transient diffs in the pending queue (`.pending/`) are handled in plaintext (secured with local `0600` file permissions).
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md) for private disclosure.
 
