@@ -652,3 +652,24 @@ func organizeReviewTestModel(store *memory.Store) organizeModel {
 	m.loadCurrentChange()
 	return m
 }
+
+// TestOrganizeForceKey: F on the Consolidate idle screen arms a forced re-run
+// (bypasses the dirty-file ledger) and jumps to confirmation, so a prior run's
+// "Nothing to organize" is never a dead end.
+func TestOrganizeForceKey(t *testing.T) {
+	store := organizeTestStore(t)
+	m := newOrganizeModel(store, store.Root, nil)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("F")})
+	if !m.forceRun {
+		t.Fatal("F must set forceRun")
+	}
+	if !m.confirming {
+		t.Fatal("F must jump to the confirmation step")
+	}
+	// startRun captures forceRun for the run, then clears it so the next run
+	// isn't silently forced.
+	m2, _ := m.startRun()
+	if m2.forceRun {
+		t.Fatal("forceRun must be cleared after the run is dispatched (one-shot)")
+	}
+}

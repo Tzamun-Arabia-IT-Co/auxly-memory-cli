@@ -153,6 +153,7 @@ type organizeModel struct {
 	encChoice           bool         // [s]/[y]/[esc] choice modal is up
 	encFiles            []string     // encrypted organizable files driving the modal
 	skipEncryptedRun    bool         // [s]: this run excludes encrypted files from the payload
+	forceRun            bool         // [F]: ignore the dirty-file ledger and re-organize everything
 	pendingRestore      func() error // TempDecryptForOrganize's restore, set after [y] until the run completes/cancels
 	pendingRestoreFiles []string     // the files pendingRestore covers (for the status/error message)
 	restoreFailure      string       // LOUD banner text when restore failed after a decrypt-temporarily run
@@ -518,13 +519,14 @@ func (m organizeModel) runPlanCmd(ctx context.Context) tea.Cmd {
 	provider, target, model := m.planTarget()
 	prov := m.currentProvider()
 	skipEncrypted := m.skipEncryptedRun
+	opts := memory.OrganizeRunOpts{ForceAll: m.forceRun}
 	return func() tea.Msg {
 		var prop memory.OrganizeProposal
 		var res memory.OrganizeResult
 		if prov.kind == "agent" {
-			prop, res = store.PlanOrganizeWithAgent(ctx, provider, target, model, skipEncrypted)
+			prop, res = store.PlanOrganizeWithAgentOpts(ctx, provider, target, model, skipEncrypted, opts)
 		} else {
-			prop, res = store.PlanOrganizeWithProvider(ctx, provider, target, model)
+			prop, res = store.PlanOrganizeWithProviderOpts(ctx, provider, target, model, opts)
 		}
 		return orgRunMsg{prop: prop, res: res}
 	}
@@ -700,8 +702,16 @@ func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
 		}
 		if len(filtered) == 0 {
 			m.mode = orgIdle
-			m.status = "Nothing to organize."
+			// Prefer the store's reason ("already tidy — N file(s) unchanged
+			// since last run") over a bare "Nothing to organize", and point at
+			// [F] so a dirty-skip isn't a dead end.
+			msgText := strings.TrimSpace(msg.res.Message)
+			if msgText == "" {
+				msgText = "Nothing to organize."
+			}
+			m.status = msgText + "  ·  press F to re-organize everything anyway"
 			m.errMsg = ""
+			m.forceRun = false
 			return m, restoreCmd
 		}
 		m.proposal = msg.prop
@@ -1060,6 +1070,23 @@ func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 			m.fetchErr = ""
 			return m, m.fetchModelsCmd(m.currentProvider().id, m.customURL)
 		}
+	case "F":
+		// Force a full re-organize even when the dirty-file ledger says nothing
+		// changed — the escape from the "Nothing to organize" dead-end after a
+		// prior run. Locks in the current model and jumps to confirmation.
+		if m.currentProvider().id == "custom" && strings.TrimSpace(m.customURL) == "" {
+			m.status = "Set the Custom URL first (Enter on the provider), then press F."
+			return m, nil
+		}
+		if len(m.models) > 0 {
+			m.picked = modelValueForProvider(m.currentProvider(), m.models[m.modelIdx])
+		} else {
+			m.picked = modelValueForProvider(m.currentProvider(), firstModelLabel(m.currentProvider(), nil))
+		}
+		m.forceRun = true
+		m.skipEncryptedRun = false
+		m.confirming = true
+		return m, nil
 	case "enter":
 		if m.focus == focusProvider {
 			// Custom URL: Enter opens the URL field to fill first.
@@ -1112,7 +1139,9 @@ func (m organizeModel) startRun() (organizeModel, tea.Cmd) {
 	// HTTP request rather than leaving it to run out the timeout in the background.
 	ctx, cancel := context.WithCancel(context.Background())
 	m.runCancel = cancel
-	return m, tea.Batch(m.runPlanCmd(ctx), orgSpinTick())
+	cmd := m.runPlanCmd(ctx) // captures forceRun for THIS run
+	m.forceRun = false       // one-shot: don't carry the force into the next run
+	return m, tea.Batch(cmd, orgSpinTick())
 }
 
 // cycleRunMode moves the top-of-tab mode selector by delta, wrapping —
@@ -1974,7 +2003,7 @@ func (m organizeModel) idleView() string {
 			filesPart + orgDimStyle.Render(" · history in Audit Trail (0)") + "\n")
 	}
 
-	b.WriteString("\n" + StyleFooter.Render("h/l mode · ↑↓ choose · Enter: Provider→Model→confirm · Tab switch · e edit URL · f refetch · 1-9/0 tabs"))
+	b.WriteString("\n" + StyleFooter.Render("h/l mode · ↑↓ choose · Enter: Provider→Model→confirm · F re-run all · Tab switch · e edit URL · f refetch · 1-9/0 tabs"))
 	return b.String()
 }
 

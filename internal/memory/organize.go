@@ -1379,11 +1379,17 @@ func (s *Store) runOrganizeChat(ctx context.Context, apiURL, model, apiKey strin
 }
 
 func (s *Store) PlanOrganizeWithProvider(ctx context.Context, provider, customURL, model string) (OrganizeProposal, OrganizeResult) {
+	return s.PlanOrganizeWithProviderOpts(ctx, provider, customURL, model, OrganizeRunOpts{})
+}
+
+// PlanOrganizeWithProviderOpts is PlanOrganizeWithProvider with OrganizeRunOpts
+// so the TUI's "re-run everything" (ForceAll) reaches the Direct LLM path too.
+func (s *Store) PlanOrganizeWithProviderOpts(ctx context.Context, provider, customURL, model string, opts OrganizeRunOpts) (OrganizeProposal, OrganizeResult) {
 	baseURL, apiKey, res, ok := resolveOrganizeProvider(provider, customURL)
 	if !ok {
 		return OrganizeProposal{}, res
 	}
-	return s.planOrganize(ctx, "", false, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+	return s.planOrganizeOpts(ctx, "", false, opts, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
 		return s.runOrganizeChat(c, strings.TrimRight(baseURL, "/")+"/v1/chat/completions", model, apiKey, sys, user)
 	})
 }
