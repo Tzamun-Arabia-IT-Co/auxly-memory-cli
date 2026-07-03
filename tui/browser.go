@@ -22,9 +22,10 @@ type browserModel struct {
 
 // browserExportMsg carries the outcome of an "export all" run back into Update.
 type browserExportMsg struct {
-	dir   string
-	count int
-	err   error
+	dir     string
+	count   int
+	skipped int // encrypted files Export() left out of the snapshot
+	err     error
 }
 
 // exportAllCmd writes every memory file to a timestamped folder in ~/Downloads, each
@@ -35,11 +36,16 @@ func exportAllCmd(store *memory.Store) tea.Cmd {
 		if err != nil {
 			return browserExportMsg{err: err}
 		}
+		// Export() itself skips encrypted files (and notes it in MANIFEST.txt),
+		// but returns no count of them — read it separately so the TUI can
+		// surface the same honesty inline instead of only inside the written
+		// manifest.
+		skipped := store.EncryptedFileCount()
 		res, err := store.Export(filepath.Join(home, "Downloads"), time.Now())
 		if err != nil {
 			return browserExportMsg{err: err}
 		}
-		return browserExportMsg{dir: res.Dir, count: len(res.Files)}
+		return browserExportMsg{dir: res.Dir, count: len(res.Files), skipped: skipped}
 	}
 }
 
@@ -110,6 +116,9 @@ func (m browserModel) Update(msg tea.Msg) (browserModel, tea.Cmd) {
 			m.status = "✗ Export failed: " + msg.err.Error()
 		} else {
 			m.status = fmt.Sprintf("✓ Exported %d file(s) → %s", msg.count, shortHome(msg.dir))
+			if msg.skipped > 0 {
+				m.status += fmt.Sprintf("  (%d encrypted file(s) skipped — see MANIFEST.txt)", msg.skipped)
+			}
 		}
 		return m, nil
 	case tea.KeyMsg:

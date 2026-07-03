@@ -40,6 +40,14 @@ func TestBrowserExportKey(t *testing.T) {
 		t.Errorf("failure status should be marked ✗, got %q", bad.status)
 	}
 
+	// An export that skipped encrypted files says so inline, not just in the
+	// MANIFEST.txt Export() itself writes — the TUI must not silently hide
+	// that some files were left out of the snapshot.
+	skipped, _ := m2.Update(browserExportMsg{dir: "/Users/x/Downloads/auxly-memory-export-x", count: 3, skipped: 2})
+	if !strings.Contains(skipped.status, "2") || !strings.Contains(skipped.status, "skipped") {
+		t.Errorf("status should note the skipped encrypted file count, got %q", skipped.status)
+	}
+
 	// The View advertises the [e] action.
 	if !strings.Contains(stripANSI(m2.View()), "[e]") {
 		t.Error("the Files view should advertise the [e] export action")

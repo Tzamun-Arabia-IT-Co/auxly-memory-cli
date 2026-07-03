@@ -32,9 +32,10 @@ type settingsModel struct {
 	autoUpdate bool
 
 	// Sub-tab state: 0 = General (trust), 1 = Agents (dashboard show/hide),
-	// 2 = Customizations (Claude Code statusline).
+	// 2 = Customizations (Claude Code statusline), 3 = Vault (encryption + index).
 	subTab int
 	cust   customizationsModel
+	vault  vaultModel
 
 	// Agents sub-tab: the toggleable brand list (mirrors the dashboard's
 	// candidate set — detected + active + currently-hidden) and its cursor.
@@ -43,17 +44,26 @@ type settingsModel struct {
 	agentCursor  int
 	hiddenAgents map[string]bool
 
-	// Trust auto-tuning hint (Sprint 16): count of pending `auxly trust suggest`
-	// recommendations, computed once per screen-enter (see Refresh) — never on
-	// a tick, since it costs an audit.db query.
-	tuningSuggestions int
+	// Trust auto-tuning suggestions (Sprint 16, apply affordance added later):
+	// pending `auxly trust suggest` recommendations, computed once per
+	// screen-enter (see Refresh) — never on a tick, since it costs an
+	// audit.db query. [t] opens the review/apply panel below the General
+	// sub-tab; suggestCursor/suggestConfirm/suggestApplying/suggestStatus
+	// drive that panel's own tiny state machine (mirrors customizationsModel's
+	// confirming/applying shape).
+	suggestions     []trustcfg.Suggestion
+	suggestOpen     bool
+	suggestCursor   int
+	suggestConfirm  bool
+	suggestApplying bool
+	suggestStatus   string
 }
 
 type settingsRefreshMsg struct {
-	agents            []detect.Agent
-	trust             trustcfg.Config
-	agentBrands       []agentCard
-	tuningSuggestions int
+	agents      []detect.Agent
+	trust       trustcfg.Config
+	agentBrands []agentCard
+	suggestions []trustcfg.Suggestion
 }
 
 func newSettingsModel(memPath string, logger *audit.Logger) settingsModel {
@@ -64,6 +74,7 @@ func newSettingsModel(memPath string, logger *audit.Logger) settingsModel {
 		autoUpdate:   config.LoadSettings().AutoUpdate,
 		logger:       logger,
 		hiddenAgents: loadHiddenAgentSet(),
+		vault:        newVaultModel(memPath),
 	}
 }
 
@@ -106,31 +117,70 @@ func (m settingsModel) Refresh() tea.Cmd {
 		}
 
 		return settingsRefreshMsg{
-			agents:            agents,
-			trust:             *trust,
-			agentBrands:       buildAgentSettingsBrands(agents, logger),
-			tuningSuggestions: countTuningSuggestions(memPath, logger),
+			agents:      agents,
+			trust:       *trust,
+			agentBrands: buildAgentSettingsBrands(agents, logger),
+			suggestions: loadSuggestions(memPath, logger),
 		}
 	}
 }
 
-// countTuningSuggestions is the Settings screen's read for the trust
-// auto-tuning hint — reuses the same pure trust.SuggestChanges the CLI's
-// `auxly trust suggest` uses, so the hint and the command never disagree.
-// nil-safe: a nil logger (not yet connected) just means no hint.
-func countTuningSuggestions(memPath string, logger *audit.Logger) int {
+// loadSuggestions is the Settings screen's read for the trust auto-tuning
+// panel — reuses the same pure trust.SuggestChanges the CLI's
+// `auxly trust suggest` uses, so the panel and the command never disagree.
+// nil-safe: a nil logger (not yet connected) just means no suggestions.
+func loadSuggestions(memPath string, logger *audit.Logger) []trustcfg.Suggestion {
 	if logger == nil {
-		return 0
+		return nil
 	}
 	cfg, err := trustcfg.Load(memPath)
 	if err != nil {
-		return 0
+		return nil
 	}
 	stats, err := logger.ApprovalStats(90)
 	if err != nil {
-		return 0
+		return nil
 	}
-	return len(trustcfg.SuggestChanges(cfg, stats))
+	return trustcfg.SuggestChanges(cfg, stats)
+}
+
+// trustSuggestAppliedMsg carries the result of applying ONE trust suggestion
+// back into Update.
+type trustSuggestAppliedMsg struct {
+	trust       trustcfg.Config
+	suggestions []trustcfg.Suggestion
+	status      string
+}
+
+// applySuggestionCmd persists a single suggested trust-level change through
+// the exact same Config.SetTrustLevel + Save path `auxly trust set` uses
+// (cmd/trust.go's runTrustSet), including the same audit-trail entry — trust
+// levels gate every future write, so a change made from the TUI belongs in
+// the same audit trail as one made from the CLI. Suggestions are recomputed
+// afterward so an applied one drops out of the list without a full screen
+// refresh.
+func applySuggestionCmd(memPath string, logger *audit.Logger, cur trustcfg.Config, s trustcfg.Suggestion) tea.Cmd {
+	return func() tea.Msg {
+		next := cur
+		if next.Providers == nil {
+			next.Providers = make(map[string]trustcfg.ProviderConfig)
+		}
+		if err := next.SetTrustLevel(s.Provider, s.Suggested); err != nil {
+			return trustSuggestAppliedMsg{trust: cur, suggestions: loadSuggestions(memPath, logger), status: "✗ " + err.Error()}
+		}
+		if err := next.Save(memPath); err != nil {
+			return trustSuggestAppliedMsg{trust: cur, suggestions: loadSuggestions(memPath, logger), status: "✗ " + err.Error()}
+		}
+		if logger != nil {
+			logger.Log("human", "user", "trust_change", "trust.yaml", "",
+				fmt.Sprintf("%s: %s → %s", s.Provider, s.Current, s.Suggested), s.Suggested)
+		}
+		return trustSuggestAppliedMsg{
+			trust:       next,
+			suggestions: loadSuggestions(memPath, logger),
+			status:      fmt.Sprintf("✓ %s trust set to %s", s.Provider, s.Suggested),
+		}
+	}
 }
 
 // buildAgentSettingsBrands returns every brand the dashboard could show — the
@@ -151,17 +201,34 @@ func buildAgentSettingsBrands(agents []detect.Agent, logger *audit.Logger) []age
 	return buildAgentCards(provs)
 }
 
+// capturesInput reports whether the Vault sub-tab (passphrase entry, the
+// keypair-vs-passphrase init picker, or an in-flight keychain/disk op) or the
+// trust-suggestions panel currently owns the keyboard — mirrors
+// customizationsModel.capturesInput. app.go checks this before its global
+// digit/quit key switch so those keys never hijack vault/suggest input.
+func (m settingsModel) capturesInput() bool {
+	return m.vault.capturesInput() || m.suggestOpen || m.suggestApplying
+}
+
 func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.vault.width, m.vault.height = msg.Width, msg.Height
 		return m, nil
+	case vaultRefreshMsg, vaultActionMsg:
+		var cmd tea.Cmd
+		m.vault, cmd = m.vault.Update(msg)
+		return m, cmd
 	case settingsRefreshMsg:
 		m.agents = msg.agents
 		m.trust = msg.trust
 		m.agentBrands = msg.agentBrands
-		m.tuningSuggestions = msg.tuningSuggestions
+		m.suggestions = msg.suggestions
+		if m.suggestCursor >= len(m.suggestions) {
+			m.suggestCursor = 0
+		}
 		if m.agentCursor >= len(m.agentBrands) {
 			m.agentCursor = 0
 		}
@@ -192,7 +259,22 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			return m, syncSpinTick()
 		}
 		return m, nil
+	case trustSuggestAppliedMsg:
+		m.trust = msg.trust
+		m.suggestions = msg.suggestions
+		m.suggestApplying = false
+		m.suggestStatus = msg.status
+		if m.suggestCursor >= len(m.suggestions) {
+			m.suggestCursor = 0
+		}
+		if len(m.suggestions) == 0 {
+			m.suggestOpen = false
+		}
+		return m, nil
 	case tea.MouseMsg:
+		if m.suggestOpen {
+			return m, nil // the suggestions panel owns the keyboard; ignore stray clicks
+		}
 		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
 			w := m.width
 			if w <= 0 {
@@ -234,6 +316,12 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 						}
 					}
 				}
+				return m, nil
+			}
+			if m.subTab == 2 || m.subTab == 3 {
+				// Customizations / Vault are keyboard-driven sub-panels (mirrors the
+				// existing Customizations gap) — the General-only hit-test below
+				// would otherwise scan their text for "Default Trust"/"[ON]" etc.
 				return m, nil
 			}
 
@@ -294,16 +382,26 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			}
 		}
 	case tea.KeyMsg:
+		if m.suggestOpen {
+			return m.handleSuggestKey(msg)
+		}
 		uniqueAgents := m.getUniqueAgents()
 
+		// Sub-tab ring (forward via l/right, reverse via h/left):
+		//   General(0) → Agents(1) → Vault(3) → Customizations(2) → General(0)
+		// Vault was inserted between Agents and Customizations (rather than
+		// appended after Customizations) so General's existing h/left → Customizations
+		// and l/right → Agents edges — already covered by
+		// TestSettingsReachesCustomizationsTab / TestSyncPanelRepaintsInViewport —
+		// stay exactly as they were.
 		if m.subTab == 2 {
 			// The confirm dialog / in-progress apply own the keyboard; otherwise
 			// ←/→ switch sections.
 			if !m.cust.capturesInput() {
 				switch msg.String() {
 				case "h", "left":
-					m.subTab = 1
-					return m, nil
+					m.subTab = 3
+					return m, m.vault.refreshCmd()
 				case "l", "right":
 					m.subTab = 0
 					return m, nil
@@ -311,6 +409,23 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.cust, cmd = m.cust.handleKey(msg)
+			return m, cmd
+		}
+
+		if m.subTab == 3 {
+			if !m.vault.capturesInput() {
+				switch msg.String() {
+				case "h", "left":
+					m.subTab = 1
+					return m, nil
+				case "l", "right":
+					m.subTab = 2
+					m.cust.refresh()
+					return m, m.cust.previewRefreshCmd()
+				}
+			}
+			var cmd tea.Cmd
+			m.vault, cmd = m.vault.handleKey(msg)
 			return m, cmd
 		}
 
@@ -327,9 +442,8 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			case "h", "left":
 				m.subTab = 0
 			case "l", "right":
-				m.subTab = 2
-				m.cust.refresh()
-				return m, m.cust.previewRefreshCmd()
+				m.subTab = 3
+				return m, m.vault.refreshCmd()
 			case "enter", " ":
 				if m.agentCursor < len(m.agentBrands) {
 					m.toggleAgentHidden(m.agentBrands[m.agentCursor].id)
@@ -354,6 +468,13 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			return m, m.cust.previewRefreshCmd()
 		case "l", "right":
 			m.subTab = 1
+		case "t":
+			if len(m.suggestions) > 0 {
+				m.suggestOpen = true
+				m.suggestCursor = 0
+				m.suggestStatus = ""
+			}
+			return m, nil
 		case "enter", " ":
 			if m.cursor == 0 {
 				m.trust.Default = m.cycleTrust(m.trust.Default)
@@ -418,6 +539,51 @@ func (m *settingsModel) toggleAgentHidden(id string) {
 	_ = config.SaveSettings(next)
 }
 
+// handleSuggestKey drives the [t] trust-suggestions panel's own tiny state
+// machine (list → confirm → applying), mirroring customizationsModel's
+// confirming/applying shape. Applying a suggestion is a security-relevant
+// change, so — like decrypt/encrypt-init/join elsewhere in this sprint — it
+// is confirm-gated rather than a single keypress.
+func (m settingsModel) handleSuggestKey(msg tea.KeyMsg) (settingsModel, tea.Cmd) {
+	if m.suggestApplying {
+		return m, nil // input is frozen while the write is in flight
+	}
+	if m.suggestConfirm {
+		switch msg.String() {
+		case "y", "Y", "enter":
+			if m.suggestCursor < len(m.suggestions) {
+				s := m.suggestions[m.suggestCursor]
+				m.suggestConfirm = false
+				m.suggestApplying = true
+				m.suggestStatus = ""
+				return m, applySuggestionCmd(m.memoryPath, m.logger, m.trust, s)
+			}
+			m.suggestConfirm = false
+		case "n", "N", "esc":
+			m.suggestConfirm = false
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "j", "down":
+		if m.suggestCursor < len(m.suggestions)-1 {
+			m.suggestCursor++
+		}
+	case "k", "up":
+		if m.suggestCursor > 0 {
+			m.suggestCursor--
+		}
+	case "a", "enter":
+		if len(m.suggestions) > 0 {
+			m.suggestConfirm = true
+		}
+	case "esc", "q", "t":
+		m.suggestOpen = false
+		m.suggestCursor = 0
+	}
+	return m, nil
+}
+
 func (m settingsModel) cycleTrust(current string) string {
 	switch current {
 	case "auto":
@@ -451,28 +617,34 @@ const (
 	subTabGeneralLabel = "General"
 	subTabAgentsLabel  = "Agents"
 	subTabCustomLabel  = "Customizations"
+	subTabVaultLabel   = "Vault"
 )
 
-// renderSubTabBar draws the "General | Agents" section switcher, highlighting
-// the active sub-tab. The active label is underlined so the row reads clearly
-// even on terminals without bold support.
+// renderSubTabBar draws the "General | Agents | Vault | Customizations"
+// section switcher, highlighting the active sub-tab. Displayed left-to-right
+// in the same order l/right cycles through them, so the highlight always
+// moves in the direction of travel. The active label is underlined so the
+// row reads clearly even on terminals without bold support.
 func (m settingsModel) renderSubTabBar() string {
 	active := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Underline(true)
 	inactive := StyleSubtitle
 	gen := inactive.Render(subTabGeneralLabel)
 	ag := inactive.Render(subTabAgentsLabel)
 	cu := inactive.Render(subTabCustomLabel)
+	va := inactive.Render(subTabVaultLabel)
 	switch m.subTab {
 	case 1:
 		ag = active.Render(subTabAgentsLabel)
 	case 2:
 		cu = active.Render(subTabCustomLabel)
+	case 3:
+		va = active.Render(subTabVaultLabel)
 	default:
 		gen = active.Render(subTabGeneralLabel)
 	}
 	sep := StyleSubtitle.Render("    ")
 	hint := StyleSubtitle.Render("   ←/→ switch section")
-	return "  " + gen + sep + ag + sep + cu + hint
+	return "  " + gen + sep + ag + sep + va + sep + cu + hint
 }
 
 // agentsView renders the Agents sub-tab: a toggleable list controlling which
@@ -569,6 +741,15 @@ func (m settingsModel) View() string {
 		sb.WriteString(m.renderSubTabBar())
 		sb.WriteString("\n\n")
 		sb.WriteString(m.cust.panel())
+		return sb.String()
+	}
+	if m.subTab == 3 {
+		var sb strings.Builder
+		sb.WriteString(StyleTitle.Render("Settings & Access Configuration"))
+		sb.WriteString("\n\n")
+		sb.WriteString(m.renderSubTabBar())
+		sb.WriteString("\n\n")
+		sb.WriteString(m.vault.panel())
 		return sb.String()
 	}
 
@@ -701,8 +882,9 @@ func (m settingsModel) View() string {
 		lines = append(lines, fmt.Sprintf("%s%s %s", autoCursor, autoLabel, autoState))
 	}
 
-	if m.tuningSuggestions > 0 {
-		lines = append(lines, dim.Render(fmt.Sprintf("💡 trust: %d suggestion(s) — run `auxly trust suggest`", m.tuningSuggestions)))
+	if len(m.suggestions) > 0 {
+		lines = append(lines, dim.Render(fmt.Sprintf("💡 trust: %d suggestion(s) — press ", len(m.suggestions)))+
+			lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Render("[t]")+dim.Render(" to review"))
 	}
 
 	padW := w - 10
@@ -739,7 +921,72 @@ func (m settingsModel) View() string {
 	sb.WriteString(m.renderSubTabBar())
 	sb.WriteString(titleSep)
 	sb.WriteString(panel)
+	if m.suggestOpen {
+		sb.WriteString("\n\n" + m.renderSuggestPanel())
+	}
 	return sb.String()
+}
+
+// renderSuggestPanel draws the [t] trust-suggestions review/apply box: one
+// row per pending recommendation (provider, current → suggested, evidence),
+// plus the confirm/applying/status states applySuggestionCmd drives.
+func (m settingsModel) renderSuggestPanel() string {
+	cyan := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
+	dim := StyleSubtitle
+	accent := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
+	green := lipgloss.NewStyle().Foreground(ColorSuccess)
+	warn := lipgloss.NewStyle().Foreground(ColorWarning)
+	danger := lipgloss.NewStyle().Foreground(ColorDanger)
+
+	var lines []string
+	lines = append(lines, cyan.Render("Trust Suggestions")+dim.Render("  (from 90d approval history — never auto-applied)"))
+	lines = append(lines, "")
+	for i, s := range m.suggestions {
+		cursor := "  "
+		if i == m.suggestCursor {
+			cursor = accent.Render("▸ ")
+		}
+		lines = append(lines, fmt.Sprintf("%s%-14s %s → %s   %s", cursor, s.Provider, s.Current, s.Suggested, dim.Render(s.Evidence)))
+	}
+	lines = append(lines, "")
+	switch {
+	case m.suggestApplying:
+		lines = append(lines, warn.Render("⏳ applying…"))
+	case m.suggestConfirm && m.suggestCursor < len(m.suggestions):
+		s := m.suggestions[m.suggestCursor]
+		lines = append(lines, warn.Render(fmt.Sprintf("Set %s to %s?  ", s.Provider, s.Suggested))+
+			green.Render("[y] yes")+dim.Render("   [n]/esc cancel"))
+	default:
+		lines = append(lines, dim.Render("↑/↓ select · a/enter apply (confirm) · esc/t close"))
+	}
+	if m.suggestStatus != "" {
+		style := green
+		if strings.HasPrefix(m.suggestStatus, "✗") {
+			style = danger
+		}
+		lines = append(lines, style.Render(m.suggestStatus))
+	}
+
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	padW := w - 10
+	if padW < 40 {
+		padW = 40
+	}
+	if padW > 70 {
+		padW = 70
+	}
+	var padded []string
+	for _, l := range lines {
+		padded = append(padded, padLine(l, padW))
+	}
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColorWarning).
+		Padding(1, 2).
+		Render(strings.Join(padded, "\n"))
 }
 
 func (m settingsModel) renderTrust(trust string, green, yellow, red lipgloss.Style) string {

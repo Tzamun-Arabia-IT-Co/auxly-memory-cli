@@ -74,6 +74,7 @@ const (
 	sshModePassword = "password" // masked SSH-password entry (PTY key install)
 	sshModeRename   = "rename"   // inline rename of a selected connection
 	sshModeShare    = "share"    // per-remote file-sharing checklist (§10)
+	sshModeJoin     = "join"     // paste-token modal for `auxly join <token>`
 )
 
 // inviteTTLPresets are the TTL choices [i] cycles through before minting an
@@ -173,6 +174,12 @@ type sshModel struct {
 	// memory) the moment the user leaves the Remote tab or mints a new one —
 	// see gotoScreen in app.go and the progressEvent handling below.
 	inviteToken string
+
+	// joinToken is the transient paste buffer for the [J] "join a host" modal
+	// (mode == sshModeJoin) — the consumer-side counterpart to [i]/[I] mint.
+	// Cleared the moment the modal closes (submit or cancel), same discipline
+	// as inviteToken above.
+	joinToken string
 }
 
 // Per-file sharing tri-state, cycled with ←/→ in the share modal.
@@ -923,6 +930,9 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 	case sshModeRename:
 		return m.handleRenameKey(msg)
 
+	case sshModeJoin:
+		return m.handleJoinKey(msg)
+
 	case sshModeShare:
 		return m.handleShareKey(msg)
 
@@ -1024,6 +1034,15 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 			ttl := inviteTTLPresets[m.inviteTTLIdx]
 			m.status = ""
 			return m.beginCapturedSub("Minting invite ("+ttl+")", "host", "invite", "--ttl", ttl)
+		case "J":
+			// Uppercase: lowercase "j" is already ↓ in this list. Pairs with
+			// [i]/[I] mint on the host side — this is the consumer side of the
+			// same pairing flow (paste a token minted by another machine).
+			m.joinToken = ""
+			m.mode = sshModeJoin
+			m.editingHost = true // capture all keys for the paste buffer
+			m.status = ""
+			return m, nil
 		case "y":
 			// [c] is already "Connect new" in this list, so the invite-token
 			// copy hotkey lives on [y] (yank) instead — see the footer, which
@@ -1367,6 +1386,39 @@ func renameClient(old, newName string) {
 	if out, merr := yaml.Marshal(f); merr == nil {
 		_ = os.WriteFile(path, out, 0600)
 	}
+}
+
+// handleJoinKey captures a pasted invite token and, on Enter, runs `auxly
+// join <token>` through the same captured-subprocess pipeline every other
+// action on this tab uses (beginCapturedSub) — so the honest success/
+// partial/failure distinction cmd/join.go already prints (see
+// joinCompletionMessage) shows up verbatim in the result panel, with no
+// duplicated logic here.
+func (m sshModel) handleJoinKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.joinToken, m.editingHost, m.mode = "", false, sshModeList
+		return m, nil
+	case tea.KeyEnter:
+		tok := strings.TrimSpace(m.joinToken)
+		if tok == "" {
+			return m, nil // require a token
+		}
+		m.joinToken, m.editingHost = "", false
+		return m.beginCapturedSub("Joining a host", "join", tok)
+	case tea.KeyBackspace, tea.KeyCtrlH:
+		if r := []rune(m.joinToken); len(r) > 0 {
+			m.joinToken = string(r[:len(r)-1])
+		}
+		return m, nil
+	case tea.KeySpace:
+		m.joinToken += " "
+		return m, nil
+	case tea.KeyRunes:
+		m.joinToken += string(msg.Runes)
+		return m, nil
+	}
+	return m, nil
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1936,6 +1988,14 @@ func (m sshModel) View() string {
 		lines = append(lines, cyan.Render("RENAME CONNECTION")+dim.Render("   Enter: save · esc: cancel"))
 		lines = append(lines, "")
 		lines = append(lines, "  "+dim.Render("New name:  ")+m.rename+accent.Render("▌"))
+	case sshModeJoin:
+		lines = append(lines, cyan.Render("JOIN A HOST")+dim.Render("   Enter: join · esc: cancel"))
+		lines = append(lines, "")
+		lines = append(lines, dim.Render("  Paste the invite token from ")+accent.Render("auxly host invite")+dim.Render(" on the other machine:"))
+		lines = append(lines, "")
+		lines = append(lines, "  "+m.joinToken+accent.Render("▌"))
+		lines = append(lines, "")
+		lines = append(lines, dim.Render("  This machine must already have a working SSH login to the host."))
 	case sshModeShare:
 		warn := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning)
 		ok := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess)
@@ -2245,6 +2305,7 @@ func (m sshModel) View() string {
 				action("p", "Print config"),
 				action("d", "Remove"),
 				action("i/I", "Invite a box"),
+				action("J", "Join a host"),
 			}
 		} else if m.clientCount() > 0 {
 			// A connected box (host side).
@@ -2257,6 +2318,7 @@ func (m sshModel) View() string {
 				action("u", "Update"),
 				action("x", "Remove"),
 				action("i/I", "Invite a box"),
+				action("J", "Join a host"),
 			}
 		} else {
 			bar = []string{
@@ -2265,6 +2327,7 @@ func (m sshModel) View() string {
 				action("p", "Print config"),
 				action("d", "Remove"),
 				action("i/I", "Invite a box"),
+				action("J", "Join a host"),
 			}
 		}
 		if m.inviteToken != "" {

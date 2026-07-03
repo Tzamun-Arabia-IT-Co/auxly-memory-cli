@@ -132,6 +132,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewer = m.viewer.load(msg.Filename, msg.Content, msg.Editable)
 		m.screen = screenViewer
 		return m, nil
+	case vaultActionMsg, trustSuggestAppliedMsg:
+		// A vault op (init/encrypt/decrypt/rebuild) or a trust-suggestion apply
+		// completes asynchronously. Route its result to settingsModel regardless
+		// of the current screen — otherwise leaving Settings mid-op drops the
+		// message, vault.busy never clears, and the panel comes back frozen.
+		var cmd tea.Cmd
+		m.settings, cmd = m.settings.Update(msg)
+		return m, cmd
 	case tea.KeyMsg:
 		if m.screen == screenDashboard && m.dashboard.selectedAgent != "" {
 			// While the agent popup is open, its tab keys (1/2/3/4) must reach the
@@ -186,6 +194,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// inside the content viewport) keeps showing a STALE frame and panel navigation
 		// (e.g. the sync box list) looks frozen even though the cursor advanced.
 		if m.screen == screenSettings && m.settings.cust.capturesInput() {
+			var cmd tea.Cmd
+			m.settings, cmd = m.settings.Update(msg)
+			if m.vpReady {
+				m.syncViewport()
+			}
+			return m, cmd
+		}
+
+		// The Vault sub-tab (passphrase entry, the keypair-vs-passphrase init
+		// picker, or an in-flight keychain/disk op) and the trust-suggestions
+		// panel own the keyboard the same way the Customizations dialog above
+		// does — without this guard a digit typed into a passphrase switches
+		// tabs mid-entry, and q/ctrl+c quits instead of reaching the buffer or
+		// closing the panel. This path early-returns, so refresh the viewport
+		// too, same reasoning as above.
+		if m.screen == screenSettings && m.settings.capturesInput() {
 			var cmd tea.Cmd
 			m.settings, cmd = m.settings.Update(msg)
 			if m.vpReady {
@@ -469,6 +493,16 @@ func (m *model) gotoScreen(s screen) tea.Cmd {
 		// Don't hold a copy-able secret around once the user has left the tab.
 		m.ssh.inviteToken = ""
 	}
+	if m.screen == screenSSH && s != screenSSH && m.ssh.joinToken != "" {
+		m.ssh.joinToken = ""
+	}
+	if m.screen == screenSettings && s != screenSettings {
+		// Don't hold a one-time backup key or a typed passphrase around once the
+		// user has left Settings — same reasoning as the SSH tokens above.
+		m.settings.vault.backupKey = ""
+		m.settings.vault.passBuf1 = ""
+		m.settings.vault.passBuf2 = ""
+	}
 	m.screen = s
 	if m.vpReady {
 		m.contentVP.GotoTop()
@@ -625,9 +659,9 @@ func (m model) renderFooter() string {
 	case screenAnalytics:
 		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenSettings:
-		footerText = "↑/↓: Select option • ←/→: Switch Settings section • Enter: Toggle option • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		footerText = "↑/↓: Select option • ←/→: Switch Settings section • Enter: Toggle option • t: Trust suggestions • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenSSH:
-		footerText = "j/k: Select • c: Connect new • t: Test • p: Print config • d: Remove • Tab/[ / ]: Switch tabs • q: Quit"
+		footerText = "j/k: Select • c: Connect new • t: Test • p: Print config • d: Remove • i/I: Invite • J: Join a host • Tab/[ / ]: Switch tabs • q: Quit"
 	case screenSkills:
 		footerText = "j/k: Navigate commands • d: Export Claude skills ZIP • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenAuditTrail:
