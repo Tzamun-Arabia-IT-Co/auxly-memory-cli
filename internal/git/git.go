@@ -133,15 +133,32 @@ func AutoCommit(memoryRoot, file, reason string) error {
 	return nil
 }
 
-// Sync performs git add + commit + push.
+// Sync performs git add + commit + push. Kept as the original error-only
+// signature for existing callers (`auxly sync`); SyncStatus below is the same
+// operation with a richer result.
 func Sync(memoryRoot string) error {
+	_, err := SyncStatus(memoryRoot)
+	return err
+}
+
+// SyncResult reports what Sync/SyncStatus actually did in git terms. A nil
+// error covers both "pushed new commits" and "nothing new to push" (git push
+// exits 0 either way) — a caller that wants to tell those apart (the TUI's
+// Ops panel) needs Pushed instead of always claiming "synced".
+type SyncResult struct {
+	Pushed bool
+}
+
+// SyncStatus performs git add + commit + push, same as Sync, plus reports
+// whether the push actually moved refs vs there being nothing new to push.
+func SyncStatus(memoryRoot string) (SyncResult, error) {
 	cfg, err := LoadConfig(memoryRoot)
 	if err != nil {
-		return err
+		return SyncResult{}, err
 	}
 
 	if !isGitRepo(memoryRoot) {
-		return fmt.Errorf("memory folder is not a git repository. Run 'git init' in %s first", memoryRoot)
+		return SyncResult{}, fmt.Errorf("memory folder is not a git repository. Run 'git init' in %s first", memoryRoot)
 	}
 
 	// CRITICAL 1: unlike AutoCommit, Sync is a foreground command
@@ -149,7 +166,7 @@ func Sync(memoryRoot string) error {
 	// error — so this MUST return an error rather than silently no-op, or
 	// the user would be told a sync happened when it was actually skipped.
 	if tempDecryptInFlight(memoryRoot) {
-		return fmt.Errorf("skipped sync: a temporary decrypt is in progress — retry once the organize run finishes (or run `auxly doctor` if it looks stuck)")
+		return SyncResult{}, fmt.Errorf("skipped sync: a temporary decrypt is in progress — retry once the organize run finishes (or run `auxly doctor` if it looks stuck)")
 	}
 
 	ensureIndexGitignored(memoryRoot)
@@ -158,29 +175,33 @@ func Sync(memoryRoot string) error {
 	addCmd := exec.Command("git", "add", "-A")
 	addCmd.Dir = memoryRoot
 	if out, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s", out)
+		return SyncResult{}, fmt.Errorf("git add failed: %s", out)
 	}
 
-	// git commit
+	// git commit. No --allow-empty: an empty commit here would advance HEAD
+	// on every sync even with zero vault changes, making "nothing to push"
+	// unreachable (SyncResult.Pushed would always be true) and littering the
+	// history with no-op commits. A "nothing to commit" exit is expected and
+	// ignored — the push below still runs and correctly reports up-to-date.
 	msg := fmt.Sprintf("%s sync", cfg.CommitMessagePrefix)
-	commitCmd := exec.Command("git", "commit", "-m", msg, "--allow-empty")
+	commitCmd := exec.Command("git", "commit", "-m", msg)
 	commitCmd.Dir = memoryRoot
 	commitCmd.CombinedOutput() // ignore error (nothing to commit)
 
-	// git push
-	if cfg.AutoPush || true { // sync always pushes
-		branch := cfg.Branch
-		if branch == "" {
-			branch = "main"
-		}
-		pushCmd := exec.Command("git", "push", "origin", branch)
-		pushCmd.Dir = memoryRoot
-		if out, err := pushCmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git push failed: %s", out)
-		}
+	// git push — sync always pushes.
+	branch := cfg.Branch
+	if branch == "" {
+		branch = "main"
 	}
-
-	return nil
+	pushCmd := exec.Command("git", "push", "origin", branch)
+	pushCmd.Dir = memoryRoot
+	out, err := pushCmd.CombinedOutput()
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("git push failed: %s", out)
+	}
+	lower := strings.ToLower(string(out))
+	pushed := !strings.Contains(lower, "up-to-date") && !strings.Contains(lower, "up to date")
+	return SyncResult{Pushed: pushed}, nil
 }
 
 func isGitRepo(dir string) bool {

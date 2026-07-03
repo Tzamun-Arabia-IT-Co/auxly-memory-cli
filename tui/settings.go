@@ -32,10 +32,12 @@ type settingsModel struct {
 	autoUpdate bool
 
 	// Sub-tab state: 0 = General (trust), 1 = Agents (dashboard show/hide),
-	// 2 = Customizations (Claude Code statusline), 3 = Vault (encryption + index).
+	// 2 = Customizations (Claude Code statusline), 3 = Vault (encryption + index),
+	// 4 = Ops (capture hooks, git sync, doctor report).
 	subTab int
 	cust   customizationsModel
 	vault  vaultModel
+	ops    opsModel
 
 	// Agents sub-tab: the toggleable brand list (mirrors the dashboard's
 	// candidate set — detected + active + currently-hidden) and its cursor.
@@ -75,6 +77,7 @@ func newSettingsModel(memPath string, logger *audit.Logger) settingsModel {
 		logger:       logger,
 		hiddenAgents: loadHiddenAgentSet(),
 		vault:        newVaultModel(memPath),
+		ops:          newOpsModel(memPath),
 	}
 }
 
@@ -207,7 +210,7 @@ func buildAgentSettingsBrands(agents []detect.Agent, logger *audit.Logger) []age
 // customizationsModel.capturesInput. app.go checks this before its global
 // digit/quit key switch so those keys never hijack vault/suggest input.
 func (m settingsModel) capturesInput() bool {
-	return m.vault.capturesInput() || m.suggestOpen || m.suggestApplying
+	return m.vault.capturesInput() || m.suggestOpen || m.suggestApplying || m.ops.capturesInput()
 }
 
 func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
@@ -216,10 +219,15 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.vault.width, m.vault.height = msg.Width, msg.Height
+		m.ops.width, m.ops.height = msg.Width, msg.Height
 		return m, nil
 	case vaultRefreshMsg, vaultActionMsg:
 		var cmd tea.Cmd
 		m.vault, cmd = m.vault.Update(msg)
+		return m, cmd
+	case opsRefreshMsg, opsActionMsg, opsSyncMsg, opsSpinTickMsg:
+		var cmd tea.Cmd
+		m.ops, cmd = m.ops.Update(msg)
 		return m, cmd
 	case settingsRefreshMsg:
 		m.agents = msg.agents
@@ -318,9 +326,9 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.subTab == 2 || m.subTab == 3 {
-				// Customizations / Vault are keyboard-driven sub-panels (mirrors the
-				// existing Customizations gap) — the General-only hit-test below
+			if m.subTab == 2 || m.subTab == 3 || m.subTab == 4 {
+				// Customizations / Vault / Ops are keyboard-driven sub-panels (mirrors
+				// the existing Customizations gap) — the General-only hit-test below
 				// would otherwise scan their text for "Default Trust"/"[ON]" etc.
 				return m, nil
 			}
@@ -388,11 +396,12 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		uniqueAgents := m.getUniqueAgents()
 
 		// Sub-tab ring (forward via l/right, reverse via h/left):
-		//   General(0) → Agents(1) → Vault(3) → Customizations(2) → General(0)
-		// Vault was inserted between Agents and Customizations (rather than
-		// appended after Customizations) so General's existing h/left → Customizations
-		// and l/right → Agents edges — already covered by
-		// TestSettingsReachesCustomizationsTab / TestSyncPanelRepaintsInViewport —
+		//   General(0) → Agents(1) → Vault(3) → Ops(4) → Customizations(2) → General(0)
+		// Vault was inserted between Agents and Customizations, and Ops between
+		// Vault and Customizations (rather than appended after Customizations) so
+		// General's existing h/left → Customizations and l/right → Agents edges —
+		// already covered by TestSettingsReachesCustomizationsTab /
+		// TestSyncPanelRepaintsInViewport / TestVaultSubTabReachableViaRing —
 		// stay exactly as they were.
 		if m.subTab == 2 {
 			// The confirm dialog / in-progress apply own the keyboard; otherwise
@@ -400,8 +409,8 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			if !m.cust.capturesInput() {
 				switch msg.String() {
 				case "h", "left":
-					m.subTab = 3
-					return m, m.vault.refreshCmd()
+					m.subTab = 4
+					return m, m.ops.refreshCmd()
 				case "l", "right":
 					m.subTab = 0
 					return m, nil
@@ -412,6 +421,23 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			return m, cmd
 		}
 
+		if m.subTab == 4 {
+			if !m.ops.capturesInput() {
+				switch msg.String() {
+				case "h", "left":
+					m.subTab = 3
+					return m, m.vault.refreshCmd()
+				case "l", "right":
+					m.subTab = 2
+					m.cust.refresh()
+					return m, m.cust.previewRefreshCmd()
+				}
+			}
+			var cmd tea.Cmd
+			m.ops, cmd = m.ops.handleKey(msg)
+			return m, cmd
+		}
+
 		if m.subTab == 3 {
 			if !m.vault.capturesInput() {
 				switch msg.String() {
@@ -419,9 +445,8 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 					m.subTab = 1
 					return m, nil
 				case "l", "right":
-					m.subTab = 2
-					m.cust.refresh()
-					return m, m.cust.previewRefreshCmd()
+					m.subTab = 4
+					return m, m.ops.refreshCmd()
 				}
 			}
 			var cmd tea.Cmd
@@ -618,9 +643,10 @@ const (
 	subTabAgentsLabel  = "Agents"
 	subTabCustomLabel  = "Customizations"
 	subTabVaultLabel   = "Vault"
+	subTabOpsLabel     = "Ops"
 )
 
-// renderSubTabBar draws the "General | Agents | Vault | Customizations"
+// renderSubTabBar draws the "General | Agents | Vault | Ops | Customizations"
 // section switcher, highlighting the active sub-tab. Displayed left-to-right
 // in the same order l/right cycles through them, so the highlight always
 // moves in the direction of travel. The active label is underlined so the
@@ -632,6 +658,7 @@ func (m settingsModel) renderSubTabBar() string {
 	ag := inactive.Render(subTabAgentsLabel)
 	cu := inactive.Render(subTabCustomLabel)
 	va := inactive.Render(subTabVaultLabel)
+	op := inactive.Render(subTabOpsLabel)
 	switch m.subTab {
 	case 1:
 		ag = active.Render(subTabAgentsLabel)
@@ -639,12 +666,14 @@ func (m settingsModel) renderSubTabBar() string {
 		cu = active.Render(subTabCustomLabel)
 	case 3:
 		va = active.Render(subTabVaultLabel)
+	case 4:
+		op = active.Render(subTabOpsLabel)
 	default:
 		gen = active.Render(subTabGeneralLabel)
 	}
 	sep := StyleSubtitle.Render("    ")
 	hint := StyleSubtitle.Render("   ←/→ switch section")
-	return "  " + gen + sep + ag + sep + va + sep + cu + hint
+	return "  " + gen + sep + ag + sep + va + sep + op + sep + cu + hint
 }
 
 // agentsView renders the Agents sub-tab: a toggleable list controlling which
@@ -750,6 +779,15 @@ func (m settingsModel) View() string {
 		sb.WriteString(m.renderSubTabBar())
 		sb.WriteString("\n\n")
 		sb.WriteString(m.vault.panel())
+		return sb.String()
+	}
+	if m.subTab == 4 {
+		var sb strings.Builder
+		sb.WriteString(StyleTitle.Render("Settings & Access Configuration"))
+		sb.WriteString("\n\n")
+		sb.WriteString(m.renderSubTabBar())
+		sb.WriteString("\n\n")
+		sb.WriteString(m.ops.panel())
 		return sb.String()
 	}
 

@@ -71,7 +71,6 @@ type model struct {
 	browser    browserModel
 	diff       diffModel
 	analytics  analyticsModel
-	search     searchModel
 	settings   settingsModel
 	ssh        sshModel
 	skills     skillsModel
@@ -112,7 +111,6 @@ func NewApp(memoryPath string) *model {
 		browser:    newBrowserModel(store),
 		diff:       newDiffModel(pendingMgr, logger),
 		analytics:  newAnalyticsModel(logger, usageMgr),
-		search:     newSearchModel(store),
 		settings:   newSettingsModel(memoryPath, logger),
 		ssh:        newSSHModel(),
 		skills:     newSkillsModel(),
@@ -132,11 +130,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewer = m.viewer.load(msg.Filename, msg.Content, msg.Editable)
 		m.screen = screenViewer
 		return m, nil
-	case vaultActionMsg, trustSuggestAppliedMsg:
-		// A vault op (init/encrypt/decrypt/rebuild) or a trust-suggestion apply
-		// completes asynchronously. Route its result to settingsModel regardless
-		// of the current screen — otherwise leaving Settings mid-op drops the
-		// message, vault.busy never clears, and the panel comes back frozen.
+	case vaultActionMsg, trustSuggestAppliedMsg, opsRefreshMsg, opsActionMsg, opsSyncMsg, opsSpinTickMsg:
+		// A vault op (init/encrypt/decrypt/rebuild), a trust-suggestion apply, or
+		// an Ops action (hooks install/uninstall, sync, doctor) completes
+		// asynchronously. Route its result to settingsModel regardless of the
+		// current screen — otherwise leaving Settings mid-op drops the message,
+		// busy never clears, and the panel comes back frozen.
 		var cmd tea.Cmd
 		m.settings, cmd = m.settings.Update(msg)
 		return m, cmd
@@ -309,7 +308,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.browser, _ = m.browser.Update(msg)
 		m.diff, _ = m.diff.Update(msg)
 		m.analytics, _ = m.analytics.Update(msg)
-		m.search, _ = m.search.Update(msg)
 		m.settings, _ = m.settings.Update(msg)
 		m.ssh, _ = m.ssh.Update(msg)
 		m.skills, _ = m.skills.Update(msg)
