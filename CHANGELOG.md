@@ -40,11 +40,21 @@ an adversarial review pass; the temporary-decrypt path alone caught 6 findings
 
 ### Changed
 
-- **Memory organize is much faster.** A content-hash ledger skips files that
-  haven't changed since the last run — a tidy vault now makes zero model calls
-  instead of always reprocessing everything — and the per-file (chunked) path
-  runs in parallel. A whole-vault run that previously reprocessed every file now
-  touches only what changed.
+- **Memory organize is much faster.** Root-caused with direct timing: the model
+  spent ~90s *deliberating* to emit a handful of edits, not generating output.
+  Organize now runs the Claude Code agent at `--effort low` (mechanical re-filing
+  needs no deep reasoning) and emits move/merge/delete **operations** instead of
+  rewriting every file's full content — on a real ~16k-token vault a first run
+  dropped from 136s (or a 280s+ timeout when it chunked) to ~50–95s. A content-hash
+  ledger then skips unchanged files, so every rerun after the first is instant.
+  Tune with `AUXLY_ORGANIZE_EFFORT` / `AUXLY_ORGANIZE_DELTA=0`.
+- **`[F]` re-run everything.** After a run, the dirty-file ledger correctly reports
+  "already tidy — nothing changed"; `F` on the Memory Org screen forces a full
+  re-organize when you want one, so the skip is never a dead end.
+- **Split a header-organized `projects.md` by its sections.** A `projects.md`
+  arranged under `## Project` headers now splits deterministically by those
+  headers — each section moves verbatim into `projects/<slug>.md`, no LLM guessing,
+  no per-bullet fragility. Flat files still use the LLM attribution path.
 
 ### Fixed
 
