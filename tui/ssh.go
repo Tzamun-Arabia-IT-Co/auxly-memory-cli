@@ -70,6 +70,15 @@ const (
 	sshModeShare    = "share"    // per-remote file-sharing checklist (§10)
 )
 
+// inviteTTLPresets are the TTL choices [i] cycles through before minting an
+// invite with [I]. Sprint 21 §3 asks for a "minimal mint invite modal" with
+// these presets; rather than a bespoke picker UI, [i]/[I] drive the SAME
+// beginCapturedSub pipeline every other host action here uses (`auxly host
+// invite --ttl <preset>`), so the result — the token, expiry, and join
+// command — renders in the existing sshModeResult panel with no new render
+// code. That panel already reads like a modal (bordered, dismiss-on-any-key).
+var inviteTTLPresets = []string{"1h", "24h", "7d"}
+
 // form steps.
 const (
 	formStepMethod = "method"
@@ -145,6 +154,12 @@ type sshModel struct {
 	pendingShare   bool
 	pendingShareNm string
 	preShareNames  map[string]bool
+
+	// inviteTTLIdx selects the pending TTL (into inviteTTLPresets) for the
+	// next [I] mint — this machine is always eligible to host an invite
+	// (Sprint 21's direct-SSH pairing needs no prior `host setup`/relay), so
+	// unlike the relay panel above it isn't gated on hostOK.
+	inviteTTLIdx int
 }
 
 // Per-file sharing tri-state, cycled with ←/→ in the share modal.
@@ -962,6 +977,15 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 			m.status = ""
 			m.editingHost = true // capture all keys for the in-TUI form
 			return m, nil
+		case "i":
+			// Cycle the pending invite TTL; [I] confirms and mints.
+			m.inviteTTLIdx = (m.inviteTTLIdx + 1) % len(inviteTTLPresets)
+			m.status = fmt.Sprintf("Invite TTL: %s — press [I] to mint a pairing token (`auxly join <token>`)", inviteTTLPresets[m.inviteTTLIdx])
+			return m, nil
+		case "I":
+			ttl := inviteTTLPresets[m.inviteTTLIdx]
+			m.status = ""
+			return m.beginCapturedSub("Minting invite ("+ttl+")", "host", "invite", "--ttl", ttl)
 		}
 		// Row actions dispatch on WHAT the cursor is on, so a machine that is both
 		// a host and a consumer can act on either list. Connected boxes (host side):
@@ -2170,6 +2194,7 @@ func (m sshModel) View() string {
 				action("t", "Test"),
 				action("p", "Print config"),
 				action("d", "Remove"),
+				action("i/I", "Invite a box"),
 			}
 		} else if m.clientCount() > 0 {
 			// A connected box (host side).
@@ -2181,6 +2206,7 @@ func (m sshModel) View() string {
 				action("s", "Share files"),
 				action("u", "Update"),
 				action("x", "Remove"),
+				action("i/I", "Invite a box"),
 			}
 		} else {
 			bar = []string{
@@ -2188,6 +2214,7 @@ func (m sshModel) View() string {
 				action("t", "Test"),
 				action("p", "Print config"),
 				action("d", "Remove"),
+				action("i/I", "Invite a box"),
 			}
 		}
 		lines = append(lines, strings.Join(bar, dim.Render("   ")))

@@ -642,6 +642,16 @@ func init() {
 	hostCmd.AddCommand(hostUpdateCmd)
 	hostCmd.AddCommand(hostStatuslineCmd)
 
+	hostInviteCmd.Flags().StringVar(&hostInviteTTL, "ttl", "15m", "how long the invite stays valid (e.g. 15m, 1h, 24h)")
+	hostInviteCmd.Flags().StringVar(&hostInviteHost, "host", "", "address the joiner should connect to (default: this machine's hostname)")
+	hostInviteCmd.Flags().IntVar(&hostInvitePort, "port", defaultSSHPort, "this machine's sshd port")
+	hostInviteCmd.Flags().BoolVar(&hostInviteList, "list", false, "list pending invites instead of minting one")
+	hostInviteCmd.Flags().StringVar(&hostInviteRevoke, "revoke", "", "revoke a pending invite by id instead of minting one")
+	hostConsumeCmd.Flags().StringVar(&hostConsumeClient, "client", "", "friendly name for the joining box (default: invited-<id>)")
+	hostConsumeCmd.Flags().StringVar(&hostConsumeHostname, "hostname", "", "the joining box's self-reported hostname")
+	hostCmd.AddCommand(hostInviteCmd)
+	hostCmd.AddCommand(hostConsumeCmd)
+
 	rootCmd.AddCommand(hostCmd)
 }
 

@@ -144,6 +144,30 @@ func (s *Store) Consume(secret string, nowFingerprint string) (Rec, error) {
 	return matched, nil
 }
 
+// Lookup returns the pending invite matching secret WITHOUT consuming it, so
+// a caller that needs a Rec field (e.g. the pinned port, to recompute its own
+// verification fingerprint against the right port) can look it up before
+// calling Consume. Read-only — never locks, mirrors List's unlocked fast
+// path; Consume re-validates everything atomically regardless, so a stale
+// read here is harmless.
+func (s *Store) Lookup(secret string) (Rec, error) {
+	file, err := s.load()
+	if err != nil {
+		return Rec{}, err
+	}
+	wantID := idForSecret(secret)
+	now := time.Now()
+	for _, rec := range file.Invites {
+		if constantTimeStringEqual(rec.ID, wantID) {
+			if isExpired(rec.Expires, now) {
+				return Rec{}, ErrExpired
+			}
+			return rec, nil
+		}
+	}
+	return Rec{}, ErrUnknown
+}
+
 // Revoke deletes a pending invite by its displayable ID (as returned by
 // List), e.g. to back `host invite --revoke <id>`.
 func (s *Store) Revoke(id string) error {

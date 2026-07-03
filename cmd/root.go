@@ -168,6 +168,8 @@ func helpText() string {
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"connect print"+reset, "Print the MCP JSON block (manual fallback)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"connect use"+reset, "Use a host's memory from this machine; disconnect leaves no trace"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"host"+reset, "Serve this machine's memory to a NAT'd remote via a public relay"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"host invite"+reset, "Mint a one-time token so a box can `auxly join` over direct SSH"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"join"+reset, "Pair with a host's memory using a token from `auxly host invite`"))
 	sb.WriteString("\r\n")
 
 	sb.WriteString(bold + "Audit & Pending Queue:" + reset + "\r\n")
