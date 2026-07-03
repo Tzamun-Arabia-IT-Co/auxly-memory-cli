@@ -10,9 +10,15 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/clipboard"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/invite"
 	"github.com/spf13/cobra"
 )
+
+// copyInvite is a package-level var (not a direct clipboard.Copy call) so
+// tests can stub it — the real thing shells out to a platform tool that
+// isn't guaranteed present on a CI box.
+var copyInvite = clipboard.Copy
 
 // ---------------------------------------------------------------------------
 // `auxly host invite` / `auxly host consume` — one-command remote pairing over
@@ -30,6 +36,8 @@ var (
 	hostInvitePort   int
 	hostInviteList   bool
 	hostInviteRevoke string
+
+	hostInviteNoCopy bool
 
 	hostConsumeClient   string
 	hostConsumeHostname string
@@ -141,7 +149,27 @@ func runHostInvite(cmd *cobra.Command, args []string) error {
 	fmt.Println("   auxly join " + encoded)
 	fmt.Println()
 	fmt.Println("   Single-use — consumed automatically on the first successful join.")
+
+	if line := inviteCopyLine(hostInviteNoCopy, copyInvite, encoded); line != "" {
+		fmt.Println(line)
+	}
 	return nil
+}
+
+// inviteCopyLine is the pure(ish) core of the post-mint auto-copy step:
+// given --no-copy (skip) and the clipboard func to use (copyFn — injected so
+// tests never touch a real clipboard tool), it copies token and returns the
+// line to print, or "" when skip is set. Kept separate from runHostInvite
+// (which needs a live sshd to reach at all) so this one decision is
+// independently testable.
+func inviteCopyLine(skip bool, copyFn func(string) error, token string) string {
+	if skip {
+		return ""
+	}
+	if err := copyFn(token); err != nil {
+		return "\033[38;5;240m(clipboard unavailable — copy the token above manually)\033[0m"
+	}
+	return "📋 copied to clipboard"
 }
 
 // consumeInvite is the pure(ish) core of `host consume`: given a store, the

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +95,42 @@ func TestRegisterConsumedClient(t *testing.T) {
 		c, ok := findClient("samebox")
 		if !ok || c.Hostname != "b.local" {
 			t.Fatalf("findClient(samebox) = %+v, %v, want the updated hostname b.local", c, ok)
+		}
+	})
+}
+
+// TestInviteCopyLine covers the post-mint auto-copy decision in isolation
+// from runHostInvite (which needs a live sshd to reach at all): --no-copy
+// skips the clipboard entirely, a working copy reports success, and a
+// failing copy (no clipboard tool on this box) prints the dim fallback
+// rather than anything alarming.
+func TestInviteCopyLine(t *testing.T) {
+	t.Run("--no-copy skips the clipboard and prints nothing", func(t *testing.T) {
+		called := false
+		got := inviteCopyLine(true, func(string) error { called = true; return nil }, "auxly1-tok")
+		if called {
+			t.Fatal("copyFn was called despite skip=true")
+		}
+		if got != "" {
+			t.Fatalf("inviteCopyLine() = %q, want empty", got)
+		}
+	})
+
+	t.Run("successful copy confirms it", func(t *testing.T) {
+		var gotToken string
+		got := inviteCopyLine(false, func(tok string) error { gotToken = tok; return nil }, "auxly1-tok")
+		if gotToken != "auxly1-tok" {
+			t.Fatalf("copyFn received %q, want the encoded token", gotToken)
+		}
+		if !strings.Contains(got, "copied to clipboard") {
+			t.Fatalf("inviteCopyLine() = %q, want a copied-to-clipboard confirmation", got)
+		}
+	})
+
+	t.Run("failed copy is a dim, non-alarming fallback", func(t *testing.T) {
+		got := inviteCopyLine(false, func(string) error { return errors.New("no clipboard tool found on PATH") }, "auxly1-tok")
+		if !strings.Contains(got, "copy the token above manually") {
+			t.Fatalf("inviteCopyLine() = %q, want it to point back at the printed token", got)
 		}
 	})
 }

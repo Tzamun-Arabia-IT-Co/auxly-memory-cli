@@ -13,9 +13,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"gopkg.in/yaml.v3"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/clipboard"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 )
+
+// copyInvite is a package-level var (not a direct clipboard.Copy call) so
+// tests can stub it out — the real thing shells out to a platform tool
+// that isn't guaranteed present on a CI box.
+var copyInvite = clipboard.Copy
 
 // ─────────────────────────────────────────────────────────────────
 //  Remote Memory over SSH — interactive management surface.
@@ -160,6 +166,13 @@ type sshModel struct {
 	// (Sprint 21's direct-SSH pairing needs no prior `host setup`/relay), so
 	// unlike the relay panel above it isn't gated on hostOK.
 	inviteTTLIdx int
+
+	// inviteToken holds the most recently minted invite string so [y] can
+	// re-copy it after the mint result panel is dismissed, without having to
+	// mint again. It's a secret, so it's cleared (never left lying around in
+	// memory) the moment the user leaves the Remote tab or mints a new one —
+	// see gotoScreen in app.go and the progressEvent handling below.
+	inviteToken string
 }
 
 // Per-file sharing tri-state, cycled with ←/→ in the share modal.
@@ -514,6 +527,22 @@ func (m sshModel) beginCapturedSub(title, sub string, args ...string) (sshModel,
 	return m.beginRun(title, ch)
 }
 
+// mintedInviteToken pulls the encoded invite token out of `host invite`'s
+// captured output by matching its own "auxly join <token>" hint line —
+// reusing the plain human-readable output instead of adding a second
+// machine-readable marker, so `auxly host invite` run directly in a
+// terminal stays unchanged. Pure (a line slice in, a string out) so it's
+// testable without a captured subprocess.
+func mintedInviteToken(lines []string) string {
+	const prefix = "auxly join "
+	for _, l := range lines {
+		if s := strings.TrimSpace(l); strings.HasPrefix(s, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(s, prefix))
+		}
+	}
+	return ""
+}
+
 func (m sshModel) beginPTY(title, password, sub string, args ...string) (sshModel, tea.Cmd) {
 	if sub == "" {
 		sub = "connect"
@@ -694,6 +723,15 @@ func (m sshModel) Update(msg tea.Msg) (sshModel, tea.Cmd) {
 			}
 			m.progressOK = msg.err == nil
 			m.progressNeeded = msg.needsKey
+			// A successful `host invite` mint prints "auxly join <token>" — grab
+			// the token so [y] can (re)copy it later. Any other action's output
+			// won't contain that line, so this only ever fires for a real mint,
+			// and it naturally replaces (never blank-clears) a token already held.
+			if m.progressOK {
+				if tok := mintedInviteToken(out); tok != "" {
+					m.inviteToken = tok
+				}
+			}
 			m.progressPct = 100
 			m.progressCh = nil
 			m.mode = sshModeResult
@@ -986,6 +1024,18 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 			ttl := inviteTTLPresets[m.inviteTTLIdx]
 			m.status = ""
 			return m.beginCapturedSub("Minting invite ("+ttl+")", "host", "invite", "--ttl", ttl)
+		case "y":
+			// [c] is already "Connect new" in this list, so the invite-token
+			// copy hotkey lives on [y] (yank) instead — see the footer, which
+			// only advertises it while a token is actually held.
+			if m.inviteToken != "" {
+				if err := copyInvite(m.inviteToken); err != nil {
+					m.status = "(clipboard unavailable — copy the token above manually)"
+				} else {
+					m.status = "invite copied ✓"
+				}
+			}
+			return m, nil
 		}
 		// Row actions dispatch on WHAT the cursor is on, so a machine that is both
 		// a host and a consumer can act on either list. Connected boxes (host side):
@@ -2216,6 +2266,9 @@ func (m sshModel) View() string {
 				action("d", "Remove"),
 				action("i/I", "Invite a box"),
 			}
+		}
+		if m.inviteToken != "" {
+			bar = append(bar, action("y", "Copy invite"))
 		}
 		lines = append(lines, strings.Join(bar, dim.Render("   ")))
 		switch {

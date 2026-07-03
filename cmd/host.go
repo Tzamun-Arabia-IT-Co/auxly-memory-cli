@@ -647,6 +647,7 @@ func init() {
 	hostInviteCmd.Flags().IntVar(&hostInvitePort, "port", defaultSSHPort, "this machine's sshd port")
 	hostInviteCmd.Flags().BoolVar(&hostInviteList, "list", false, "list pending invites instead of minting one")
 	hostInviteCmd.Flags().StringVar(&hostInviteRevoke, "revoke", "", "revoke a pending invite by id instead of minting one")
+	hostInviteCmd.Flags().BoolVar(&hostInviteNoCopy, "no-copy", false, "don't auto-copy the minted token to the clipboard")
 	hostConsumeCmd.Flags().StringVar(&hostConsumeClient, "client", "", "friendly name for the joining box (default: invited-<id>)")
 	hostConsumeCmd.Flags().StringVar(&hostConsumeHostname, "hostname", "", "the joining box's self-reported hostname")
 	hostCmd.AddCommand(hostInviteCmd)

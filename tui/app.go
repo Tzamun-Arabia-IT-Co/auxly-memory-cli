@@ -465,6 +465,10 @@ func (m *model) syncViewport() {
 // gotoScreen switches the active tab, resets the content scroll to the top, and
 // refreshes the new screen's data.
 func (m *model) gotoScreen(s screen) tea.Cmd {
+	if m.screen == screenSSH && s != screenSSH && m.ssh.inviteToken != "" {
+		// Don't hold a copy-able secret around once the user has left the tab.
+		m.ssh.inviteToken = ""
+	}
 	m.screen = s
 	if m.vpReady {
 		m.contentVP.GotoTop()

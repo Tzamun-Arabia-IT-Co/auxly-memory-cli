@@ -47,6 +47,25 @@ func TestMouseClickOnReviewBadgeHitsReviewTab(t *testing.T) {
 	}
 }
 
+// TestLeavingSSHTabClearsInviteToken guards the "don't hold a secret around
+// forever" requirement: a minted invite token must not survive switching
+// away from the Remote tab, and must not reappear on switching back.
+func TestLeavingSSHTabClearsInviteToken(t *testing.T) {
+	m := NewApp(t.TempDir())
+	m.gotoScreen(screenSSH)
+	m.ssh.inviteToken = "auxly1-abc123"
+
+	m.gotoScreen(screenActivity)
+	if m.ssh.inviteToken != "" {
+		t.Fatalf("inviteToken survived leaving the Remote tab: %q", m.ssh.inviteToken)
+	}
+
+	m.gotoScreen(screenSSH)
+	if m.ssh.inviteToken != "" {
+		t.Fatalf("inviteToken reappeared on returning to the Remote tab: %q", m.ssh.inviteToken)
+	}
+}
+
 // TestLabelForBadgesReviewOnlyWhenNonEmpty locks labelFor's contract directly:
 // every other tab is its static screenNames entry, and Review only gains the
 // "(N)" badge while its queue is non-empty.
