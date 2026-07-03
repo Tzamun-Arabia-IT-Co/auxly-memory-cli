@@ -57,17 +57,33 @@ func scrubbedOrganizeEnv() []string {
 // AUXLY_ORGANIZE_TIMEOUT (whole seconds) for slow models or big vaults.
 const defaultOrganizeTimeout = 900 * time.Second
 
-// organizeDeltaEnabled reports whether the whole-vault organize should ask the
-// model for small move/merge/delete OPERATIONS instead of rewriting every
-// file's full content (organize_delta.go) — the biggest single-run latency
-// lever. Opt-in via AUXLY_ORGANIZE_DELTA={1,true,on,yes} while it proves out;
-// default off so existing behavior and tests are untouched.
+// organizeEffort returns the Claude Code --effort level for organize runs.
+// Defaults to "low" — organize is a mechanical re-file that doesn't need deep
+// reasoning, and low effort measured ~6x faster on a real vault (14s vs 80–98s)
+// for the same result. Override with AUXLY_ORGANIZE_EFFORT (low|medium|high|
+// xhigh|max) for a vault that wants more deliberation.
+func organizeEffort() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AUXLY_ORGANIZE_EFFORT"))) {
+	case "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(strings.TrimSpace(os.Getenv("AUXLY_ORGANIZE_EFFORT")))
+	}
+	return "low"
+}
+
+// organizeDeltaEnabled reports whether organize asks the model for small
+// move/merge/delete OPERATIONS instead of rewriting every file's full content
+// (organize_delta.go). DEFAULT ON: without it, a vault over the chunk threshold
+// re-emits every file's whole content per call, which measured 280s+ (timeouts)
+// on a real ~16k vault; delta's op output turns that into one ~50s whole-vault
+// call. Reviewed + guarded (planOrganizeDelta reverts any file its fact-loss
+// guard flags), so the worst case is a rejected proposal, never a bad write.
+// Set AUXLY_ORGANIZE_DELTA={0,off,false,no} to force the old full-file path.
 func organizeDeltaEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("AUXLY_ORGANIZE_DELTA"))) {
-	case "1", "true", "on", "yes":
-		return true
+	case "0", "off", "false", "no":
+		return false
 	}
-	return false
+	return true
 }
 
 // organizeTimeout returns the CLI-agent execution timeout, honoring
@@ -112,11 +128,19 @@ func buildAgentArgs(agentName, model, prompt string) []string {
 		//                          context (this was the contamination source)
 		// Each variadic flag (--mcp-config, --tools, --setting-sources) is followed by
 		// another flag so it can't swallow the positional prompt.
+		//
+		// --effort low is the single biggest speed lever measured: organize is a
+		// mechanical re-file (move/merge/delete bullets), NOT a task that needs deep
+		// reasoning. On a real ~16k vault the same prompt took 80–98s at the default
+		// effort but 14s at low — the gap was hidden thinking, not output (the delta
+		// response is ~180 tokens either way). Override with AUXLY_ORGANIZE_EFFORT
+		// for a rare vault that wants more deliberation.
 		return []string{
 			"-p",
 			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
 			"--tools", "",
 			"--setting-sources", "",
+			"--effort", organizeEffort(),
 			"--model", model,
 			prompt,
 		}

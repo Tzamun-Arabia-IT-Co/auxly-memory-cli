@@ -149,29 +149,47 @@ func TestDeltaOps_PersonalSinkRefusesMoveOut(t *testing.T) {
 	}
 }
 
-// TestDeltaMode_DefaultOff proves the dark launch: PlanOrganizeWithAgent (the
-// existing, stable entry point) never engages delta mode — the whole-file
-// contract is untouched unless a caller explicitly opts in via
-// OrganizeRunOpts{DeltaMode: true}.
-func TestDeltaMode_DefaultOff(t *testing.T) {
-	root := t.TempDir()
-	s := &Store{Root: root}
-	writeVaultFile(t, root, "identity.md", "- name wael\n")
-
-	sawOpsPrompt := false
-	exec := func(ctx context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
-		if strings.Contains(sys, `"ops"`) {
-			sawOpsPrompt = true
+// TestDeltaMode_DefaultOnEnvOff proves delta is now the DEFAULT (the whole-file
+// path timed out on real vaults), and that AUXLY_ORGANIZE_DELTA=0 forces the
+// old whole-file contract back for anyone who wants it.
+func TestDeltaMode_DefaultOnEnvOff(t *testing.T) {
+	// Default (no env): the delta-ops prompt IS sent.
+	t.Run("default on", func(t *testing.T) {
+		root := t.TempDir()
+		s := &Store{Root: root}
+		writeVaultFile(t, root, "identity.md", "- name wael\n")
+		sawOpsPrompt := false
+		exec := func(ctx context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+			sawOpsPrompt = strings.Contains(sys, `"ops"`)
+			return organizeRun{jsonContent: deltaResp(), modelUsed: "fake"}, OrganizeResult{}, true
 		}
-		return organizeRun{jsonContent: `{"files":[{"name":"identity.md","content":"- name wael\n"}]}`, modelUsed: "fake"}, OrganizeResult{}, true
-	}
-	_, res := s.planOrganize(context.Background(), "", false, exec)
-	if !res.Success {
-		t.Fatalf("plan failed: %s", res.Message)
-	}
-	if sawOpsPrompt {
-		t.Fatal("default (non-opt-in) path must never send the delta-ops prompt")
-	}
+		if _, res := s.planOrganize(context.Background(), "", false, exec); !res.Success {
+			t.Fatalf("plan failed: %s", res.Message)
+		}
+		if !sawOpsPrompt {
+			t.Fatal("default path must now send the delta-ops prompt")
+		}
+	})
+	// AUXLY_ORGANIZE_DELTA=0 → whole-file path, no ops prompt.
+	t.Run("env off falls back to whole-file", func(t *testing.T) {
+		t.Setenv("AUXLY_ORGANIZE_DELTA", "0")
+		root := t.TempDir()
+		s := &Store{Root: root}
+		writeVaultFile(t, root, "identity.md", "- name wael\n")
+		sawOpsPrompt := false
+		exec := func(ctx context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+			if strings.Contains(sys, `"ops"`) {
+				sawOpsPrompt = true
+			}
+			return organizeRun{jsonContent: `{"files":[{"name":"identity.md","content":"- name wael\n"}]}`, modelUsed: "fake"}, OrganizeResult{}, true
+		}
+		if _, res := s.planOrganize(context.Background(), "", false, exec); !res.Success {
+			t.Fatalf("plan failed: %s", res.Message)
+		}
+		if sawOpsPrompt {
+			t.Fatal("AUXLY_ORGANIZE_DELTA=0 must use the whole-file prompt, not delta")
+		}
+	})
 }
 
 // TestDeltaMode_EnvOptIn proves AUXLY_ORGANIZE_DELTA routes a plain run (no

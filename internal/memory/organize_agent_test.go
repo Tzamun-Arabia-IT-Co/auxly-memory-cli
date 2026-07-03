@@ -28,7 +28,7 @@ func TestBuildAgentArgs_HeadlessInvocationPerProvider(t *testing.T) {
 		{"claude is headless + MCP-isolated + tool-disabled + model-pinned", "Claude Code / CLI",
 			"sonnet", []string{"-p", "--strict-mcp-config", "--mcp-config", "--tools", "--model"}, nil, "sonnet"},
 		{"claude empty model defaults to haiku", "Claude Code / CLI",
-			"", []string{"-p", "--model"}, nil, "haiku"},
+			"", []string{"-p", "--model", "--effort", "low"}, nil, "haiku"},
 		{"codex uses the exec subcommand under a read-only sandbox, outside a git repo", "Codex IDE Desktop",
 			"gpt-5.2-codex", []string{"exec", "--sandbox", "read-only", "--skip-git-repo-check", "--model"}, nil, "gpt-5.2-codex"},
 		{"codex omits model flag when empty", "Codex IDE Desktop",
