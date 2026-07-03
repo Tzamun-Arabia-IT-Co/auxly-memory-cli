@@ -46,6 +46,11 @@ type memFile struct {
 	Lines     []string
 	FactCount int
 	Hot       bool // RecallStatsByFile: Hits30 >= 1
+	// Unreadable is true when Store.View errored for this file (e.g.
+	// encrypted at rest with the key unreachable) — MAJOR 11: such a file
+	// must never render as an ordinary, editable, empty file. Lines/FactCount
+	// are zero-valued in this case and do NOT mean "the file is empty".
+	Unreadable bool
 }
 
 // memSearchHit is one live-search match against the scan's cached content.
@@ -269,13 +274,14 @@ func (m memBrowserModel) scanCmd() tea.Cmd {
 		build := func(list []memory.FileInfo) []memFile {
 			out := make([]memFile, 0, len(list))
 			for _, f := range list {
-				content, _ := store.View(f.Name)
+				content, verr := store.View(f.Name)
 				lines := strings.Split(content, "\n")
 				out = append(out, memFile{
-					Name:      f.Name,
-					Lines:     lines,
-					FactCount: countBullets(lines),
-					Hot:       hot[f.Name],
+					Name:       f.Name,
+					Lines:      lines,
+					FactCount:  countBullets(lines),
+					Hot:        hot[f.Name],
+					Unreadable: verr != nil,
 				})
 			}
 			return out
@@ -439,6 +445,14 @@ func (m memBrowserModel) treeRowIndexForFile(name string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// focusedUnreadable reports whether the currently focused file failed to
+// decrypt (MAJOR 11) — edit/delete/create must refuse rather than act on its
+// misleadingly-empty Lines.
+func (m memBrowserModel) focusedUnreadable() bool {
+	f, ok := m.findFile(m.focused)
+	return ok && f.Unreadable
 }
 
 func (m memBrowserModel) findFile(name string) (memFile, bool) {
@@ -643,6 +657,10 @@ func (m memBrowserModel) updateNormal(msg tea.KeyMsg) (memBrowserModel, tea.Cmd)
 		m.status = ""
 		return m, memPlaygroundClientsCmd()
 	case "e":
+		if m.focusedUnreadable() {
+			m.status = "🔒 key unreachable — cannot edit an undecryptable file (run `auxly encrypt status`)"
+			break
+		}
 		line, ok := m.currentContentLine()
 		if !ok {
 			break
@@ -658,6 +676,10 @@ func (m memBrowserModel) updateNormal(msg tea.KeyMsg) (memBrowserModel, tea.Cmd)
 		m.editInput.Focus()
 		m.status = ""
 	case "d":
+		if m.focusedUnreadable() {
+			m.status = "🔒 key unreachable — cannot delete from an undecryptable file (run `auxly encrypt status`)"
+			break
+		}
 		line, ok := m.currentContentLine()
 		if !ok {
 			break
@@ -672,6 +694,10 @@ func (m memBrowserModel) updateNormal(msg tea.KeyMsg) (memBrowserModel, tea.Cmd)
 	case "n":
 		if m.focused == "" {
 			m.status = "select a file first"
+			break
+		}
+		if m.focusedUnreadable() {
+			m.status = "🔒 key unreachable — cannot add to an undecryptable file (run `auxly encrypt status`)"
 			break
 		}
 		m.creating = true
@@ -1001,12 +1027,15 @@ func memTreeRow(f memFile, selected, paneFocused, indent bool, width int) string
 		prefix = "  "
 	}
 	count := fmt.Sprintf("(%d)", f.FactCount)
+	if f.Unreadable {
+		count = "🔒 key unreachable"
+	}
 	budget := width - utf8.RuneCountInString(prefix) - utf8.RuneCountInString(marker) - 2 - utf8.RuneCountInString(count)
 	if budget < 1 {
 		budget = 1
 	}
 	row := memPad(prefix+marker+" "+truncate(f.Name, budget)+" "+count, width)
-	if memory.IsPersonalFile(f.Name) {
+	if memory.IsPersonalFile(f.Name) || f.Unreadable {
 		row = memWarnStyle.Render(row)
 	}
 	return memRowCursor(row, selected, paneFocused)
@@ -1064,6 +1093,9 @@ func (m memBrowserModel) renderTree(width int) string {
 func (m memBrowserModel) renderContent(width int) string {
 	if m.focused == "" {
 		return memDimStyle.Render("select a file in the tree")
+	}
+	if f, ok := m.findFile(m.focused); ok && f.Unreadable {
+		return memWarnStyle.Render("🔒 key unreachable — cannot decrypt " + m.focused + " (run `auxly encrypt status`)")
 	}
 	lines := m.focusedLines()
 	var rows []string
@@ -1184,7 +1216,19 @@ func (m memBrowserModel) renderPlayground(width int) string {
 	if m.playgroundQuery == "" {
 		return memDimStyle.Render("type a query, enter to run recall through the vault")
 	}
+
+	// MAJOR 10: encrypted files are structurally excluded from the semantic
+	// index — surface that once per run so a missing fact doesn't read as
+	// "doesn't exist" when it's really just "encrypted at rest".
+	var encLine string
+	if n := m.store.EncryptedFileCount(); n > 0 {
+		encLine = memDimStyle.Render(truncate(fmt.Sprintf("🔒 %d encrypted file(s) excluded from recall — read via the file tree / memory_read", n), inner))
+	}
+
 	if len(m.playgroundHits) == 0 {
+		if encLine != "" {
+			return encLine + "\n" + memDimStyle.Render("no hits")
+		}
 		return memDimStyle.Render("no hits")
 	}
 	var accepted, cut, below int
@@ -1202,8 +1246,11 @@ func (m memBrowserModel) renderPlayground(width int) string {
 		m.playgroundQuery, m.playgroundFloor, accepted, cut, below)
 	rows := []string{
 		lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Render(truncate(header, inner)),
-		"",
 	}
+	if encLine != "" {
+		rows = append(rows, encLine)
+	}
+	rows = append(rows, "")
 	for _, h := range m.playgroundHits {
 		text := memPlaygroundRow(h, memPlaygroundK, m.playgroundFloor, inner)
 		switch {

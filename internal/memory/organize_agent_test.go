@@ -124,6 +124,34 @@ func TestOrganizeAgent_NotGated(t *testing.T) {
 	}
 }
 
+// CRITICAL 3 regression: organize via a CLI agent must be refused outright
+// when any gathered file is encrypted at rest — decrypted content riding the
+// spawned subprocess's argv stays ps-visible for the whole run. The
+// nonexistent agentPath proves no subprocess was ever spawned: if the guard
+// were bypassed, runOrganizeModel's os.Stat check would instead fail with a
+// "not runnable" exec error.
+func TestPlanOrganize_RefusesCLIAgentWithEncryptedFile(t *testing.T) {
+	store := NewStore(t.TempDir())
+	testVaultIdentity(t)
+	if err := store.Write("identity.md", "# Identity\n- Name: Test\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EncryptFile("identity.md"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, res := store.PlanOrganizeWithAgent(context.Background(), "Claude Code / CLI", "/definitely/not/a/real/binary", "")
+	if res.Success {
+		t.Fatal("organize via a CLI agent succeeded despite an encrypted file present")
+	}
+	if !strings.Contains(res.Message, "command line") {
+		t.Fatalf("refusal message should explain the argv-exposure risk, got: %s", res.Message)
+	}
+	if strings.Contains(res.Message, "not runnable") {
+		t.Fatal("guard was bypassed — got an exec-failure message instead of the pre-exec refusal (a subprocess was spawned)")
+	}
+}
+
 func TestPlanOrganize_DoesNotWrite(t *testing.T) {
 	store := NewStore(t.TempDir())
 	store.WorkspaceRoot = ""

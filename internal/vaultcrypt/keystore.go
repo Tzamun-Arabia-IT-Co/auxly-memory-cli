@@ -232,6 +232,32 @@ func (k *Keystore) ExportKey() (string, error) {
 	return x25519.String(), nil
 }
 
+// Source reports where the active vault key would be resolved from: "env",
+// "keychain", or "file" — the same precedence order as Identity(), but
+// reporting only the origin, not the key material. Returns ErrNoKey if none
+// of the three has key material, or a wrapped ErrKeychainUnavailable if the
+// keychain can't be probed to tell (locked/denied/timeout).
+func (k *Keystore) Source() (string, error) {
+	if strings.TrimSpace(os.Getenv(envVaultKey)) != "" {
+		return "env", nil
+	}
+	if k.useKeychain {
+		key, err := findKeychain()
+		switch {
+		case err == nil && strings.TrimSpace(key) != "":
+			return "keychain", nil
+		case err == nil, errors.Is(err, errKeychainNotFound):
+			// genuinely absent - fall through to file
+		default:
+			return "", err
+		}
+	}
+	if _, err := os.Stat(k.privateKeyPath()); err == nil {
+		return "file", nil
+	}
+	return "", ErrNoKey
+}
+
 func (k *Keystore) keysDir() string {
 	// WHY: keys live outside the memory vault so git sync never ships the key next to ciphertext.
 	return filepath.Join(k.dir, "keys")

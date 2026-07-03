@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"filippo.io/age"
+
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/safepath"
 )
 
@@ -44,6 +46,15 @@ type Store struct {
 	recallIdxMeta  IndexMeta
 	recallIdxStat  os.FileInfo // identity of the DB file the handle was opened on
 	lastRefreshSig string
+
+	// Vault encryption-at-rest (see cryptio.go). The resolved identity/
+	// recipient are cached here after first successful resolution — key
+	// resolution can exec `security` on macOS (10s timeout), and repeating
+	// that per read/write would be exec-per-call overhead on a long-lived
+	// MCP server.
+	cryptoMu        sync.Mutex
+	cryptoIdentity  age.Identity
+	cryptoRecipient age.Recipient
 }
 
 // NewStore creates a new memory store, dynamically detecting any local workspace.
@@ -169,6 +180,8 @@ func (s *Store) View(filename string) (string, error) {
 	if s.WorkspaceRoot != "" {
 		if localPath, perr := safepath.ResolveSafe(s.WorkspaceRoot, filename); perr == nil {
 			if _, err := os.Stat(localPath); err == nil {
+				// Workspace overrides are never encrypted — encryption-at-rest
+				// is a global-vault feature in v1 (see cryptio.go).
 				data, err := os.ReadFile(localPath)
 				if err == nil {
 					return string(data), nil
@@ -181,7 +194,7 @@ func (s *Store) View(filename string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(path)
+	data, _, err := s.readVaultFile(path)
 	if err != nil {
 		return "", fmt.Errorf("cannot read %s: %w", filename, err)
 	}
@@ -246,8 +259,9 @@ func (s *Store) EnsureUnified() {
 func (s *Store) writeScopedNoLock(filename string, content string, scope string) error {
 	var path string
 	var err error
+	isWorkspace := scope == "workspace" && s.WorkspaceRoot != ""
 
-	if scope == "workspace" && s.WorkspaceRoot != "" {
+	if isWorkspace {
 		if err := os.MkdirAll(s.WorkspaceRoot, 0755); err != nil {
 			return fmt.Errorf("cannot create workspace memory directory: %w", err)
 		}
@@ -270,7 +284,11 @@ func (s *Store) writeScopedNoLock(filename string, content string, scope string)
 		}
 	}
 
-	return AtomicWriteFile(path, []byte(content), 0644)
+	// Workspace copies are never encrypted (encryption-at-rest is a
+	// global-vault feature in v1); the global root preserves whatever the
+	// file already is on disk (state lives in the file, not config).
+	encrypt := !isWorkspace && s.shouldStayEncrypted(path)
+	return s.writeVaultFile(path, []byte(content), 0644, encrypt)
 }
 
 // CompileUnified compiles all memory files into a single unified_memory.md file.
@@ -289,12 +307,17 @@ func (s *Store) CompileUnified() error {
 		if f.Name == "unified_memory.md" {
 			continue
 		}
+		b.WriteString(fmt.Sprintf("## 📄 File: %s\n\n", f.Name))
+		if s.fileIsEncrypted(f.Name) {
+			// advisory: the unified rollup is a plaintext aggregate — an
+			// encrypted source must never be decrypted into it.
+			b.WriteString(fmt.Sprintf("(%s: encrypted — not compiled)\n\n---\n\n", f.Name))
+			continue
+		}
 		content, err := s.View(f.Name)
 		if err != nil {
 			continue
 		}
-
-		b.WriteString(fmt.Sprintf("## 📄 File: %s\n\n", f.Name))
 		b.WriteString(content)
 		b.WriteString("\n\n---\n\n")
 	}
@@ -365,6 +388,11 @@ func (s *Store) PendingDir() string {
 // The `path` argument selects which root to operate on; pass the store Root (or a
 // workspace memory dir). Both files are read/written within that directory.
 func (s *Store) MigratePersonal(path string) error {
+	// MAJOR 7: resolve/cache the vault identity/recipient BEFORE the lock —
+	// see Store.PrewarmCrypto's doc comment for why this must never happen
+	// while holding LockVault.
+	s.PrewarmCrypto()
+
 	unlock, lockErr := LockVault(s.Root)
 	if lockErr != nil {
 		return lockErr
@@ -372,7 +400,7 @@ func (s *Store) MigratePersonal(path string) error {
 	defer unlock()
 
 	identityPath := filepath.Join(path, "identity.md")
-	identityRaw, err := os.ReadFile(identityPath)
+	identityRaw, identityEncrypted, err := s.readVaultFile(identityPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // nothing to migrate
@@ -386,8 +414,9 @@ func (s *Store) MigratePersonal(path string) error {
 	}
 
 	personalPath := filepath.Join(path, "personal.md")
+	personalEncrypted := s.shouldStayEncrypted(personalPath)
 	var personalBuf strings.Builder
-	if existing, err := os.ReadFile(personalPath); err == nil {
+	if existing, _, err := s.readVaultFile(personalPath); err == nil {
 		personalBuf.Write(existing)
 		if !strings.HasSuffix(personalBuf.String(), "\n") {
 			personalBuf.WriteString("\n")
@@ -399,10 +428,10 @@ func (s *Store) MigratePersonal(path string) error {
 	personalBuf.WriteString(strings.TrimRight(section, "\n"))
 	personalBuf.WriteString("\n")
 
-	if err := AtomicWriteFile(personalPath, []byte(personalBuf.String()), 0644); err != nil {
+	if err := s.writeVaultFile(personalPath, []byte(personalBuf.String()), 0644, personalEncrypted); err != nil {
 		return fmt.Errorf("write personal.md: %w", err)
 	}
-	if err := AtomicWriteFile(identityPath, []byte(remaining), 0644); err != nil {
+	if err := s.writeVaultFile(identityPath, []byte(remaining), 0644, identityEncrypted); err != nil {
 		return fmt.Errorf("write identity.md: %w", err)
 	}
 	return nil

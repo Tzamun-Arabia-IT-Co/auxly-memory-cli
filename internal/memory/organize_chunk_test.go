@@ -1,12 +1,17 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
+
+	"filippo.io/age"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/vaultcrypt"
 )
 
 // fakeExec returns a canned per-file organize response keyed by the file name
@@ -57,7 +62,7 @@ func TestChunkedOrganizePerFileWithMoves(t *testing.T) {
 		"infra.md": chunkResp("infra.md", "- server ip 192.168.1.24\n"),
 	}, &called)
 
-	prop, res := s.planOrganize(context.Background(), exec)
+	prop, res := s.planOrganize(context.Background(), "", exec)
 	if !res.Success {
 		t.Fatalf("plan failed: %s", res.Message)
 	}
@@ -98,7 +103,7 @@ func TestChunkedOrganizePersonalSinkOneWay(t *testing.T) {
 		"business.md": chunkResp("business.md", "- company contract with client X\n"),
 	}, &called)
 
-	prop, res := s.planOrganize(context.Background(), exec)
+	prop, res := s.planOrganize(context.Background(), "", exec)
 	if !res.Success {
 		t.Fatalf("plan failed: %s", res.Message)
 	}
@@ -129,7 +134,7 @@ func TestChunkedOrganizeInvalidMoveTargetKeepsFact(t *testing.T) {
 		"infra.md": chunkResp("infra.md", "- box one\n"),
 	}, &called)
 
-	prop, res := s.planOrganize(context.Background(), exec)
+	prop, res := s.planOrganize(context.Background(), "", exec)
 	if !res.Success {
 		t.Fatalf("plan failed: %s", res.Message)
 	}
@@ -140,6 +145,80 @@ func TestChunkedOrganizeInvalidMoveTargetKeepsFact(t *testing.T) {
 		if c.Name == "CLAUDE.md" {
 			t.Fatalf("non-organizable file appeared in proposal")
 		}
+	}
+}
+
+// CRITICAL 2 regression: a move whose TARGET file is encrypted with an
+// unreachable key must be SKIPPED (the fact stays in its origin file), never
+// treated as an empty file worth recreating with only the moved fact — that
+// would silently wipe personal.md's real content down to one bullet.
+func TestChunkedOrganize_SkipsMoveToUnreadableEncryptedTarget(t *testing.T) {
+	root := t.TempDir()
+	s := &Store{Root: root}
+	writeVaultFile(t, root, "projects.md", "- building auxly\n- Personal loan of 5,000 from a relative\n")
+	writeVaultFile(t, root, "infra.md", "- server ip 10.0.0.5\n")
+
+	// personal.md exists on disk as ciphertext under a real identity, but the
+	// active AUXLY_VAULT_KEY resolves to a DIFFERENT one — every read of it
+	// fails with a decrypt error (non-NotExist), the class of failure this
+	// fix must never treat as "empty".
+	seedIdentity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := vaultcrypt.Encrypt([]byte("- existing private fact\n"), seedIdentity.Recipient())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root+"/personal.md", ciphertext, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rawBefore, err := os.ReadFile(root + "/personal.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wrongIdentity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUXLY_VAULT_KEY", wrongIdentity.String())
+	t.Setenv("AUXLY_ORGANIZE_CHUNK_TOKENS", "1") // force chunked path
+
+	var called []string
+	exec := fakeExec(t, map[string]string{
+		"projects.md": chunkResp("projects.md", "- building auxly\n",
+			map[string]string{"to": "personal.md", "fact": "- Personal loan of 5,000 from a relative"}),
+		"infra.md": chunkResp("infra.md", "- server ip 10.0.0.5\n"),
+	}, &called)
+
+	prop, res := s.planOrganize(context.Background(), "", exec)
+	if !res.Success {
+		t.Fatalf("plan failed: %s", res.Message)
+	}
+
+	var projectsChange *ProposedChange
+	for i := range prop.Changes {
+		if prop.Changes[i].Name == "projects.md" {
+			projectsChange = &prop.Changes[i]
+		}
+		if prop.Changes[i].Name == "personal.md" {
+			t.Fatalf("an unreadable target must not get a proposed change at all: %+v", prop.Changes[i])
+		}
+	}
+	if projectsChange == nil || !strings.Contains(projectsChange.NewContent, "Personal loan of 5,000") {
+		t.Fatalf("fact lost — not kept in origin file after a skipped move: %+v", projectsChange)
+	}
+	if prop.Warning == "" {
+		t.Fatal("a skipped move should surface a warning for human review")
+	}
+
+	rawAfter, err := os.ReadFile(root + "/personal.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rawBefore, rawAfter) {
+		t.Fatal("personal.md bytes changed despite the move being skipped")
 	}
 }
 
@@ -161,7 +240,7 @@ func TestSmallVaultStaysWholeVault(t *testing.T) {
 		return organizeRun{jsonContent: resp, modelUsed: "fake", tokensUsed: 10}, OrganizeResult{}, true
 	}
 
-	_, res := s.planOrganize(context.Background(), exec)
+	_, res := s.planOrganize(context.Background(), "", exec)
 	if !res.Success {
 		t.Fatalf("plan failed: %s", res.Message)
 	}
@@ -187,7 +266,7 @@ func TestChunkedOrganizeAbortsOnFileFailure(t *testing.T) {
 		return organizeRun{jsonContent: chunkResp("identity.md", "- name wael\n"), modelUsed: "fake"}, OrganizeResult{}, true
 	}
 
-	prop, res := s.planOrganize(context.Background(), exec)
+	prop, res := s.planOrganize(context.Background(), "", exec)
 	if res.Success {
 		t.Fatal("expected failure result")
 	}

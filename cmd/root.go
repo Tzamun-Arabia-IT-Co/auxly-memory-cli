@@ -156,6 +156,8 @@ func helpText() string {
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"export"+reset, "Export the memory vault (backup/share)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"populate"+reset, "Auto-detect system profile and populate files"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"review"+reset, "Review stale facts (old + unrecalled) — keep or archive"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"encrypt"+reset, "Encrypt memory files at rest (init/file/status)"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"decrypt"+reset, "Remove encryption-at-rest from a memory file"))
 	sb.WriteString("\r\n")
 
 	sb.WriteString(bold + "Remote Access:" + reset + "\r\n")

@@ -356,6 +356,12 @@ func (s *Store) refreshIndex(ctx context.Context, ix *Index, emb Embedder) bool 
 // the refresh incomplete, and the caller must not record it as done).
 func (s *Store) refreshFile(ctx context.Context, ix *Index, emb Embedder, f FileInfo) bool {
 	scopeKey := f.Path
+	if s.fileIsEncrypted(f.Name) {
+		// advisory: embeddings.db would otherwise become a plaintext shadow
+		// copy of an encrypted file. Skip embedding it, and sweep any chunks
+		// indexed before it was encrypted so none linger.
+		return ix.PruneExcept(scopeKey, map[string]bool{}) == nil
+	}
 	content, err := s.View(f.Name)
 	if err != nil {
 		return false

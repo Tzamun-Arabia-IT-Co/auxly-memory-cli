@@ -173,13 +173,18 @@ func (s *Store) StaleFacts(lastRecall func(file string) (map[string]time.Time, e
 // ArchiveFact moves one exact stale snapshot to .archive for human-auditable
 // retention. RULE 0: decay never deletes facts; humans can grep .archive forever.
 func (s *Store) ArchiveFact(file, line string) error {
+	// MAJOR 7: resolve/cache the vault identity BEFORE the lock — see
+	// PrewarmCrypto's doc comment for why this must never happen while
+	// holding LockVault.
+	s.PrewarmCrypto()
+
 	unlock, err := LockVault(s.Root)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	content, sourcePath, root, err := s.readViewCopy(file)
+	content, sourcePath, root, encrypted, err := s.readViewCopy(file)
 	if err != nil {
 		return err
 	}
@@ -201,7 +206,7 @@ func (s *Store) ArchiveFact(file, line string) error {
 
 	kept := append([]string{}, lines[:idx]...)
 	kept = append(kept, lines[idx+1:]...)
-	if err := AtomicWriteFile(sourcePath, []byte(strings.Join(kept, "")), 0644); err != nil {
+	if err := s.writeVaultFile(sourcePath, []byte(strings.Join(kept, "")), 0644, encrypted); err != nil {
 		return fmt.Errorf("cannot write %s: %w", file, err)
 	}
 
@@ -209,14 +214,25 @@ func (s *Store) ArchiveFact(file, line string) error {
 	if err != nil {
 		return err
 	}
-	existing, err := os.ReadFile(archivePath)
+	// Read through readVaultFile (not raw os.ReadFile) — a prior archive pass
+	// may have already encrypted this file.
+	existing, _, err := s.readVaultFile(archivePath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("cannot read archive %s: %w", file, err)
 	}
 	// Preserve the original line's indentation (real bullets nest, e.g.
 	// "  - Driver: ...") rather than the caller's trimmed StaleFact.Line.
 	next := string(existing) + original + "\n"
-	if err := AtomicWriteFile(archivePath, []byte(next), 0644); err != nil {
+	// CRITICAL 5: encryption is STICKY. `encrypted` alone (the SOURCE's
+	// CURRENT state) covers the archive's very first write, when
+	// .archive/<file> doesn't exist yet to carry any state of its own — but
+	// `auxly decrypt file <name>` never touches .archive/<name>, so a source
+	// that was later decrypted must not silently drag an already-encrypted
+	// archive back to plaintext on the next append. OR in
+	// shouldStayEncrypted(archivePath) (the archive's OWN on-disk state, "" /
+	// missing = false) makes that stick.
+	archiveEncrypted := encrypted || s.shouldStayEncrypted(archivePath)
+	if err := s.writeVaultFile(archivePath, []byte(next), 0644, archiveEncrypted); err != nil {
 		return fmt.Errorf("cannot write archive %s: %w", file, err)
 	}
 	return nil
@@ -224,13 +240,16 @@ func (s *Store) ArchiveFact(file, line string) error {
 
 // RestampFact refreshes an exact fact line in place, keeping review human-led.
 func (s *Store) RestampFact(file, line string) error {
+	// MAJOR 7: see ArchiveFact — resolve/cache the identity before the lock.
+	s.PrewarmCrypto()
+
 	unlock, err := LockVault(s.Root)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	content, sourcePath, _, err := s.readViewCopy(file)
+	content, sourcePath, _, encrypted, err := s.readViewCopy(file)
 	if err != nil {
 		return err
 	}
@@ -247,7 +266,7 @@ func (s *Store) RestampFact(file, line string) error {
 		// nested bullet's leading whitespace survives the round trip.
 		nextLine := restampLine(trimmedEOL, today)
 		lines[i] = nextLine + eol
-		if err := AtomicWriteFile(sourcePath, []byte(strings.Join(lines, "")), 0644); err != nil {
+		if err := s.writeVaultFile(sourcePath, []byte(strings.Join(lines, "")), 0644, encrypted); err != nil {
 			return fmt.Errorf("cannot write %s: %w", file, err)
 		}
 		return nil
@@ -264,29 +283,30 @@ func isBulletLine(line string) bool {
 // ArchiveFact/RestampFact must mutate that same copy — StaleFacts finds facts
 // via View, so a workspace-shadowed fact edited against the global root would
 // either report "not found" or silently rewrite a file nothing reads. Returns
-// the content, the resolved file path, and the root it came from (so the
-// caller can archive alongside the copy it actually touched).
-func (s *Store) readViewCopy(file string) (content, path, root string, err error) {
+// the content, the resolved file path, the root it came from (so the caller
+// can archive alongside the copy it actually touched), and whether the
+// source was encrypted on disk (workspace overrides never are — v1 limit).
+func (s *Store) readViewCopy(file string) (content, path, root string, encrypted bool, err error) {
 	if s.WorkspaceRoot != "" {
 		if localPath, perr := safepath.ResolveSafe(s.WorkspaceRoot, file); perr == nil {
 			if _, statErr := os.Stat(localPath); statErr == nil {
 				data, rerr := os.ReadFile(localPath)
 				if rerr != nil {
-					return "", "", "", fmt.Errorf("cannot read %s: %w", file, rerr)
+					return "", "", "", false, fmt.Errorf("cannot read %s: %w", file, rerr)
 				}
-				return string(data), localPath, s.WorkspaceRoot, nil
+				return string(data), localPath, s.WorkspaceRoot, false, nil
 			}
 		}
 	}
 	path, err = s.resolvePath(file)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", false, err
 	}
-	data, err := os.ReadFile(path)
+	data, enc, err := s.readVaultFile(path)
 	if err != nil {
-		return "", "", "", fmt.Errorf("cannot read %s: %w", file, err)
+		return "", "", "", false, fmt.Errorf("cannot read %s: %w", file, err)
 	}
-	return string(data), path, s.Root, nil
+	return string(data), path, s.Root, enc, nil
 }
 
 var stampRE = regexp.MustCompile(`\[\d{4}-\d{2}-\d{2}\]`)

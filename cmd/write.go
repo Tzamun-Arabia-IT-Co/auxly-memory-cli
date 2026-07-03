@@ -105,22 +105,37 @@ func runWrite(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
+	// MAJOR 7: resolve/cache the vault identity/recipient BEFORE the lock —
+	// resolution can exec `security` on macOS (10s), and doing that while
+	// holding the vault lock would starve every other writer. No-op if the
+	// vault has nothing encrypted.
+	store := memory.NewStore(memPath)
+	store.PrewarmCrypto()
+
 	// Read→merge→write under the vault lock (concurrent auto-trust agents must
 	// serialize) with an atomic write — same guarantees as the approve path.
 	unlock, err := memory.LockVault(memPath)
 	if err != nil {
 		return err
 	}
+	// Vault-aware read/write: an encrypted target must be decrypted before
+	// ApplyDiff (its ciphertext can't be diffed as text) and re-encrypted on
+	// write. Any read error other than "doesn't exist yet" fails closed.
 	var existing string
-	if data, err := os.ReadFile(targetPath); err == nil {
+	var targetEncrypted bool
+	if data, encrypted, rerr := store.ReadVaultFile(targetPath); rerr == nil {
 		existing = string(data)
+		targetEncrypted = encrypted
+	} else if !os.IsNotExist(rerr) {
+		unlock()
+		return fmt.Errorf("read %s: %w", writeFile, rerr)
 	}
 	content := pending.ApplyDiff(existing, writeDiff)
 
 	// Update "Last Updated" field
 	content = updateLastUpdated(content)
 
-	if err := memory.AtomicWriteFile(targetPath, []byte(content), 0644); err != nil {
+	if err := store.WriteVaultFile(targetPath, []byte(content), 0644, targetEncrypted); err != nil {
 		unlock()
 		return fmt.Errorf("failed to write file: %w", err)
 	}

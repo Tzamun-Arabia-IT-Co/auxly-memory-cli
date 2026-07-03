@@ -103,8 +103,15 @@ func (m *Manager) WriteFrom(targetFile, content, agent string) (string, error) {
 
 	// Snapshot the target's current content hash so Approve can detect that the
 	// file changed underneath this pending (conflict detection). Missing/invalid
-	// target → empty-content hash, matching how Approve reads it.
-	baseHash := m.targetHash(targetFile)
+	// target → empty-content hash, matching how Approve reads it. MINOR 12: a
+	// target that EXISTS but can't be read (e.g. encrypted, key unreachable)
+	// must fail closed here rather than queue against a silently-wrong ""
+	// hash — that guarantees a spurious conflict (training users toward
+	// --force) the moment the file becomes readable again.
+	baseHash, unreadable := m.targetHash(targetFile)
+	if unreadable {
+		return "", fmt.Errorf("cannot read %s — run `auxly encrypt status`", targetFile)
+	}
 
 	// Unique pending filename: <timestamp>_<rand4hex>_<target>.md. O_EXCL makes
 	// the filesystem enforce uniqueness — a same-ms same-suffix collision fails
@@ -124,6 +131,12 @@ func (m *Manager) WriteFrom(targetFile, content, agent string) (string, error) {
 		}
 	}
 
+	// ponytail: content is queued as PLAINTEXT even when targetFile is
+	// encrypted at rest — the diff only becomes ciphertext again on approve
+	// (see approve() below). The window is 0600, transient (removed on
+	// approve/reject), and local to this machine's .pending/; encrypt the
+	// queued diff too if that window ever needs closing.
+	//
 	// Write metadata header + content (atomic rename over the reserved name).
 	header := fmt.Sprintf("---\ntarget: %s\ncreated: %s\nbasehash: %s\n", targetFile, time.Now().UTC().Format(time.RFC3339), baseHash)
 	if agent != "" {
@@ -138,14 +151,26 @@ func (m *Manager) WriteFrom(targetFile, content, agent string) (string, error) {
 }
 
 // targetHash returns the sha256 hex of the target file's current content
-// ("" content when the file doesn't exist or the path is invalid).
-func (m *Manager) targetHash(targetFile string) string {
+// ("" content when the file doesn't exist or the path is invalid), and
+// whether the read failed for a reason OTHER than "does not exist yet" (e.g.
+// an encrypted target whose key is unreachable) — WriteFrom refuses to queue
+// against that case (MINOR 12) rather than silently hash "" and hand the
+// approver a guaranteed spurious conflict later. Reads through
+// Store.ReadVaultFile (not raw bytes): age ciphertext is nondeterministic
+// (fresh ephemeral key per encrypt), so hashing raw bytes of an encrypted
+// target would make the basehash conflict check compare apples to oranges
+// against approve()'s plaintext read.
+func (m *Manager) targetHash(targetFile string) (hash string, unreadable bool) {
 	var content []byte
 	if p, err := safepath.ResolveSafe(m.memoryRoot, targetFile); err == nil {
-		content, _ = os.ReadFile(p)
+		var rerr error
+		content, _, rerr = (&memory.Store{Root: m.memoryRoot}).ReadVaultFile(p)
+		if rerr != nil && !os.IsNotExist(rerr) {
+			return "", true
+		}
 	}
 	sum := sha256.Sum256(content)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), false
 }
 
 func randHex4() string {
@@ -167,6 +192,14 @@ func (m *Manager) ForceApprove(pendingName string) error {
 }
 
 func (m *Manager) approve(pendingName string, force bool) error {
+	// MAJOR 7: resolve/cache the vault identity/recipient BEFORE the lock —
+	// resolution can exec `security` on macOS (10s), and doing that while
+	// holding the vault lock would starve every other writer. No-op if the
+	// vault has nothing encrypted. Reused below (same Store instance) so the
+	// warm actually pays off instead of being re-resolved on a throwaway.
+	store := &memory.Store{Root: m.memoryRoot}
+	store.PrewarmCrypto()
+
 	// Serialize with every other vault writer (concurrent approves from several
 	// MCP servers / CLI / TUI) — and, crucially, take the lock BEFORE reading the
 	// pending entry: a concurrent Reject (which also locks) can then never remove
@@ -201,10 +234,18 @@ func (m *Manager) approve(pendingName string, force bool) error {
 		return fmt.Errorf("invalid pending target %q: %w", target, err)
 	}
 
-	// Read existing content
+	// Read existing content — decrypted, if the target is encrypted at rest.
+	// A missing target is fine (new file, ApplyDiff treats "" as empty); any
+	// OTHER read error (key unreachable) must fail closed rather than let
+	// ApplyDiff merge plaintext diff lines against undecryptable ciphertext.
+	// (store was created and prewarmed at the top of this function.)
 	var existingContent string
-	if fileData, err := os.ReadFile(targetPath); err == nil {
+	var targetEncrypted bool
+	if fileData, encrypted, err := store.ReadVaultFile(targetPath); err == nil {
 		existingContent = string(fileData)
+		targetEncrypted = encrypted
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", target, err)
 	}
 
 	// Conflict detection: the pending recorded the target's content hash at
@@ -224,7 +265,9 @@ func (m *Manager) approve(pendingName string, force bool) error {
 	// Apply diff content cleanly
 	mergedContent := ApplyDiff(existingContent, diffContent)
 
-	if err := memory.AtomicWriteFile(targetPath, []byte(mergedContent), 0644); err != nil {
+	// Re-encrypt on write iff the target was encrypted on the read above —
+	// an encrypted target must come back out encrypted.
+	if err := store.WriteVaultFile(targetPath, []byte(mergedContent), 0644, targetEncrypted); err != nil {
 		return fmt.Errorf("failed to write to %s: %w", target, err)
 	}
 	// unified_memory.md is now compiled lazily on read (mtime check in

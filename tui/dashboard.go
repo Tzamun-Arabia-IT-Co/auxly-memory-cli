@@ -24,23 +24,24 @@ import (
 )
 
 type dashboardModel struct {
-	logger          *audit.Logger
-	pendingMgr      *pending.Manager
-	stats           *audit.Stats
-	pendingCnt      int
-	trustCfg        *trust.Config
-	memoryPath      string
-	activeProviders []string
-	recentWrites    []audit.Entry
-	composition     []categoryStat        // per-category memory breakdown (left column)
-	pendingFiles    []pending.PendingFile // queued approvals (shown inline when > 0)
-	remoteScope     map[string]string     // host → access scope ("read · 6 files")
-	sessions        []agentSession
-	unregistered    int // live mcp-servers running but not in the session registry
-	updateAvail     bool
-	updateLatest    string
-	updating        bool
-	updateResult    string
+	logger               *audit.Logger
+	pendingMgr           *pending.Manager
+	stats                *audit.Stats
+	pendingCnt           int
+	trustCfg             *trust.Config
+	memoryPath           string
+	activeProviders      []string
+	recentWrites         []audit.Entry
+	composition          []categoryStat        // per-category memory breakdown (left column)
+	unreadableCategories int                   // MAJOR 11: taxonomy files that exist but failed to read (encrypted, key unreachable)
+	pendingFiles         []pending.PendingFile // queued approvals (shown inline when > 0)
+	remoteScope          map[string]string     // host → access scope ("read · 6 files")
+	sessions             []agentSession
+	unregistered         int // live mcp-servers running but not in the session registry
+	updateAvail          bool
+	updateLatest         string
+	updating             bool
+	updateResult         string
 	// Connected-box updates (#3): how many boxes need an auxly bump, refreshed by a
 	// throttled SSH sweep; boxesUpdating gates the one-key "update all" action.
 	boxesOutdated    int
@@ -104,21 +105,22 @@ type dashboardModel struct {
 }
 
 type dashboardRefreshMsg struct {
-	stats           *audit.Stats
-	pendingCnt      int
-	trustCfg        *trust.Config
-	activeProviders []string
-	recentWrites    []audit.Entry
-	composition     []categoryStat
-	pendingFiles    []pending.PendingFile
-	remoteScope     map[string]string
-	sessions        []agentSession
-	unregistered    int
-	updateAvail     bool
-	updateLatest    string
-	at              time.Time
-	mcpError        string
-	cards           []agentCard
+	stats                *audit.Stats
+	pendingCnt           int
+	trustCfg             *trust.Config
+	activeProviders      []string
+	recentWrites         []audit.Entry
+	composition          []categoryStat
+	unreadableCategories int
+	pendingFiles         []pending.PendingFile
+	remoteScope          map[string]string
+	sessions             []agentSession
+	unregistered         int
+	updateAvail          bool
+	updateLatest         string
+	at                   time.Time
+	mcpError             string
+	cards                []agentCard
 
 	vaultSizeHistory []audit.SizePoint
 	agentWriteCounts []audit.AgentWriteCount
@@ -335,7 +337,7 @@ func (m dashboardModel) Refresh() tea.Cmd {
 			activeProviders, _ = m.logger.ActiveProviders(5 * time.Minute)
 			recentWrites, _ = m.logger.TailWrites(10)
 		}
-		composition, totalBytes := computeComposition(m.memoryPath)
+		composition, totalBytes, unreadableCategories := computeComposition(m.memoryPath)
 		var vaultSizeHistory []audit.SizePoint
 		var agentWriteCounts []audit.AgentWriteCount
 		recordedBytes, recordedDay := m.lastRecordedVaultBytes, m.lastRecordedVaultDay
@@ -371,21 +373,22 @@ func (m dashboardModel) Refresh() tea.Cmd {
 		remoteScope := computeRemoteScopes(m.memoryPath, sessions)
 		latest, updateAvail := update.Available()
 		return dashboardRefreshMsg{
-			stats:           stats,
-			pendingCnt:      pendingCnt,
-			trustCfg:        trustCfg,
-			activeProviders: activeProviders,
-			recentWrites:    recentWrites,
-			composition:     composition,
-			pendingFiles:    pendingFiles,
-			remoteScope:     remoteScope,
-			sessions:        sessions,
-			unregistered:    unregistered,
-			updateAvail:     updateAvail,
-			updateLatest:    latest,
-			at:              time.Now(),
-			mcpError:        mcpError,
-			cards:           agentCardOrder(providersWithActivity(stats)),
+			stats:                stats,
+			pendingCnt:           pendingCnt,
+			trustCfg:             trustCfg,
+			activeProviders:      activeProviders,
+			recentWrites:         recentWrites,
+			composition:          composition,
+			unreadableCategories: unreadableCategories,
+			pendingFiles:         pendingFiles,
+			remoteScope:          remoteScope,
+			sessions:             sessions,
+			unregistered:         unregistered,
+			updateAvail:          updateAvail,
+			updateLatest:         latest,
+			at:                   time.Now(),
+			mcpError:             mcpError,
+			cards:                agentCardOrder(providersWithActivity(stats)),
 
 			vaultSizeHistory: vaultSizeHistory,
 			agentWriteCounts: agentWriteCounts,
@@ -409,6 +412,7 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		m.activeProviders = msg.activeProviders
 		m.recentWrites = msg.recentWrites
 		m.composition = msg.composition
+		m.unreadableCategories = msg.unreadableCategories
 		m.pendingFiles = msg.pendingFiles
 		m.remoteScope = msg.remoteScope
 		m.sessions = msg.sessions
@@ -1044,14 +1048,19 @@ type categoryStat struct {
 // It also returns the vault's total size in bytes (every listed file, not just
 // taxonomy categories) — computed from the SAME store.List() scan, so the
 // caller can record a vault-size snapshot without an extra directory read.
-func computeComposition(memoryPath string) ([]categoryStat, int64) {
+//
+// MAJOR 11: a category file that EXISTS but fails to read (e.g. encrypted at
+// rest, key unreachable) is skipped from the breakdown (its item count can't
+// be known) but counted in the third return value — never silently dropped
+// with no trace, the way "doesn't exist yet" is.
+func computeComposition(memoryPath string) ([]categoryStat, int64, int) {
 	if memoryPath == "" {
-		return nil, 0
+		return nil, 0, 0
 	}
 	store := memory.NewStore(memoryPath)
 	files, err := store.List()
 	if err != nil {
-		return nil, 0
+		return nil, 0, 0
 	}
 	sizeByFile := make(map[string]int64, len(files))
 	var totalBytes int64
@@ -1060,10 +1069,14 @@ func computeComposition(memoryPath string) ([]categoryStat, int64) {
 		totalBytes += f.Size
 	}
 	var out []categoryStat
+	unreadable := 0
 	for _, c := range memory.Taxonomy {
 		content, err := store.View(c.File)
 		if err != nil {
-			continue // category file doesn't exist yet
+			if store.Exists(c.File) {
+				unreadable++
+			}
+			continue // category file doesn't exist yet (or couldn't be read)
 		}
 		items := 0
 		for _, ln := range strings.Split(content, "\n") {
@@ -1079,7 +1092,7 @@ func computeComposition(memoryPath string) ([]categoryStat, int64) {
 			private: c.Tier == memory.TierPersonal,
 		})
 	}
-	return out, totalBytes
+	return out, totalBytes, unreadable
 }
 
 // renderComposition draws the per-category breakdown with proportional bars, busiest
@@ -1096,13 +1109,16 @@ func (m dashboardModel) renderComposition(maxRows int) string {
 			}
 		}
 	}
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
 	if len(stats) == 0 {
+		if m.unreadableCategories > 0 {
+			return dim.Render(fmt.Sprintf("%d file(s) unreadable (encryption)", m.unreadableCategories))
+		}
 		return ""
 	}
 	sort.SliceStable(stats, func(i, j int) bool { return stats[i].items > stats[j].items })
 
 	const barW = 10
-	dim := lipgloss.NewStyle().Foreground(ColorDim)
 	hidden := 0
 	if maxRows > 0 && len(stats) > maxRows {
 		hidden = len(stats) - maxRows
@@ -1134,6 +1150,9 @@ func (m dashboardModel) renderComposition(maxRows int) string {
 	}
 	if hidden > 0 {
 		b.WriteString(dim.Render(fmt.Sprintf("\n%-13s +%d more", "", hidden)))
+	}
+	if m.unreadableCategories > 0 {
+		b.WriteString(dim.Render(fmt.Sprintf("\n%d file(s) unreadable (encryption)", m.unreadableCategories)))
 	}
 	return b.String()
 }

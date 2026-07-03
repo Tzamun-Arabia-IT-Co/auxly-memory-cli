@@ -384,6 +384,12 @@ func normalizeFact(b string) string {
 func (s *Store) ApplyOrganizeChanges(changes []ProposedChange) string {
 	var diffBuilder strings.Builder
 
+	// Resolve the vault key before taking the lock: reading an encrypted
+	// target below must never exec the keychain while every other process
+	// waits on LockVault. Callers today warm the cache via gatherOrganizeFiles,
+	// but that's an implicit invariant — this makes it self-contained.
+	s.PrewarmCrypto()
+
 	unlock, err := LockVault(s.Root)
 	if err != nil {
 		return fmt.Sprintf("⚠ nothing applied: %v\n", err)
@@ -396,6 +402,16 @@ func (s *Store) ApplyOrganizeChanges(changes []ProposedChange) string {
 		}
 		current, viewErr := s.View(c.Name)
 		if viewErr != nil {
+			if !errors.Is(viewErr, os.ErrNotExist) {
+				// Fail closed: a non-NotExist read error (e.g. an encrypted
+				// file whose key is unreachable) must NEVER be treated as an
+				// empty file — that would let the "changed while planning"
+				// guard below pass trivially and overwrite the file with a
+				// proposal computed from stale/empty content. Abort just this
+				// change; every other file in the batch still applies.
+				diffBuilder.WriteString(fmt.Sprintf("⚠ aborted %s: cannot verify current content: %v\n", c.Name, viewErr))
+				continue
+			}
 			current = ""
 		}
 		if current != c.OldContent {
@@ -531,8 +547,9 @@ type organizeRun struct {
 
 // organizeFile is one organizable vault file's snapshot taken at plan time.
 type organizeFile struct {
-	Name    string
-	Content string
+	Name      string
+	Content   string
+	Encrypted bool // true when this file is encrypted at rest (see planOrganize's CLI-agent guard)
 }
 
 // gatherOrganizeFiles snapshots every USER-MEMORY taxonomy file. Setup/
@@ -549,13 +566,33 @@ func (s *Store) gatherOrganizeFiles() ([]organizeFile, error) {
 		if !IsOrganizableFile(f.Name) {
 			continue
 		}
+		// ponytail: View decrypts an encrypted file, and its plaintext then
+		// goes into the organize prompt sent to the LLM provider — same as
+		// any recall would. Encryption-at-rest protects the file on disk,
+		// not what a trusted flow does with it in memory. The Direct LLM/API
+		// path still accepts that risk; planOrganize refuses the CLI-agent
+		// path outright when any gathered file is encrypted (CRITICAL 3 —
+		// that path would additionally expose the decrypted content on the
+		// spawned process's argv, ps-visible for the run's whole duration).
 		content, err := s.View(f.Name)
 		if err != nil {
 			continue
 		}
-		out = append(out, organizeFile{Name: f.Name, Content: content})
+		out = append(out, organizeFile{Name: f.Name, Content: content, Encrypted: s.fileIsEncrypted(f.Name)})
 	}
 	return out, nil
+}
+
+// encryptedOrganizeFileNames returns the names of gathered files that are
+// encrypted at rest.
+func encryptedOrganizeFileNames(files []organizeFile) []string {
+	var out []string
+	for _, f := range files {
+		if f.Encrypted {
+			out = append(out, f.Name)
+		}
+	}
+	return out
 }
 
 func vaultUserPrompt(files []organizeFile) string {
@@ -770,13 +807,29 @@ type organizeExecutor func(ctx context.Context, systemPrompt, userPrompt string)
 // one whole-vault model call (small vaults — existing behavior) or one call PER
 // FILE when the payload exceeds the chunk threshold, so organize scales to any
 // vault size instead of hitting model context limits.
-func (s *Store) planOrganize(ctx context.Context, exec organizeExecutor) (OrganizeProposal, OrganizeResult) {
+//
+// agentPath mirrors runOrganizeModel's: non-empty means a CLI agent will run
+// this plan as a subprocess. CRITICAL 3: that subprocess receives the whole
+// prompt (decrypted vault content included) as its FINAL ARGV ELEMENT, which
+// stays ps-visible to any other local user/process for the run's entire
+// duration (up to organizeTimeout, 900s by default) — unlike the Direct LLM/
+// API path, which only sends it over an HTTPS body. So a CLI-agent run is
+// refused outright when any gathered file is encrypted, BEFORE either the
+// whole-vault or the chunked call is made (one guard covers both).
+func (s *Store) planOrganize(ctx context.Context, agentPath string, exec organizeExecutor) (OrganizeProposal, OrganizeResult) {
 	files, err := s.gatherOrganizeFiles()
 	if err != nil {
 		return OrganizeProposal{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to list files: %v", err)}
 	}
 	if len(files) == 0 {
 		return OrganizeProposal{}, OrganizeResult{Success: true, Message: "Memory vault is empty. Nothing to organize."}
+	}
+	if agentPath != "" {
+		if enc := encryptedOrganizeFileNames(files); len(enc) > 0 {
+			return OrganizeProposal{}, OrganizeResult{Success: false, Message: fmt.Sprintf(
+				"organize via a CLI agent would expose decrypted content on the process command line; use the Direct LLM provider or decrypt first (encrypted: %s)",
+				strings.Join(enc, ", "))}
+		}
 	}
 
 	if len(files) > 1 && estimateVaultTokens(files) > organizeChunkThreshold() {
@@ -812,7 +865,7 @@ func organizeChunkThreshold() int {
 }
 
 func (s *Store) PlanOrganizeWithAgent(ctx context.Context, agentName, agentPath, model string) (OrganizeProposal, OrganizeResult) {
-	return s.planOrganize(ctx, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+	return s.planOrganize(ctx, agentPath, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
 		return s.runOrganizeModel(c, agentName, agentPath, model, sys, user)
 	})
 }
@@ -1116,13 +1169,13 @@ func (s *Store) PlanOrganizeWithProvider(ctx context.Context, provider, customUR
 	if !ok {
 		return OrganizeProposal{}, res
 	}
-	return s.planOrganize(ctx, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+	return s.planOrganize(ctx, "", func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
 		return s.runOrganizeChat(c, strings.TrimRight(baseURL, "/")+"/v1/chat/completions", model, apiKey, sys, user)
 	})
 }
 
 func (s *Store) PlanOrganizeWithCustom(ctx context.Context, endpoint, model string) (OrganizeProposal, OrganizeResult) {
-	return s.planOrganize(ctx, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+	return s.planOrganize(ctx, "", func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
 		return s.runOrganizeChat(c, normalizeOrganizeChatURL(endpoint), model, os.Getenv("AUXLY_LLM_KEY"), sys, user)
 	})
 }

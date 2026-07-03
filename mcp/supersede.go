@@ -25,6 +25,12 @@ const supersedeThreshold = 0.75
 //
 // Graceful by construction: embeddings down, recall error, AUXLY_SUPERSEDE=off,
 // or no similar fact → the diff is returned untouched (plain append).
+//
+// Inherited limitation (MAJOR 10): Recall structurally excludes encrypted
+// files from the semantic index (see refreshFile in recall.go), so a write
+// targeting an encrypted file never finds a same-fact match to supersede —
+// it always falls through to a plain append, even when it truly contradicts
+// an existing (but unindexed) fact already in that file.
 func (s *Server) maybeSupersede(file, diff string) string {
 	if os.Getenv("AUXLY_SUPERSEDE") == "off" {
 		return diff

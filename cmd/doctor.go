@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/vaultcrypt"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/tui"
 	"github.com/spf13/cobra"
 )
@@ -103,6 +105,31 @@ func doctorReport(memPath string, probeLinks bool) string {
 			line("⚠", "semantic index stale (vault changed since last index)", "next recall refreshes it automatically")
 		default:
 			line("✓", "semantic index fresh", "")
+		}
+
+		// 4b. Vault encryption-at-rest: how many files are encrypted, and
+		// whether the key needed to read them is reachable right now.
+		if encFiles, eerr := encryptedFileNames(store); eerr == nil {
+			_, keyErr := vaultcrypt.NewKeystore(filepath.Dir(memPath)).Source()
+			switch {
+			case len(encFiles) == 0:
+				line("✓", "vault encryption: no encrypted files", "")
+			case keyErr == nil:
+				line("✓", fmt.Sprintf("vault encryption: %d file(s) encrypted, key reachable", len(encFiles)), "")
+			case errors.Is(keyErr, vaultcrypt.ErrKeychainUnavailable):
+				line("✗", fmt.Sprintf("vault encryption: %d file(s) encrypted, keychain unavailable (locked?)", len(encFiles)), "unlock the keychain, or set AUXLY_VAULT_KEY")
+			default:
+				line("✗", fmt.Sprintf("vault encryption: %d file(s) encrypted, NO KEY reachable", len(encFiles)), "run `auxly encrypt status`")
+			}
+		}
+
+		// 4c. MINOR 13: a workspace shadow copy is ALWAYS plaintext (v1 limit —
+		// see cryptio.go), so a workspace override of a global file that is
+		// encrypted at rest is a silent plaintext bypass: Store.List/View
+		// serve the workspace copy transparently, and an agent working in
+		// that repo never touches the key at all.
+		if shadows := encryptedWorkspaceShadows(store); len(shadows) > 0 {
+			line("⚠", fmt.Sprintf("workspace override(s) shadow %d encrypted file(s) in plaintext: %s", len(shadows), strings.Join(shadows, ", ")), "an agent in this workspace reads/writes plaintext, bypassing encryption — remove the workspace copy or encrypt it too")
 		}
 	}
 
@@ -217,4 +244,32 @@ func doctorReport(memPath string, probeLinks bool) string {
 	}
 
 	return b.String()
+}
+
+// encryptedWorkspaceShadows returns the names of GLOBAL vault files that are
+// encrypted at rest but currently shadowed by a plaintext workspace override
+// (MINOR 13). Reads the global root directly (not store.List(), which merges
+// workspace-over-global and would report the workspace's plaintext copy).
+func encryptedWorkspaceShadows(store *memory.Store) []string {
+	if store.WorkspaceRoot == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(store.Root)
+	if err != nil {
+		return nil
+	}
+	var shadowed []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		raw, rerr := os.ReadFile(filepath.Join(store.Root, e.Name()))
+		if rerr != nil || !vaultcrypt.IsEncrypted(raw) {
+			continue
+		}
+		if _, serr := os.Stat(filepath.Join(store.WorkspaceRoot, e.Name())); serr == nil {
+			shadowed = append(shadowed, e.Name())
+		}
+	}
+	return shadowed
 }

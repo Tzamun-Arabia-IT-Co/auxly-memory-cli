@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +27,14 @@ type chunkMove struct {
 	Fact string `json:"fact"`
 }
 
+// routedMove pairs a flagged move with the index (in changes) of the file it
+// came FROM, so a move that must be skipped (CRITICAL 2 — an unreadable
+// target) can put the fact back where it started instead of losing it.
+type routedMove struct {
+	chunkMove
+	fromIdx int
+}
+
 // planOrganizeChunked runs one exec call per file, sequentially (agent CLIs
 // don't parallelize well), merges the per-file results and routed moves into a
 // single OrganizeProposal, and validates it with the same fact-loss guard as
@@ -33,7 +42,8 @@ type chunkMove struct {
 func (s *Store) planOrganizeChunked(ctx context.Context, exec organizeExecutor, files []organizeFile) (OrganizeProposal, OrganizeResult) {
 	byName := make(map[string]int, len(files)) // file name → index in changes
 	var changes []ProposedChange
-	var pendingMoves []chunkMove
+	var pendingMoves []routedMove
+	var skipNotes []string
 	modelUsed := ""
 	tokensUsed := 0
 
@@ -80,7 +90,8 @@ func (s *Store) planOrganizeChunked(ctx context.Context, exec organizeExecutor, 
 		if s.isWorkspaceFile(f.Name) {
 			scope = "workspace"
 		}
-		byName[f.Name] = len(changes)
+		fromIdx := len(changes)
+		byName[f.Name] = fromIdx
 		changes = append(changes, ProposedChange{
 			Name:       f.Name,
 			OldContent: f.Content,
@@ -88,7 +99,9 @@ func (s *Store) planOrganizeChunked(ctx context.Context, exec organizeExecutor, 
 			Scope:      scope,
 			IsNew:      false,
 		})
-		pendingMoves = append(pendingMoves, kept...)
+		for _, mv := range kept {
+			pendingMoves = append(pendingMoves, routedMove{chunkMove: mv, fromIdx: fromIdx})
+		}
 	}
 
 	// Mechanical routing pass: append every flagged fact to its target file's
@@ -98,6 +111,16 @@ func (s *Store) planOrganizeChunked(ctx context.Context, exec organizeExecutor, 
 		idx, ok := byName[mv.To]
 		if !ok {
 			old, viewErr := s.View(mv.To)
+			if viewErr != nil && !errors.Is(viewErr, os.ErrNotExist) {
+				// Fail closed: an unreadable target (e.g. encrypted, key
+				// unreachable) must NEVER be treated as empty — that would
+				// recreate the file containing ONLY the moved fact. Skip the
+				// move and keep the fact in its origin file instead (safe —
+				// nothing is lost).
+				skipNotes = append(skipNotes, fmt.Sprintf("⚠ organize: skipped moving a fact to %s — target unreadable: %v (fact kept in %s)", mv.To, viewErr, changes[mv.fromIdx].Name))
+				changes[mv.fromIdx].NewContent = appendFact(changes[mv.fromIdx].NewContent, mv.Fact)
+				continue
+			}
 			if viewErr != nil {
 				old = ""
 			}
@@ -123,6 +146,13 @@ func (s *Store) planOrganizeChunked(ctx context.Context, exec organizeExecutor, 
 	changes = s.stripPersonalLeaks(changes) // same mechanical sink guard as whole-vault
 	prop := OrganizeProposal{Changes: changes, ModelUsed: modelUsed, TokensUsed: tokensUsed}
 	prop.Warning = factLossWarning(prop.Changes)
+	if len(skipNotes) > 0 {
+		note := strings.Join(skipNotes, "\n")
+		if prop.Warning != "" {
+			note += "\n" + prop.Warning
+		}
+		prop.Warning = note
+	}
 	return prop, OrganizeResult{Success: true}
 }
 

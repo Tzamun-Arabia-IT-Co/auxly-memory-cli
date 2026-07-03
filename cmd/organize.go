@@ -15,6 +15,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/embed"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/safepath"
 	"github.com/spf13/cobra"
 )
 
@@ -122,6 +123,16 @@ func runSplitProjects(store *memory.Store) error {
 		}
 	}
 
+	// MAJOR 9: if projects.md is encrypted at rest, each NEW sub-file must be
+	// seeded as an empty ENCRYPTED file before its first pending addition is
+	// queued — encryption state lives in the file (same trick as MAJOR 8), so
+	// a sub-file that's created only when its first pending gets approved
+	// would default to plaintext and stay that way forever.
+	_, projectsEncrypted, encErr := store.ReadRawVaultBytes("projects.md")
+	if encErr != nil {
+		return fmt.Errorf("check projects.md encryption: %w", encErr)
+	}
+
 	var slugs []string
 	for slug := range plan.Groups {
 		slugs = append(slugs, slug)
@@ -129,17 +140,25 @@ func runSplitProjects(store *memory.Store) error {
 	sort.Strings(slugs)
 	queued := 0
 	for _, slug := range slugs {
+		subFile := "projects/" + slug + ".md"
+		created, serr := seedEncryptedProjectSubFile(store, memPath, subFile, projectsEncrypted)
+		if serr != nil {
+			return serr
+		}
+		if created {
+			fmt.Printf("   🔒 %s created encrypted at rest (projects.md is encrypted)\n", subFile)
+		}
 		bullets := plan.Groups[slug]
 		addDiff := ""
 		for _, b := range bullets {
 			addDiff += "+" + b + "\n"
 		}
-		name, werr := mgr.WriteFrom("projects/"+slug+".md", addDiff, "organize-split")
+		name, werr := mgr.WriteFrom(subFile, addDiff, "organize-split")
 		if werr != nil {
 			return fmt.Errorf("queue split for %s: %w", slug, werr)
 		}
 		queued += len(bullets)
-		fmt.Printf("   ⏳ projects/%s.md ← %d bullet(s)  (%s)\n", slug, len(bullets), name)
+		fmt.Printf("   ⏳ %s ← %d bullet(s)  (%s)\n", subFile, len(bullets), name)
 	}
 
 	fmt.Printf("\n✅ Split planned: %d bullet(s) → %d project file(s), %d staying in projects.md.\n", queued, len(slugs), len(plan.General))
@@ -149,18 +168,58 @@ func runSplitProjects(store *memory.Store) error {
 	return nil
 }
 
+// seedEncryptedProjectSubFile pre-creates subFile as an empty ENCRYPTED file
+// (MAJOR 9 — same state-lives-in-file trick as MAJOR 8's seedEncryptedPersonalMD)
+// when projectsEncrypted is true and the sub-file doesn't exist yet on disk.
+// No-op (created=false) when projects.md isn't encrypted or the sub-file is
+// already there. Split out so the seeding itself is directly testable
+// without going through the LLM planning call.
+func seedEncryptedProjectSubFile(store *memory.Store, memPath, subFile string, projectsEncrypted bool) (created bool, err error) {
+	if !projectsEncrypted || store.Exists(subFile) {
+		return false, nil
+	}
+	subPath, perr := safepath.ResolveSafe(memPath, subFile)
+	if perr != nil {
+		return false, fmt.Errorf("resolve %s: %w", subFile, perr)
+	}
+	// The empty seed replaces whatever is at subPath — serialize with every
+	// other vault writer and re-check existence INSIDE the lock, or a write
+	// landing between the check above and this one gets clobbered.
+	unlock, lerr := memory.LockVault(memPath)
+	if lerr != nil {
+		return false, lerr
+	}
+	defer unlock()
+	if store.Exists(subFile) {
+		return false, nil
+	}
+	if merr := os.MkdirAll(filepath.Dir(subPath), 0755); merr != nil {
+		return false, fmt.Errorf("create projects dir: %w", merr)
+	}
+	if werr := store.WriteVaultFile(subPath, []byte{}, 0o644, true); werr != nil {
+		return false, fmt.Errorf("seed encrypted %s: %w", subFile, werr)
+	}
+	return true, nil
+}
+
 // backupProjectsMonolith snapshots projects.md before any split pendings are
-// queued — a migration deserves a recovery point.
+// queued — a migration deserves a recovery point. Reads the RAW on-disk bytes
+// (not store.View, which decrypts): if projects.md is encrypted at rest, the
+// backup must stay ciphertext too, never a plaintext shadow copy.
 func backupProjectsMonolith(store *memory.Store, memPath string) error {
-	content, err := store.View("projects.md")
+	raw, encrypted, err := store.ReadRawVaultBytes("projects.md")
 	if err != nil {
 		return fmt.Errorf("read projects.md: %w", err)
 	}
 	backup := filepath.Join(memPath, ".backup", "projects-"+time.Now().Format("20060102-150405")+".md")
-	if err := memory.AtomicWriteFile(backup, []byte(content), 0o644); err != nil {
+	if err := memory.AtomicWriteFile(backup, raw, 0o644); err != nil {
 		return fmt.Errorf("backup projects.md first: %w", err)
 	}
-	fmt.Printf("   ✓ Backed up projects.md → %s\n", backup)
+	tag := ""
+	if encrypted {
+		tag = " (ciphertext copy — projects.md is encrypted at rest)"
+	}
+	fmt.Printf("   ✓ Backed up projects.md → %s%s\n", backup, tag)
 	return nil
 }
 

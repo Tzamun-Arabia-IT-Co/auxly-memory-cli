@@ -954,3 +954,49 @@ func TestMemScanMsgDoesNotCancelPlayground(t *testing.T) {
 		t.Fatalf("playground must not be reported as a cancelled action, got status %q", m2.status)
 	}
 }
+
+// MAJOR 11 regression: a file whose Store.View failed (e.g. encrypted, key
+// unreachable) must render with an explicit "key unreachable" marker — never
+// as an ordinary, empty, editable file — and edit/delete/create on it must
+// be refused with a status message instead of silently acting on the
+// misleadingly-empty Lines.
+func TestUnreadableFile_MarkerShownAndEditDeleteCreateRefused(t *testing.T) {
+	m := memBrowserModel{
+		top:     []memFile{{Name: "business.md", Unreadable: true}},
+		focused: "business.md",
+	}
+
+	row := memTreeRow(m.top[0], false, true, false, 40)
+	if !strings.Contains(row, "key unreachable") {
+		t.Fatalf("tree row missing the unreachable marker: %q", row)
+	}
+
+	content := m.renderContent(40)
+	if !strings.Contains(content, "key unreachable") {
+		t.Fatalf("content pane missing the unreachable message: %q", content)
+	}
+
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	if cmd != nil || m2.editing {
+		t.Fatal("'e' on an unreadable file must not start editing")
+	}
+	if !strings.Contains(m2.status, "key unreachable") {
+		t.Fatalf("edit refusal status = %q", m2.status)
+	}
+
+	m3, cmd2 := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if cmd2 != nil || m3.confirmDelete {
+		t.Fatal("'d' on an unreadable file must not start a delete confirm")
+	}
+	if !strings.Contains(m3.status, "key unreachable") {
+		t.Fatalf("delete refusal status = %q", m3.status)
+	}
+
+	m4, cmd3 := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if cmd3 != nil || m4.creating {
+		t.Fatal("'n' on an unreadable file must not start create-new-fact")
+	}
+	if !strings.Contains(m4.status, "key unreachable") {
+		t.Fatalf("create refusal status = %q", m4.status)
+	}
+}

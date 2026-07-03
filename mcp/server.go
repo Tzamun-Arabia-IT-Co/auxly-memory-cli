@@ -755,7 +755,15 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 
 	// Auto trust: write directly
 	var existing string
-	if data, err := s.store.View(file); err == nil {
+	if data, verr := s.store.View(file); verr != nil {
+		if !errors.Is(verr, os.ErrNotExist) {
+			// Fail closed: a non-NotExist error (e.g. an encrypted file whose
+			// key is unreachable) must NEVER be treated as an empty file —
+			// that would let ApplyDiff+WriteScoped re-encrypt the file with
+			// ONLY this new diff, silently wiping every prior fact.
+			return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("❌ Cannot read %s: %v — run `auxly encrypt status`", file, verr)}}, IsError: true}
+		}
+	} else {
 		existing = data
 	}
 	content := pending.ApplyDiff(existing, diff)
@@ -853,6 +861,15 @@ func (s *Server) toolRecall(query string) toolResult {
 		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}}, IsError: true}
 	}
 
+	// MAJOR 10: encrypted files are structurally excluded from the semantic
+	// index (see refreshFile in recall.go) with no other in-band signal —
+	// tell the caller so a missing fact never reads as "doesn't exist" when
+	// it's really just "encrypted, ask via memory_read instead".
+	note := ""
+	if n := s.store.EncryptedFileCount(); n > 0 {
+		note = fmt.Sprintf("\n\nnote: %d encrypted file(s) are excluded from semantic recall — content stays available via memory_read (auxly encrypt status)", n)
+	}
+
 	// Group hits by file, re-applying canRead and the aggregate exclusion at render
 	// time as a second guard over the Load pre-filter.
 	var sb strings.Builder
@@ -875,9 +892,9 @@ func (s *Server) toolRecall(query string) toolResult {
 	}
 
 	if shown == 0 {
-		return toolResult{Content: []toolContent{{Type: "text", Text: "No results in readable memory for that query."}}}
+		return toolResult{Content: []toolContent{{Type: "text", Text: "No results in readable memory for that query." + note}}}
 	}
-	return toolResult{Content: []toolContent{{Type: "text", Text: sb.String()}}}
+	return toolResult{Content: []toolContent{{Type: "text", Text: sb.String() + note}}}
 }
 
 func (s *Server) toolStats() toolResult {

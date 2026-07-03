@@ -778,6 +778,8 @@ Auxly is a standard **stdio MCP server**, so *any* MCP-capable tool can share th
 | `auxly usage show \| auth` | Live agent quota (opt-in) |
 | `auxly index rebuild` | Wipe and rebuild the semantic recall index from the vault |
 | `auxly index status` | Show semantic index stats (provider, model, chunk count) |
+| `auxly encrypt init \| file <name> \| status` | Manage vault encryption-at-rest (age) — generate the key, encrypt one file, or show key reachability |
+| `auxly decrypt file <name>` | Remove encryption-at-rest from one file (asks for confirmation) |
 | `auxly mcp-server` | Run the MCP server (invoked by agents) |
 | `auxly update` | Self-update to the latest release |
 

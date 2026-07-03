@@ -48,6 +48,13 @@ func (s *Store) Export(destBase string, now time.Time) (ExportResult, error) {
 
 	var written []string
 	for _, f := range files {
+		if s.fileIsEncrypted(f.Name) {
+			// Exporting would create a plaintext copy of an encrypted file —
+			// skip it and say so, rather than silently defeating the point
+			// of encrypting it.
+			manifest.WriteString(fmt.Sprintf("  %-32s  SKIPPED — encrypted at rest\n", f.Name))
+			continue
+		}
 		content, verr := s.View(f.Name)
 		if verr != nil {
 			continue // skip an unreadable file rather than failing the whole export

@@ -1,9 +1,14 @@
 package memory
 
 import (
+	"bytes"
 	"os"
 	"strings"
 	"testing"
+
+	"filippo.io/age"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/vaultcrypt"
 )
 
 func change(old, new string) ProposedChange {
@@ -113,5 +118,65 @@ func TestApplyOrganizeChangesSkipsConcurrentlyEditedFile(t *testing.T) {
 	}
 	if !strings.Contains(diff, "skipped a.md") {
 		t.Fatalf("skip not reported in diff output: %s", diff)
+	}
+}
+
+// CRITICAL 2 regression: ApplyOrganizeChanges must ABORT (never silently
+// treat as empty-then-overwrite) a change whose current on-disk read fails
+// for a reason other than "doesn't exist" — e.g. an encrypted file whose key
+// is unreachable. The file's ciphertext must be left completely untouched,
+// and every OTHER change in the batch must still apply.
+func TestApplyOrganizeChangesAbortsOnUnreadableEncryptedTarget(t *testing.T) {
+	root := t.TempDir()
+	s := &Store{Root: root}
+
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := vaultcrypt.Encrypt([]byte("- existing encrypted fact\n"), identity.Recipient())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root+"/business.md", ciphertext, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rawBefore, err := os.ReadFile(root + "/business.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wrongIdentity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUXLY_VAULT_KEY", wrongIdentity.String())
+
+	if err := AtomicWriteFile(root+"/b.md", []byte("- fact b\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	changes := []ProposedChange{
+		// OldContent "" mirrors buildProposalFromJSON's IsNew=true snapshot
+		// when the file was already unreadable at plan time too.
+		{Name: "business.md", OldContent: "", NewContent: "- only the new fact\n", Scope: "global"},
+		{Name: "b.md", OldContent: "- fact b\n", NewContent: "- fact b improved\n", Scope: "global"},
+	}
+
+	diff := s.ApplyOrganizeChanges(changes)
+
+	rawAfter, err := os.ReadFile(root + "/business.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rawBefore, rawAfter) {
+		t.Fatal("business.md bytes changed despite an unreadable-target abort")
+	}
+	if !strings.Contains(diff, "aborted business.md") {
+		t.Fatalf("abort not reported in diff output: %s", diff)
+	}
+	bData, _ := os.ReadFile(root + "/b.md")
+	if string(bData) != "- fact b improved\n" {
+		t.Fatalf("untouched-target change not applied: %s", bData)
 	}
 }

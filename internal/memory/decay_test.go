@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/vaultcrypt"
 )
 
 func TestFactDateVariants(t *testing.T) {
@@ -386,4 +388,48 @@ func newDecayTestStore(t *testing.T) *Store {
 	store := NewStore(t.TempDir())
 	store.WorkspaceRoot = ""
 	return store
+}
+
+// CRITICAL 5 regression: archive encryption must be STICKY. If .archive/<file>
+// is already encrypted (e.g. from a prior pass, back when the source was
+// still encrypted) but the SOURCE is now plaintext — `auxly decrypt file
+// <name>` never touches .archive/<name> — the next ArchiveFact append must
+// keep the archive encrypted, never silently plaintext-ify it just because
+// the source currently isn't.
+func TestArchiveFact_StickyArchiveEncryption(t *testing.T) {
+	store := newDecayTestStore(t)
+	identity := testVaultIdentity(t)
+
+	archiveDir := filepath.Join(store.Root, ".archive")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seedCiphertext(t, &Store{Root: archiveDir}, "identity.md", identity, "- older archived fact\n")
+
+	// SOURCE is plaintext now (simulating a decrypt after the archive above
+	// was written).
+	line := "- fact to archive now"
+	if err := store.Write("identity.md", "# Identity\n"+line+"\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.ArchiveFact("identity.md", line); err != nil {
+		t.Fatalf("ArchiveFact: %v", err)
+	}
+
+	archiveRaw, err := os.ReadFile(filepath.Join(archiveDir, "identity.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !vaultcrypt.IsEncrypted(archiveRaw) {
+		t.Fatal("archive lost its encryption after appending from a now-plaintext source — must stay encrypted (sticky)")
+	}
+
+	plain, _, err := store.readVaultFile(filepath.Join(archiveDir, "identity.md"))
+	if err != nil {
+		t.Fatalf("decrypt archive: %v", err)
+	}
+	if !strings.Contains(string(plain), "older archived fact") || !strings.Contains(string(plain), line) {
+		t.Fatalf("archive content = %q, want both the older and new archived facts", plain)
+	}
 }

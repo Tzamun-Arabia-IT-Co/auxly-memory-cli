@@ -213,6 +213,19 @@ func writeMeta(db *sql.DB, m IndexMeta) error {
 	return nil
 }
 
+// Vacuum rebuilds the database file from only its currently-live rows. A
+// plain DELETE (see PruneExcept/PruneScopesExcept) marks a page free without
+// erasing its bytes, so deleted content can physically linger in the file
+// until something reuses that page — VACUUM is what actually scrubs it,
+// which matters when what was deleted was PLAINTEXT of a file that has since
+// become encrypted-at-rest (see EncryptFile's index prune).
+func (ix *Index) Vacuum() error {
+	if _, err := ix.db.Exec("VACUUM"); err != nil {
+		return fmt.Errorf("vacuum index db: %w", err)
+	}
+	return nil
+}
+
 // Close releases the underlying database handle.
 func (ix *Index) Close() error {
 	if err := ix.db.Close(); err != nil {
