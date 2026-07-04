@@ -1093,8 +1093,19 @@ func runHostUp(cmd *cobra.Command, args []string) error {
 }
 
 func runHostDown(cmd *cobra.Command, args []string) error {
+	// Read the relays BEFORE tearing down so we know each tunnel's reverse-port
+	// signature to reap.
+	relays, _, _ := loadHostConfigs()
 	if err := uninstallKeepAlive(); err != nil {
 		return err
+	}
+	// launchctl unload / systemctl stop kills the supervisor, but the ssh child
+	// it spawned can survive as an orphan (reparented to launchd/init) — which
+	// is why `host down` used to report success while the tunnel stayed up.
+	// Reap the supervisor + any orphaned ssh reverse-tunnels explicitly.
+	if n := killRunningTunnels(relays); n > 0 {
+		fmt.Printf("✓ Keep-alive tunnel service stopped and removed (terminated %d running tunnel process(es))\n", n)
+		return nil
 	}
 	fmt.Println("✓ Keep-alive tunnel service stopped and removed")
 	return nil
@@ -1359,6 +1370,45 @@ func installKeepAlive() error {
 	default:
 		return fmt.Errorf("keep-alive not supported on %s; run `auxly host tunnel` manually", runtime.GOOS)
 	}
+}
+
+// killRunningTunnels reaps the tunnel supervisor and any orphaned ssh
+// reverse-tunnel processes left behind after the keep-alive service is removed.
+// Best-effort and precise: it matches OUR supervisor argv ("host tunnel") and
+// OUR exact reverse-forward spec ("-R <ReversePort>:localhost:") so it never
+// touches an unrelated ssh session. Returns how many processes it signalled.
+// pgrep-based (darwin/linux); on Windows the scheduled-task removal is the
+// teardown and this is a no-op (orphaned ssh is not the same failure mode there).
+func killRunningTunnels(relays []hostConfig) int {
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	patterns := []string{"host tunnel"} // the `auxly host tunnel` supervisor
+	for _, hc := range relays {
+		if hc.ReversePort > 0 {
+			patterns = append(patterns, fmt.Sprintf("-R %d:localhost:", hc.ReversePort))
+		}
+	}
+	self := os.Getpid()
+	seen := map[int]bool{}
+	killed := 0
+	for _, pat := range patterns {
+		out, err := exec.Command("pgrep", "-f", pat).Output()
+		if err != nil {
+			continue // no match (pgrep exits non-zero) or pgrep absent
+		}
+		for _, f := range strings.Fields(string(out)) {
+			pid, perr := strconv.Atoi(f)
+			if perr != nil || pid == self || seen[pid] {
+				continue
+			}
+			seen[pid] = true
+			if proc, e := os.FindProcess(pid); e == nil && proc.Kill() == nil {
+				killed++
+			}
+		}
+	}
+	return killed
 }
 
 func uninstallKeepAlive() error {

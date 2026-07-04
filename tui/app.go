@@ -138,6 +138,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// busy never clears, and the panel comes back frozen.
 		var cmd tea.Cmd
 		m.settings, cmd = m.settings.Update(msg)
+		// This is an early return like the capturesInput guards below, so the
+		// content viewport (what's actually on screen for screenSettings) needs
+		// the same refresh they give it — otherwise the model's busy/status
+		// fields update correctly but the rendered frame doesn't, and a
+		// mid-flight spinner tick or the final result never repaints: the Ops
+		// panel looks frozen even though the underlying action completed fine.
+		if m.vpReady {
+			m.syncViewport()
+		}
 		return m, cmd
 	case tea.KeyMsg:
 		if m.screen == screenDashboard && m.dashboard.selectedAgent != "" {
