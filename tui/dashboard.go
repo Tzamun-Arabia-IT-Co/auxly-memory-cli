@@ -862,6 +862,12 @@ const dashboardChromeTight = 4 // tabs(2) + footer(1) + no blank separator, +1 s
 // — never the logo (always shown) and never the bordered cards (kept). The body
 // compaction packs more grid columns and trims the diagnostics box; if even that
 // can't fit a very short pane, the parent's height guard keeps the chrome on screen.
+//
+// It measures bodyCompactCanonical()'s render, NOT m's real one: the decision must
+// be a function of (width, height) alone, never of how many recent-writes/
+// live-activity rows happen to exist at this exact instant — otherwise the same
+// terminal size flips full/compact across restarts as that live data grows or
+// shrinks (see bodyCompactCanonical).
 func (m dashboardModel) bodyCompact() bool {
 	if m.width > 0 && m.width < 80 {
 		return true
@@ -870,10 +876,50 @@ func (m dashboardModel) bodyCompact() bool {
 		return false
 	}
 	bFull := lipgloss.Height(renderBanner(m.width))
-	if bFull+dashboardChromeFull+lipgloss.Height(m.renderBody(false)) <= m.height {
+	canonical := m.bodyCompactCanonical()
+	if bFull+dashboardChromeFull+lipgloss.Height(canonical.renderBody(false)) <= m.height {
 		return false
 	}
 	return true
+}
+
+// bodyCompactCanonical returns a copy of m with the two "what just happened"
+// feeds (recent-writes, live-activity) padded to their maximum row budget for
+// the current terminal size (dashboardEnrichN), instead of whatever length they
+// actually happen to have right now. bodyCompact measures THIS copy so the
+// full-vs-compact decision depends only on terminal size plus fixed structure
+// (banner, agent-card grid, diagnostics box including the category breakdown)
+// — never on how many recent writes or live-activity events currently exist,
+// which is exactly the reported flap: a few live-feed lines near the fit
+// boundary flipped the same terminal size between full and compact across
+// restarts, showing/hiding the category breakdown along with it.
+//
+// Everything else — composition (vault-scan data, not live churn), the
+// vault-size chart/write bars, the agent-card grid, and the active-connections
+// list — is left as real data. The connections list already has its own
+// height-bounded window (connVisibleCap) specifically so a long remote roster
+// can't tip the dashboard into compact (see TestConnectionsPanelScrollsWhenOverflowing);
+// synthesizing a worst-case fill for it here would double-count that budget
+// AND depends on real host/IP name lengths wrapping inside the 44-col box, so
+// a synthetic fill doesn't actually bound it correctly — a fake short "h0"
+// entry undercounts a real long hostname's wrap, while padding past the
+// window's cap overcounts the common case. Left alone, its contribution is
+// whatever it actually is right now, same as before this fix; if connection
+// churn is ever observed to flap the layout the way the feeds did, it needs
+// its own fix (e.g. reserving the window's max wrapped width), not a fake fill.
+//
+// Because the padded feeds are capped at their true render ceiling (the same
+// enrichN cap renderRecentFeed/renderActivityFeed already enforce), this is a
+// genuine upper bound for them: whenever the canonical render fits, the real
+// render — whose feed rows can only be shorter or equal — is guaranteed to fit
+// too. That's what keeps full mode from overflowing app.go's height clamp once
+// bodyCompact has picked it.
+func (m dashboardModel) bodyCompactCanonical() dashboardModel {
+	c := m
+	enrichN := dashboardEnrichN(m.height)
+	c.recentWrites = make([]audit.Entry, enrichN)
+	c.activityFeed = make([]audit.ActivityEvent, enrichN)
+	return c
 }
 
 // dashboardEnrichN scales how many rows of enrichment (composition breakdown,
@@ -953,7 +999,13 @@ func (m dashboardModel) renderBodyAt(compact bool, feedRows int) string {
 	if compact {
 		vPad = 0
 		sep = "\n"
-		memStorePath = filepath.Base(m.memoryPath)
+	}
+	// Always show the real store path. Compact mode used to render filepath.Base
+	// ("memory"), which read as a wrong/placeholder value and made the panel look
+	// broken when the layout flipped to compact. Left-truncate an over-long path
+	// to the box's inner width, keeping the meaningful tail.
+	if inner := 40; len(memStorePath) > inner {
+		memStorePath = "…" + memStorePath[len(memStorePath)-(inner-1):]
 	}
 	diagStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

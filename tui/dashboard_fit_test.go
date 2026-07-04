@@ -610,3 +610,79 @@ func TestConnectionsWheelAndKeysScroll(t *testing.T) {
 		t.Errorf("lowercase j must drive cards, not scroll connections (%d→%d)", before2, m.dashboard.connScroll)
 	}
 }
+
+// TestBodyCompactStableAcrossLiveDataChurn is the regression test for the
+// reported bug: the SAME terminal size rendered the dashboard differently
+// across launches (full System Diagnostics with the category breakdown vs.
+// compact with none) purely because bodyCompact used to measure the real,
+// data-dependent render — and the recent-writes / live-activity feeds vary
+// tick to tick (agents connecting/disconnecting, memory writes landing). Two
+// models identical in every STRUCTURAL respect (same cards, same composition,
+// same connected sessions) but with empty vs. maxed-out feeds must now pick
+// the same full-vs-compact mode at a given (width, height).
+func TestBodyCompactStableAcrossLiveDataChurn(t *testing.T) {
+	newModel := func(t *testing.T, live bool) model {
+		t.Helper()
+		m := *NewApp(t.TempDir())
+		m.dashboard.stats = &audit.Stats{WritesToday: 2, TotalEntries: 143}
+		m.dashboard.cards = []agentCard{{id: "claude", name: "Claude Desktop"}, {id: "cursor", name: "Cursor"}}
+		m.dashboard.composition = []categoryStat{{label: "infra", items: 12, size: 900}}
+		// Held fixed across both variants: only the feeds below churn. A
+		// couple of remote sessions is realistic background noise that must
+		// NOT itself be the thing under test here (the connections panel has
+		// its own, separate height-bounded window — see connVisibleCap).
+		m.dashboard.sessions = []agentSession{
+			{Provider: "claude-code", Remote: true, Host: "node-a", IP: "10.0.0.1", OS: "linux"},
+		}
+		if live {
+			var writes []audit.Entry
+			var events []audit.ActivityEvent
+			for i := 0; i < 30; i++ {
+				writes = append(writes, audit.Entry{
+					Timestamp: time.Now().Format(time.RFC3339), Provider: "claude",
+					Action: "write", File: fmt.Sprintf("f%d.md", i),
+				})
+				events = append(events, audit.ActivityEvent{
+					ID: int64(i), TS: time.Now(), Provider: "claude",
+					Action: "write", File: fmt.Sprintf("f%d.md", i),
+				})
+			}
+			m.dashboard.recentWrites = writes
+			m.dashboard.activityFeed = events
+		}
+		m.screen = screenDashboard
+		return m
+	}
+
+	// Widths on both sides of the 116-col side-by-side/stacked layout split.
+	for _, width := range []int{100, 170} {
+		minBase := newModel(t, false)
+		maxBase := newModel(t, true)
+		sawDivergentRawHeight := false
+		for h := 20; h <= 90; h++ {
+			minUpdated, _ := minBase.Update(tea.WindowSizeMsg{Width: width, Height: h})
+			maxUpdated, _ := maxBase.Update(tea.WindowSizeMsg{Width: width, Height: h})
+			minM := minUpdated.(model)
+			maxM := maxUpdated.(model)
+
+			// Sanity check the test is non-vacuous: the RAW (unfixed) render
+			// height really does differ with live data at some height in range
+			// — that's the raw material the old bodyCompact used to measure.
+			rawMin := lipgloss.Height(minM.dashboard.renderBody(false))
+			rawMax := lipgloss.Height(maxM.dashboard.renderBody(false))
+			if rawMax != rawMin {
+				sawDivergentRawHeight = true
+			}
+
+			gotMin := minM.dashboard.bodyCompact()
+			gotMax := maxM.dashboard.bodyCompact()
+			if gotMin != gotMax {
+				t.Errorf("width %d height %d: bodyCompact diverged with feed churn — empty feeds=%v, populated=%v (raw full-body heights %d vs %d)",
+					width, h, gotMin, gotMax, rawMin, rawMax)
+			}
+		}
+		if !sawDivergentRawHeight {
+			t.Errorf("width %d: raw full-body height never differed between empty and populated feeds — test may not exercise the regression", width)
+		}
+	}
+}
