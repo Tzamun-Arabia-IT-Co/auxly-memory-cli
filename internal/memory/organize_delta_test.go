@@ -286,3 +286,31 @@ func TestDeltaMode_FallsBackToWholeFileOnParseFailure(t *testing.T) {
 		t.Fatalf("fallback whole-file proposal not applied: %+v", prop.Changes)
 	}
 }
+
+// TestDeltaMode_NoFallbackOnNonParseFailure guards Finding 1 from review: a
+// delta call that fails for a NON-parse reason (timeout / cancel / rate-limit —
+// modeled as exec returning proceed=false) must NOT trigger a second whole-file
+// model call. Only a parse failure falls back; anything else would double the
+// wait on the now-default delta path.
+func TestDeltaMode_NoFallbackOnNonParseFailure(t *testing.T) {
+	root := t.TempDir()
+	s := &Store{Root: root}
+	writeVaultFile(t, root, "identity.md", "- name wael\n")
+
+	calls := 0
+	exec := func(ctx context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+		calls++
+		// proceed=false, Success=false, deltaParseFailed=false — a timeout/cancel.
+		return organizeRun{}, OrganizeResult{Success: false, Message: "organize timed out"}, false
+	}
+	_, res := s.planOrganizeOpts(context.Background(), "", false, OrganizeRunOpts{DeltaMode: true}, exec)
+	if res.Success {
+		t.Fatalf("a timeout must not be reported as success")
+	}
+	if calls != 1 {
+		t.Fatalf("a non-parse failure must NOT fall back to a second model call, got %d calls", calls)
+	}
+	if !strings.Contains(res.Message, "timed out") {
+		t.Fatalf("original failure message must be preserved, got %q", res.Message)
+	}
+}

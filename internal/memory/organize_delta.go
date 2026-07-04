@@ -64,7 +64,7 @@ func (s *Store) planOrganizeDelta(ctx context.Context, exec organizeExecutor, fi
 	}
 	ops, err := parseDeltaResponse(run.jsonContent)
 	if err != nil {
-		return OrganizeProposal{}, OrganizeResult{Success: false, Message: fmt.Sprintf("Failed to parse delta JSON payload: %v\nOutput content was: %s", err, run.jsonContent)}
+		return OrganizeProposal{}, OrganizeResult{Success: false, deltaParseFailed: true, Message: fmt.Sprintf("Failed to parse delta JSON payload: %v\nOutput content was: %s", err, run.jsonContent)}
 	}
 
 	changes, dropped := s.applyDeltaOps(files, ops)

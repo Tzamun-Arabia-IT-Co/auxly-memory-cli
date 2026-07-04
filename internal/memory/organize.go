@@ -198,6 +198,12 @@ type OrganizeResult struct {
 	// OrganizeProposal.Warning). Headless organize paths refuse to apply while
 	// it is set; the TUI shows it during review.
 	Warning string
+	// deltaParseFailed marks the ONE failure the whole-file fallback should
+	// retry: the delta model returned op-JSON the parser couldn't read. Every
+	// other Success:false (timeout, cancel, rate-limit, no API key) must NOT
+	// trigger a second model call — that would double the wait on the default
+	// delta path. Set only at the parse-failure return in planOrganizeDelta.
+	deltaParseFailed bool
 }
 
 // ProposedChange is one file's pending edit from an organize run — computed but
@@ -1026,9 +1032,11 @@ func (s *Store) planOrganizeOpts(ctx context.Context, agentPath string, skipEncr
 		// parser can't read — which used to surface as a bare "Failed to parse"
 		// with no proposal (the "organize runs, no result" report). Fall back to
 		// the whole-file contract on that ONE failure so a bad delta response
-		// never wastes the run. (A valid-but-empty delta response is a real
-		// "already tidy" and correctly does NOT fall back — only a parse failure.)
-		if !res.Success {
+		// never wastes the run. Gated on deltaParseFailed, NOT bare !Success: a
+		// timeout / cancel / rate-limit must not fire a second model call and
+		// double the wait. (A valid-but-empty delta response is a real "already
+		// tidy" and correctly does NOT fall back either.)
+		if res.deltaParseFailed {
 			run, r, proceed := exec(ctx, organizeSystemPrompt(), vaultUserPrompt(files))
 			if !proceed {
 				return OrganizeProposal{}, r

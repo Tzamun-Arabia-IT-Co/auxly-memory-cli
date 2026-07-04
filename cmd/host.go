@@ -1380,35 +1380,68 @@ func installKeepAlive() error {
 // pgrep-based (darwin/linux); on Windows the scheduled-task removal is the
 // teardown and this is a no-op (orphaned ssh is not the same failure mode there).
 func killRunningTunnels(relays []hostConfig) int {
-	if runtime.GOOS == "windows" {
-		return 0
-	}
-	patterns := []string{"host tunnel"} // the `auxly host tunnel` supervisor
-	for _, hc := range relays {
-		if hc.ReversePort > 0 {
-			patterns = append(patterns, fmt.Sprintf("-R %d:localhost:", hc.ReversePort))
-		}
-	}
 	self := os.Getpid()
 	seen := map[int]bool{}
 	killed := 0
-	for _, pat := range patterns {
-		out, err := exec.Command("pgrep", "-f", pat).Output()
-		if err != nil {
-			continue // no match (pgrep exits non-zero) or pgrep absent
+	for _, pid := range findTunnelPIDs(tunnelKillPatterns(relays)) {
+		if pid == self || seen[pid] {
+			continue
 		}
-		for _, f := range strings.Fields(string(out)) {
-			pid, perr := strconv.Atoi(f)
-			if perr != nil || pid == self || seen[pid] {
-				continue
-			}
-			seen[pid] = true
-			if proc, e := os.FindProcess(pid); e == nil && proc.Kill() == nil {
-				killed++
-			}
+		seen[pid] = true
+		if proc, e := os.FindProcess(pid); e == nil && proc.Kill() == nil {
+			killed++
 		}
 	}
 	return killed
+}
+
+// tunnelKillPatterns returns the argv substrings that uniquely identify THIS
+// host's tunnel processes. The supervisor pattern is anchored to the full
+// "auxly host tunnel" argv (not a bare "host tunnel") so an unrelated command
+// — e.g. a concurrent `grep "host tunnel"` — can't match. Each ssh pattern
+// carries BOTH the relay's reverse port AND this host's local port
+// (`-R <rport>:localhost:<lport>`) so it can't collide with an unrelated
+// `ssh -R 2222:localhost:...` (2222 is auxly's own default and a common
+// Vagrant/Docker convention — the reverse port alone is not specific enough).
+func tunnelKillPatterns(relays []hostConfig) []string {
+	patterns := []string{"auxly host tunnel"}
+	for _, hc := range relays {
+		if hc.ReversePort > 0 {
+			patterns = append(patterns, fmt.Sprintf("-R %d:localhost:%d", hc.ReversePort, hc.localPort()))
+		}
+	}
+	return patterns
+}
+
+// findTunnelPIDs returns the PIDs whose command line contains any of the given
+// substrings. pgrep on unix; a PowerShell CIM query on Windows (schtasks
+// /Delete removes only the task registration, NOT a running instance — so
+// without this, `host down` on Windows leaves the supervisor + ssh.exe alive
+// while falsely reporting success). Best-effort: a missing tool or no match
+// degrades to an empty slice, never a false "terminated N".
+func findTunnelPIDs(patterns []string) []int {
+	var pids []int
+	for _, pat := range patterns {
+		var out []byte
+		var err error
+		if runtime.GOOS == "windows" {
+			// -like with wildcards (not regex) so ports/colons need no escaping;
+			// our patterns never contain a single quote.
+			ps := fmt.Sprintf("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*%s*' } | Select-Object -ExpandProperty ProcessId", pat)
+			out, err = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps).Output()
+		} else {
+			out, err = exec.Command("pgrep", "-f", pat).Output()
+		}
+		if err != nil {
+			continue
+		}
+		for _, f := range strings.Fields(string(out)) {
+			if pid, perr := strconv.Atoi(f); perr == nil {
+				pids = append(pids, pid)
+			}
+		}
+	}
+	return pids
 }
 
 func uninstallKeepAlive() error {
