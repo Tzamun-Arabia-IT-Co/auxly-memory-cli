@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-07-04
+
+A UX-clarity patch: optional features that simply aren't set up no longer
+masquerade as red errors, and a hook command no longer hangs when run by hand.
+
+### Fixed
+
+- **Optional, un-configured features looked like crashes.** In Settings, an
+  un-configured git sync ("this vault has no git remote") and a semantic-index
+  rebuild with no reachable embedding endpoint (a 404) were both painted the
+  same alarm-red as a real failure. Status lines now color by severity — a
+  not-set-up / unavailable notice is amber and reads as optional, a genuine
+  failure stays red. The sync notice also stopped lingering on screen while you
+  navigated to another row, which made it look like the row you moved to had
+  errored.
+- **`auxly capture` hung when run directly in a terminal.** It reads a session
+  transcript from stdin and is meant to run automatically via the session-end
+  hook; run bare in a shell it blocked forever waiting for input. It now detects
+  an interactive terminal, prints a one-line explanation, and exits. Hook and
+  piped use are unchanged.
+
 ## [1.3.2] - 2026-07-04
 
 A stability patch for three regressions reported against 1.3.1, all root-caused
