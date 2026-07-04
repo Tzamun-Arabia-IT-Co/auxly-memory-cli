@@ -195,7 +195,7 @@ func TestSyncStatusText(t *testing.T) {
 		{"pushed", git.SyncResult{Pushed: true}, nil, "pushed", false},
 		{"nothing", git.SyncResult{Pushed: false}, nil, "nothing to push", false},
 		{"sentinel", git.SyncResult{}, errors.New("skipped sync: a temporary decrypt is in progress — retry once the organize run finishes"), "temporary decrypt is in progress", true},
-		{"not configured", git.SyncResult{}, errors.New("memory folder is not a git repository. Run 'git init' in /x first"), "not configured", true},
+		{"not configured", git.SyncResult{}, errors.New("memory folder is not a git repository. Run 'git init' in /x first"), "not set up", true},
 		{"other error", git.SyncResult{}, errors.New("git push failed: some other failure"), "sync error", true},
 	}
 	for _, tc := range cases {

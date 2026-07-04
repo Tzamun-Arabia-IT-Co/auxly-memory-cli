@@ -276,7 +276,15 @@ func (m vaultModel) Update(msg tea.Msg) (vaultModel, tea.Cmd) {
 			return m, m.refreshCmd()
 		case "rebuild":
 			if !msg.ok {
-				m.status, m.statusErr = "✗ "+msg.err.Error(), true
+				// No reachable embedding endpoint is an optional-feature-not-set-up
+				// state, not a crash — say so in one line and mark it ⚠ (amber via
+				// the glyph-based render) instead of dumping a red 404 stack.
+				e := msg.err.Error()
+				if strings.Contains(e, "unavailable") || strings.Contains(e, "404") || strings.Contains(e, "no local/allowed") || strings.Contains(e, "endpoint") {
+					m.status, m.statusErr = "⚠ semantic index needs an embedding endpoint (optional) — none reachable", true
+				} else {
+					m.status, m.statusErr = "✗ "+e, true
+				}
 			} else {
 				m.status, m.statusErr = fmt.Sprintf("✓ index rebuilt — %d chunk(s)", msg.chunks), false
 			}
@@ -589,9 +597,14 @@ func (m vaultModel) panel() string {
 	}
 
 	if m.status != "" {
+		// Color by leading glyph, not a bare error bool: ✗ real failure (red),
+		// ⚠ optional/not-configured/unavailable (amber — not a crash), else ok.
 		style := green
-		if m.statusErr {
+		switch {
+		case strings.HasPrefix(m.status, "✗"):
 			style = danger
+		case strings.HasPrefix(m.status, "⚠"):
+			style = warn
 		}
 		lines = append(lines, "", style.Render(m.status))
 	}

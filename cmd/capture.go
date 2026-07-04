@@ -152,6 +152,17 @@ func captureInput() (string, error) {
 	case captureTranscript != "":
 		return readTranscriptJSONL(captureTranscript)
 	default:
+		// `auxly capture` reads a session transcript from stdin — it's a hook
+		// command (the session-end hook pipes the transcript in). Run bare in a
+		// terminal, ReadAll would block forever on a TTY waiting for EOF, which
+		// looks like a hang. If stdin is a terminal (not a pipe/file), print
+		// guidance and no-op instead.
+		if stat, _ := os.Stdin.Stat(); stat != nil && stat.Mode()&os.ModeCharDevice != 0 {
+			fmt.Fprintln(os.Stderr, "auxly capture reads a session transcript from stdin and runs automatically via")
+			fmt.Fprintln(os.Stderr, "the session-end hook (`auxly hooks install`). Nothing piped in — nothing to do.")
+			fmt.Fprintln(os.Stderr, "Capture a file manually with: auxly capture --transcript <transcript.jsonl>")
+			return "", nil
+		}
 		data, err := io.ReadAll(io.LimitReader(os.Stdin, 4<<20))
 		return string(data), err
 	}

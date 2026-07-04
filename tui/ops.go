@@ -176,7 +176,7 @@ func syncStatusText(res git.SyncResult, err error) (string, bool) {
 		case strings.Contains(msg, "not a git repository"),
 			strings.Contains(msg, "does not appear to be a git repository"),
 			strings.Contains(msg, "No configured push destination"):
-			return "⚠ sync not configured — this vault has no git remote", true
+			return "⚠ sync not set up — vault isn't a git repo with a remote (optional; enables off-machine backup)", true
 		default:
 			return "✗ sync error: " + msg, true
 		}
@@ -307,10 +307,12 @@ func (m opsModel) handleKey(msg tea.KeyMsg) (opsModel, tea.Cmd) {
 	// idle
 	switch msg.String() {
 	case "j", "down":
+		m.status = "" // a prior action's result is stale once you move to act on another row
 		if m.cursor < len(m.hooksRows)-1 {
 			m.cursor++
 		}
 	case "k", "up":
+		m.status = ""
 		if m.cursor > 0 {
 			m.cursor--
 		}
@@ -440,9 +442,16 @@ func (m opsModel) panel() string {
 	lines = append(lines, dim.Render("[d] run doctor report"))
 
 	if m.status != "" {
+		// Color by the leading glyph, not a bare error bool: ✓ ok (green),
+		// ⚠ a not-configured / skipped state (amber — optional, NOT a failure),
+		// ✗ a real error (red). Painting "sync not configured" red made users
+		// read an optional-feature notice as a crash.
 		style := green
-		if m.statusErr {
+		switch {
+		case strings.HasPrefix(m.status, "✗"):
 			style = danger
+		case strings.HasPrefix(m.status, "⚠"):
+			style = warn
 		}
 		lines = append(lines, "", style.Render(m.status))
 	}

@@ -250,10 +250,18 @@ func TestVaultRebuildGatedOnEmbedder(t *testing.T) {
 		t.Fatal("a completed rebuild should re-refresh status")
 	}
 
-	fail := vaultModel{memoryPath: t.TempDir(), loaded: true, busy: true}
-	fail, _ = fail.Update(vaultActionMsg{kind: "rebuild", ok: false, err: errors.New("embedding endpoint unavailable")})
-	if !strings.HasPrefix(fail.status, "✗") {
-		t.Fatalf("status = %q, want a failure marker", fail.status)
+	// An unreachable embedding endpoint is an optional-feature-not-set-up state,
+	// so it's marked ⚠ (amber), NOT a red ✗ crash — the whole point of the fix.
+	unavail := vaultModel{memoryPath: t.TempDir(), loaded: true, busy: true}
+	unavail, _ = unavail.Update(vaultActionMsg{kind: "rebuild", ok: false, err: errors.New("embedding endpoint unavailable")})
+	if !strings.HasPrefix(unavail.status, "⚠") {
+		t.Fatalf("status = %q, want the ⚠ optional-not-available marker", unavail.status)
+	}
+	// A GENUINE rebuild failure (not an availability issue) still gets ✗.
+	broke := vaultModel{memoryPath: t.TempDir(), loaded: true, busy: true}
+	broke, _ = broke.Update(vaultActionMsg{kind: "rebuild", ok: false, err: errors.New("write index: disk full")})
+	if !strings.HasPrefix(broke.status, "✗") {
+		t.Fatalf("status = %q, want a ✗ failure marker for a real error", broke.status)
 	}
 }
 
