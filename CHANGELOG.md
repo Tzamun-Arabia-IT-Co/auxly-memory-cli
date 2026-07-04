@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-07-04
+
+A stability patch for three regressions reported against 1.3.1, all root-caused
+and fixed with tests.
+
+### Fixed
+
+- **Settings/Ops panel appeared frozen; sections could flicker.** Async results
+  (hook install/uninstall, sync, doctor, vault ops) were routed to the Settings
+  model but the shared content viewport was never refreshed on that path, so the
+  busy spinner froze on the keypress frame and the completed result never
+  repainted — indistinguishable from a dead key. The Ops panel's `i`/`u`/`s`/`d`
+  keys work; only the repaint was missing. Fixed by refreshing the viewport on
+  that routing path, mirroring every other guard.
+- **`auxly host down` reported success but left the tunnel up.** Tearing down the
+  keep-alive service kills the `auxly host tunnel` supervisor, but the `ssh`
+  reverse-tunnel it spawned survived as an orphan and kept the tunnel live.
+  `host down` now also reaps the supervisor and any `ssh` matching this host's
+  exact reverse-forward signature, and reports how many processes it terminated.
+- **Organize could run and return nothing.** Delta-ops organization became the
+  default in 1.3.1; a weaker agent-CLI model occasionally returns operation JSON
+  the delta parser can't read, which surfaced as a bare parse error with no
+  proposal. A failed delta parse now falls back to the whole-file rewrite so a
+  run never comes back empty. A genuinely tidy vault still correctly reports
+  nothing to do.
+
 ## [1.3.1] - 2026-07-03
 
 A UX and performance follow-up to 1.3.0, driven by real-vault feedback. Faster
