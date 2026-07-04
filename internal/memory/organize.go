@@ -1019,12 +1019,22 @@ func (s *Store) planOrganizeOpts(ctx context.Context, agentPath string, skipEncr
 		prop, res = s.planOrganizeChunked(ctx, exec, files)
 	case deltaOn:
 		// Delta is the biggest single-run latency lever (op-based output instead
-		// of full-file rewrites). Opt-in via AUXLY_ORGANIZE_DELTA while it proves
-		// out on real vaults; organize is review-gated and planOrganizeDelta
-		// reverts any file its guard flags, so the worst case is a rejected
-		// proposal, never a bad write. Env gate here (not the default) keeps every
-		// existing whole-file test — which never sets the var — unchanged.
+		// of full-file rewrites). It is review-gated and planOrganizeDelta reverts
+		// any file its guard flags, so the worst case is a rejected proposal.
 		prop, res = s.planOrganizeDelta(ctx, exec, files)
+		// ROBUSTNESS: a weaker agent-CLI model sometimes returns op-JSON the delta
+		// parser can't read — which used to surface as a bare "Failed to parse"
+		// with no proposal (the "organize runs, no result" report). Fall back to
+		// the whole-file contract on that ONE failure so a bad delta response
+		// never wastes the run. (A valid-but-empty delta response is a real
+		// "already tidy" and correctly does NOT fall back — only a parse failure.)
+		if !res.Success {
+			run, r, proceed := exec(ctx, organizeSystemPrompt(), vaultUserPrompt(files))
+			if !proceed {
+				return OrganizeProposal{}, r
+			}
+			prop, res = s.buildProposalFromJSON(run.jsonContent, run.modelUsed, run.tokensUsed)
+		}
 	default:
 		run, r, proceed := exec(ctx, organizeSystemPrompt(), vaultUserPrompt(files))
 		if !proceed {

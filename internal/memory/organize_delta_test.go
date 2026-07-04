@@ -250,3 +250,39 @@ func TestDeltaMode_LiftsChunkThreshold(t *testing.T) {
 		t.Fatalf("expected ONE whole-vault delta call, got %d (chunked per-file?)", calls)
 	}
 }
+
+// TestDeltaMode_FallsBackToWholeFileOnParseFailure: when the model returns
+// op-JSON the delta parser can't read, organize must NOT come back empty — it
+// falls back to the whole-file contract (the "organize runs, no result" fix).
+func TestDeltaMode_FallsBackToWholeFileOnParseFailure(t *testing.T) {
+	root := t.TempDir()
+	s := &Store{Root: root}
+	writeVaultFile(t, root, "identity.md", "- name wael\n")
+
+	calls := 0
+	exec := func(ctx context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+		calls++
+		if strings.Contains(sys, `"ops"`) {
+			// First (delta) call: return garbage the delta parser rejects.
+			return organizeRun{jsonContent: "not json at all", modelUsed: "fake"}, OrganizeResult{}, true
+		}
+		// Fallback (whole-file) call: a valid whole-file response.
+		return organizeRun{jsonContent: `{"files":[{"name":"identity.md","content":"- Name: Wael\n"}]}`, modelUsed: "fake"}, OrganizeResult{}, true
+	}
+	prop, res := s.planOrganizeOpts(context.Background(), "", false, OrganizeRunOpts{DeltaMode: true}, exec)
+	if !res.Success {
+		t.Fatalf("delta parse failure must fall back to whole-file, got failure: %s", res.Message)
+	}
+	if calls != 2 {
+		t.Fatalf("expected a delta call THEN a whole-file fallback (2 calls), got %d", calls)
+	}
+	found := false
+	for _, c := range prop.Changes {
+		if c.Name == "identity.md" && strings.Contains(c.NewContent, "Name: Wael") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("fallback whole-file proposal not applied: %+v", prop.Changes)
+	}
+}
