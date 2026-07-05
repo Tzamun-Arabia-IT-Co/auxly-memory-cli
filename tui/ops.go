@@ -263,6 +263,24 @@ func (m opsModel) cursorAgentWired() (agent string, wired bool) {
 	return row.agent, row.status == "WIRED"
 }
 
+// wireHintFor describes what [i] does for the given not-yet-wired agent.
+// claude/codex get a native hook auto-wired by `auxly setup`/`auxly connect`
+// already (see autoWireCleanHooks); gemini/kimi/antigravity are wired the
+// same way but via a ~/.zshrc shell wrapper, since none of the three has a
+// session-end hook to write into a settings file.
+func wireHintFor(agent string) string {
+	switch agent {
+	case "claude", "codex":
+		return "[i] wires " + agent + " — writes its session-end hook; captured facts go to pending review"
+	case "gemini", "kimi":
+		return "[i] wires " + agent + " — adds a capture wrapper to ~/.zshrc (restart your shell after)"
+	case "antigravity":
+		return "[i] wires antigravity — adds a capture wrapper to ~/.zshrc for its `agy` CLI (restart your shell after)"
+	default:
+		return ""
+	}
+}
+
 func (m opsModel) handleKey(msg tea.KeyMsg) (opsModel, tea.Cmd) {
 	// Report view: any key dismisses it (mirrors sshModePrint's "any key
 	// dismisses the config preview").
@@ -432,6 +450,11 @@ func (m opsModel) panel() string {
 	}
 	lines = append(lines, "")
 	lines = append(lines, dim.Render("↑/↓ select · i install · u uninstall (confirm) · r rescan"))
+	if agent, wired := m.cursorAgentWired(); agent != "" && !wired {
+		if hint := wireHintFor(agent); hint != "" {
+			lines = append(lines, dim.Render(hint))
+		}
+	}
 
 	lines = append(lines, "")
 	lines = append(lines, bold.Render("Sync (git push)"))

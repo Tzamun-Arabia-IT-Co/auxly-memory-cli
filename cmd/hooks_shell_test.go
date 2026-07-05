@@ -201,6 +201,65 @@ func TestShellWrapperBlockPassesBashSyntaxCheck(t *testing.T) {
 	}
 }
 
+// TestShellWrapperBlockAntigravityShadowsAgy locks the CMD/AGENT split:
+// antigravity's CLI binary is `agy`, not `antigravity`, so the wrapper
+// function must shadow `agy` and wrap `command agy`, while the markers,
+// mktemp label, and --provider attribution stay labeled "antigravity".
+func TestShellWrapperBlockAntigravityShadowsAgy(t *testing.T) {
+	block := shellWrapperBlock("antigravity", "darwin")
+	if !strings.Contains(block, "agy() {") {
+		t.Fatalf("antigravity block must define an agy() function (shadow the agy command):\n%s", block)
+	}
+	if !strings.Contains(block, "command agy \"$@\"") {
+		t.Fatalf("antigravity block must wrap `command agy \"$@\"`:\n%s", block)
+	}
+	if !strings.Contains(block, "--provider antigravity") {
+		t.Fatalf("antigravity block must attribute captures to --provider antigravity:\n%s", block)
+	}
+	start, end := wrapperMarkers("antigravity")
+	if !strings.Contains(block, start) || !strings.Contains(block, end) {
+		t.Fatalf("antigravity block must use antigravity-labeled markers:\n%s", block)
+	}
+	if strings.Contains(block, "antigravity()") {
+		t.Fatalf("antigravity block must NOT define an antigravity() function (agy is the real command):\n%s", block)
+	}
+
+	// gemini must be unaffected by the CMD/AGENT split: function name, wrapped
+	// command, and --provider all still read "gemini".
+	geminiBlock := shellWrapperBlock("gemini", "darwin")
+	if !strings.Contains(geminiBlock, "gemini() {") || !strings.Contains(geminiBlock, "--provider gemini") {
+		t.Fatalf("gemini block regressed after CMD/AGENT split:\n%s", geminiBlock)
+	}
+}
+
+// TestShellWrapperBlockAntigravityLinux covers the non-darwin util-linux
+// `script -q -e -c` form: it must still wrap `command agy`, not `command
+// antigravity`.
+func TestShellWrapperBlockAntigravityLinux(t *testing.T) {
+	block := shellWrapperBlock("antigravity", "linux")
+	if !strings.Contains(block, `command agy $(printf '%q ' "$@")`) {
+		t.Fatalf("linux antigravity block must wrap `command agy` via the util-linux script -c form:\n%s", block)
+	}
+	if !strings.Contains(block, "script -q -e -c") {
+		t.Fatalf("linux antigravity block missing the util-linux script invocation:\n%s", block)
+	}
+}
+
+// TestWrapperCommand locks the name mapping wrapperCommand implements:
+// antigravity -> agy, everything else -> itself.
+func TestWrapperCommand(t *testing.T) {
+	cases := map[string]string{
+		"antigravity": "agy",
+		"gemini":      "gemini",
+		"kimi":        "kimi",
+	}
+	for agent, want := range cases {
+		if got := wrapperCommand(agent); got != want {
+			t.Fatalf("wrapperCommand(%q) = %q, want %q", agent, got, want)
+		}
+	}
+}
+
 // TestShellRCPathUsesSHELLOverGOOS locks finding 8: $SHELL's basename picks
 // the rc file, not GOOS — a Linux zsh user must get ~/.zshrc, not ~/.bashrc
 // (which their zsh session never sources).

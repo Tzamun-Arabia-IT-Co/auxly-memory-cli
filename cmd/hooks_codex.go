@@ -44,21 +44,37 @@ func codexHomeDir() string {
 }
 
 func installCodexHook() error {
+	changed, err := installCodexHookQuiet()
+	if err != nil {
+		return err
+	}
+	if changed {
+		fmt.Println("✓ Codex notify hook installed.")
+	} else {
+		fmt.Println("✓ Codex notify hook already installed — nothing to do.")
+	}
+	return nil
+}
+
+// installCodexHookQuiet does the actual read-merge-write with no printing, so
+// callers that install on a caller's behalf (autoWireCleanHooks) can decide
+// for themselves whether/what to report. changed is true only when the hook
+// was actually written or appended — false when it was already present.
+func installCodexHookQuiet() (changed bool, err error) {
 	path := codexConfigPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			return err
+			return false, err
 		}
 		out := codexHookHeader + "\n" + codexNotifyLine + "\n"
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-			return err
+			return false, err
 		}
 		if err := writeFileAtomic(path, []byte(out), 0644); err != nil {
-			return err
+			return false, err
 		}
-		fmt.Println("✓ Codex notify hook installed.")
-		return nil
+		return true, nil
 	}
 
 	lines := strings.SplitAfter(string(data), "\n")
@@ -68,11 +84,10 @@ func installCodexHook() error {
 			continue // a notify-shaped line inside [table]/a """ string isn't ours to see
 		}
 		if strings.HasPrefix(normalizeCodexSpacing(l.trimmed), codexNotifyOursPrefix) {
-			fmt.Println("✓ Codex notify hook already installed — nothing to do.")
-			return nil
+			return false, nil
 		}
 		if isCodexNotifyAssignment(l.trimmed) {
-			return fmt.Errorf("Codex already has a notify program (%q) — Codex supports only one; remove it or chain manually", l.trimmed)
+			return false, fmt.Errorf("Codex already has a notify program (%q) — Codex supports only one; remove it or chain manually", l.trimmed)
 		}
 	}
 
@@ -91,10 +106,9 @@ func installCodexHook() error {
 	out = append(out, block)
 	out = append(out, lines[insertAt:]...)
 	if err := writeFileAtomic(path, []byte(strings.Join(out, "")), 0644); err != nil {
-		return err
+		return false, err
 	}
-	fmt.Println("✓ Codex notify hook installed.")
-	return nil
+	return true, nil
 }
 
 func uninstallCodexHook() error {

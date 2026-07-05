@@ -472,6 +472,14 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		}
 		printAl("")
 	}
+
+	// Wire the capture hook for whichever agents are actually present: claude/
+	// codex get their native settings-file hook, gemini/kimi/antigravity get
+	// the ~/.zshrc shell-wrapper hook (see autoWireCleanHooks).
+	if wired := autoWireCleanHooks(home); len(wired) > 0 {
+		printAlf("✅ Auto-wired capture hooks: %s\r\n\r\n", strings.Join(wired, ", "))
+	}
+
 	// A failed write must never masquerade as success — name each failure and
 	// exit non-zero at the end so scripts see it too.
 	if len(failedApps) > 0 {

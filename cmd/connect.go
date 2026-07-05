@@ -1943,6 +1943,14 @@ func injectRemoteConfigs(name string) {
 			fmt.Printf("   ↳ %s\n", app)
 		}
 	}
+
+	// Same clean-agent hook auto-wire as `auxly setup` — the capture hook is
+	// local (it runs `auxly capture`) regardless of whether the vault it feeds
+	// is local or remote, so a machine newly pointed at a remote host should
+	// still get it for claude/codex when they're present.
+	if wired := autoWireCleanHooks(home); len(wired) > 0 {
+		fmt.Printf("✅ Auto-wired capture hooks: %s\n", strings.Join(wired, ", "))
+	}
 }
 
 // provisionRemote turns the freshly-reachable host into a fully Auxly-enabled

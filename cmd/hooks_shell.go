@@ -13,7 +13,19 @@ import (
 
 // shellWrapperAgents are the agents with no native session-end hook — wired
 // via a shell function around the CLI instead of a settings file.
-var shellWrapperAgents = []string{"gemini", "kimi"}
+var shellWrapperAgents = []string{"gemini", "kimi", "antigravity"}
+
+// wrapperCommand returns the actual shell command an agent's wrapper function
+// must shadow. Almost always the agent name itself — except antigravity,
+// whose CLI binary is `agy`, not `antigravity`. The wrapper block still
+// labels its markers/--provider as "antigravity" (see shellWrapperBlock);
+// only the function name and the wrapped command differ.
+func wrapperCommand(agent string) string {
+	if agent == "antigravity" {
+		return "agy"
+	}
+	return agent
+}
 
 var hooksPrintWrapperCmd = &cobra.Command{
 	Use:          "print-wrapper <agent>",
@@ -71,25 +83,30 @@ func wrapperMarkers(agent string) (start, end string) {
 
 // wrapperBlockTemplate is filled in with (start marker, script variant
 // label, script invocation line, end marker), in that order, then every
-// literal "{{AGENT}}" is replaced with the real agent name.
+// literal "{{CMD}}" and "{{AGENT}}" is replaced. The two are usually the same
+// string, but decoupled because antigravity's CLI binary is `agy` while its
+// hook is labeled "antigravity": {{CMD}} = wrapperCommand(agent) names the
+// shell function and the wrapped binary (function name, `command {{CMD}}
+// "$@"`, mktemp label), {{AGENT}} = agent names the --provider attribution
+// and the doc comments (markers use agent directly, via wrapperMarkers).
 //
-// No `|| command {{AGENT}} "$@"` fallback after the script invocation: script
+// No `|| command {{CMD}} "$@"` fallback after the script invocation: script
 // propagates the wrapped command's exit status, so a fallback there would
-// re-run (double-execute) {{AGENT}} on ANY nonzero exit — including a
+// re-run (double-execute) {{CMD}} on ANY nonzero exit — including a
 // deliberate failure from a destructive/paid operation. If `script` itself
 // isn't installed, that's checked upfront instead, once, before anything
 // else runs.
 const wrapperBlockTemplate = `%s
-# auxly: wraps {{AGENT}} to capture the session transcript via ` + "`script`" + ` (%s).
+# auxly: wraps {{CMD}} to capture the session transcript via ` + "`script`" + ` (%s).
 # Honest limitation: {{AGENT}} has no session-end hook, so this captures raw
 # terminal output, not a structured transcript — see README "Auto-capture".
-{{AGENT}}() {
+{{CMD}}() {
   if ! command -v script >/dev/null 2>&1; then
-    command {{AGENT}} "$@"
+    command {{CMD}} "$@"
     return
   fi
   local __auxly_log __auxly_status
-  __auxly_log="$(mktemp -t auxly-{{AGENT}})"
+  __auxly_log="$(mktemp -t auxly-{{CMD}})"
   %s
   __auxly_status=$?
   auxly capture --transcript "$__auxly_log" --provider {{AGENT}} >/dev/null 2>&1
@@ -105,8 +122,9 @@ const wrapperBlockTemplate = `%s
 // detected at runtime inside the shell function itself.
 func shellWrapperBlock(agent, goos string) string {
 	start, end := wrapperMarkers(agent)
+	cmd := wrapperCommand(agent)
 	variant := "macOS/BSD script: script -q <log> <cmd> <args...>"
-	scriptLine := `script -q "$__auxly_log" command {{AGENT}} "$@" 2>/dev/null`
+	scriptLine := `script -q "$__auxly_log" command {{CMD}} "$@" 2>/dev/null`
 	if goos != "darwin" {
 		variant = `Linux/util-linux script: script -q -e -c "cmd" <log>`
 		// util-linux script's -c takes ONE string, re-parsed through a shell —
@@ -116,9 +134,10 @@ func shellWrapperBlock(agent, goos string) string {
 		// re-parse reconstructs the original argv instead of re-splitting it.
 		// -e makes script return the wrapped command's exit status (util-linux
 		// only propagates it with this flag; BSD script does by default).
-		scriptLine = `script -q -e -c "command {{AGENT}} $(printf '%q ' "$@")" "$__auxly_log" 2>/dev/null`
+		scriptLine = `script -q -e -c "command {{CMD}} $(printf '%q ' "$@")" "$__auxly_log" 2>/dev/null`
 	}
 	block := fmt.Sprintf(wrapperBlockTemplate, start, variant, scriptLine, end)
+	block = strings.ReplaceAll(block, "{{CMD}}", cmd)
 	return strings.ReplaceAll(block, "{{AGENT}}", agent)
 }
 

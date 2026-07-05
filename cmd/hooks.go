@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -21,14 +23,21 @@ var hooksAgent string
 
 // supportedHookAgents lists every agent wireable via `--agent`; keep in sync
 // with the router below and `hooks status`'s row list.
-var supportedHookAgents = []string{"claude", "codex", "gemini", "kimi"}
+var supportedHookAgents = []string{"claude", "codex", "gemini", "kimi", "antigravity"}
 
 var hooksInstallCmd = &cobra.Command{
 	Use:          "install",
 	Short:        "Wire an agent's session-end hook to run `auxly capture` (default: Claude Code)",
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return installHookForAgent(hooksAgent)
+		if err := installHookForAgent(hooksAgent); err != nil {
+			return err
+		}
+		// Explicit install is fresh consent — clear any prior auto-wire opt-out.
+		if home, herr := os.UserHomeDir(); herr == nil {
+			clearAutoHookOptOut(home, hooksAgent)
+		}
+		return nil
 	},
 }
 
@@ -37,7 +46,15 @@ var hooksUninstallCmd = &cobra.Command{
 	Short:        "Remove the auxly capture hook for an agent",
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return uninstallHookForAgent(hooksAgent)
+		if err := uninstallHookForAgent(hooksAgent); err != nil {
+			return err
+		}
+		// A deliberate uninstall must stick — record it so the next setup/connect
+		// auto-wire doesn't silently re-add this agent.
+		if home, herr := os.UserHomeDir(); herr == nil {
+			recordAutoHookOptOut(home, hooksAgent)
+		}
+		return nil
 	},
 }
 
@@ -51,8 +68,8 @@ var hooksStatusCmd = &cobra.Command{
 }
 
 func init() {
-	hooksInstallCmd.Flags().StringVar(&hooksAgent, "agent", "claude", "agent to wire: claude, codex, gemini, kimi")
-	hooksUninstallCmd.Flags().StringVar(&hooksAgent, "agent", "claude", "agent to unwire: claude, codex, gemini, kimi")
+	hooksInstallCmd.Flags().StringVar(&hooksAgent, "agent", "claude", "agent to wire: claude, codex, gemini, kimi, antigravity")
+	hooksUninstallCmd.Flags().StringVar(&hooksAgent, "agent", "claude", "agent to unwire: claude, codex, gemini, kimi, antigravity")
 	hooksCmd.AddCommand(hooksInstallCmd)
 	hooksCmd.AddCommand(hooksUninstallCmd)
 	hooksCmd.AddCommand(hooksStatusCmd)
@@ -82,7 +99,7 @@ func installHookForAgent(agent string) error {
 		return nil
 	case "codex":
 		return installCodexHook()
-	case "gemini", "kimi":
+	case "gemini", "kimi", "antigravity":
 		already, err := shellWrapperInstalled(agent)
 		if err != nil {
 			return err
@@ -123,7 +140,7 @@ func uninstallHookForAgent(agent string) error {
 		return nil
 	case "codex":
 		return uninstallCodexHook()
-	case "gemini", "kimi":
+	case "gemini", "kimi", "antigravity":
 		removed, err := uninstallShellWrapper(agent)
 		if err != nil {
 			return err
@@ -170,7 +187,7 @@ func runHooksStatus() error {
 	}
 	fmt.Printf("   %-8s %-14s %s\n", "codex", codexStatus, detail)
 
-	// gemini/kimi: shell-wrapper marked block presence in the rc file.
+	// gemini/kimi/antigravity: shell-wrapper marked block presence in the rc file.
 	for _, agent := range shellWrapperAgents {
 		status, detail := "not-installed", fmt.Sprintf("run `auxly hooks install --agent %s`", agent)
 		installed, err := shellWrapperInstalled(agent)
@@ -191,6 +208,169 @@ func claudeSettingsPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".claude", "settings.json"), nil
+}
+
+// claudeInstalled reports whether Claude Code looks present on this machine —
+// gated on the ~/.claude config DIR existing, not on a `claude` binary being
+// on PATH. installCaptureHook creates settings.json from scratch when it's
+// missing, so a PATH-only signal would make auto-wire create a fresh
+// ~/.claude for an agent that was never actually set up here.
+func claudeInstalled(home string) bool {
+	info, err := os.Stat(filepath.Join(home, ".claude"))
+	return err == nil && info.IsDir()
+}
+
+// codexInstalled mirrors claudeInstalled: gated on CODEX_HOME (or ~/.codex)
+// already existing, since installCodexHookQuiet creates config.toml from
+// scratch when the file is absent.
+func codexInstalled() bool {
+	info, err := os.Stat(codexHomeDir())
+	return err == nil && info.IsDir()
+}
+
+// geminiInstalled reports whether the `gemini` CLI is on PATH.
+func geminiInstalled() bool {
+	_, err := exec.LookPath("gemini")
+	return err == nil
+}
+
+// kimiInstalled reports whether the `kimi` CLI is on PATH, or its config dir
+// (current ~/.kimi-code or legacy ~/.kimi) exists.
+func kimiInstalled(home string) bool {
+	if _, err := exec.LookPath("kimi"); err == nil {
+		return true
+	}
+	for _, dir := range []string{".kimi-code", ".kimi"} {
+		if info, err := os.Stat(filepath.Join(home, dir)); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+// antigravityInstalled reports whether the `agy` CLI (antigravity's actual
+// binary name) is on PATH, or ~/.antigravity exists.
+func antigravityInstalled(home string) bool {
+	if _, err := exec.LookPath("agy"); err == nil {
+		return true
+	}
+	info, err := os.Stat(filepath.Join(home, ".antigravity"))
+	return err == nil && info.IsDir()
+}
+
+// autoWireCleanHooks wires the capture hook for every hook-capable agent that
+// is actually present on this machine, during `auxly setup`/`auxly connect`:
+// claude and codex get their native settings-file hook; gemini, kimi and
+// antigravity — which have no session-end hook — get the ~/.zshrc shell
+// wrapper (see hooks_shell.go). Editing ~/.zshrc for an installed agent is a
+// deliberate product decision: auto-wire everything installed, not just the
+// "clean" settings-file agents. Returns the agent names actually wired (nil
+// if none). Never fails setup/connect: a Codex foreign-notify conflict is
+// swallowed here (a manual `auxly hooks install --agent codex` still
+// surfaces it as an error).
+func autoWireCleanHooks(home string) []string {
+	switch strings.ToLower(os.Getenv("AUXLY_NO_AUTO_HOOKS")) {
+	case "1", "true", "yes":
+		return nil
+	}
+
+	var wired []string
+	if claudeInstalled(home) && !autoHookOptedOut(home, "claude") {
+		if path, err := claudeSettingsPath(); err == nil {
+			if changed, err := installCaptureHook(path); err == nil && changed {
+				wired = append(wired, "claude")
+			}
+		}
+	}
+	if codexInstalled() && !autoHookOptedOut(home, "codex") {
+		if changed, err := installCodexHookQuiet(); err == nil && changed {
+			wired = append(wired, "codex")
+		}
+	}
+
+	shellAgentPresent := map[string]bool{
+		"gemini":      geminiInstalled(),
+		"kimi":        kimiInstalled(home),
+		"antigravity": antigravityInstalled(home),
+	}
+	for _, agent := range shellWrapperAgents {
+		if !shellAgentPresent[agent] || autoHookOptedOut(home, agent) {
+			continue
+		}
+		already, err := shellWrapperInstalled(agent)
+		if err != nil || already {
+			continue
+		}
+		if err := installShellWrapper(agent); err == nil {
+			wired = append(wired, agent)
+		}
+	}
+	return wired
+}
+
+// autoHookOptOutPath is the machine-global ledger of agents the user has
+// EXPLICITLY unwired. Auto-wire (setup/connect) skips anything listed here, so a
+// deliberate `hooks uninstall` sticks instead of silently reappearing next
+// setup — the trust guard for a feature that edits ~/.zshrc on its own.
+func autoHookOptOutPath(home string) string {
+	return filepath.Join(home, ".auxly", "autohook-optout")
+}
+
+func autoHookOptOutSet(home string) map[string]bool {
+	set := map[string]bool{}
+	data, err := os.ReadFile(autoHookOptOutPath(home))
+	if err != nil {
+		return set
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if a := strings.TrimSpace(line); a != "" {
+			set[a] = true
+		}
+	}
+	return set
+}
+
+func autoHookOptedOut(home, agent string) bool {
+	return autoHookOptOutSet(home)[agent]
+}
+
+// recordAutoHookOptOut marks agent as deliberately unwired (called on an
+// explicit `hooks uninstall`). Idempotent.
+func recordAutoHookOptOut(home, agent string) {
+	set := autoHookOptOutSet(home)
+	if set[agent] {
+		return
+	}
+	set[agent] = true
+	writeAutoHookOptOut(home, set)
+}
+
+// clearAutoHookOptOut removes agent from the ledger (called on an explicit
+// `hooks install` — re-installing is fresh consent). Idempotent.
+func clearAutoHookOptOut(home, agent string) {
+	set := autoHookOptOutSet(home)
+	if !set[agent] {
+		return
+	}
+	delete(set, agent)
+	writeAutoHookOptOut(home, set)
+}
+
+func writeAutoHookOptOut(home string, set map[string]bool) {
+	agents := make([]string, 0, len(set))
+	for a := range set {
+		agents = append(agents, a)
+	}
+	sort.Strings(agents)
+	path := autoHookOptOutPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return // best-effort: the ledger is a convenience, never fail a hook op on it
+	}
+	body := ""
+	if len(agents) > 0 {
+		body = strings.Join(agents, "\n") + "\n"
+	}
+	_ = os.WriteFile(path, []byte(body), 0644)
 }
 
 // captureHookCommand is the marker by which install/uninstall recognize their
