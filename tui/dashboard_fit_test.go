@@ -325,12 +325,19 @@ func TestDashboardRichSectionsFullMode(t *testing.T) {
 }
 
 // TestDashboardRichSectionsSuppressedWhenCompact locks the responsive contract: on a
-// short terminal the LOWEST-priority rich sections (composition detail) are dropped
-// so the dashboard still fits. The "what just happened" feed is a higher-priority
-// section (see TestDashboardFeedSurvivesHeightPressure) and is intentionally NOT
-// asserted absent here — this specific fixture (12 cards, 5 sessions) is dense enough
-// that there is genuinely no room left for it at 140x30, which this test also locks
-// via the height budget below.
+// short, STACKED-layout terminal (width<116, so the left column's height adds
+// directly to the body height) the LOWEST-priority rich sections (composition
+// detail) are dropped so the dashboard still fits. The "what just happened" feed
+// is a higher-priority section (see TestDashboardFeedSurvivesHeightPressure) and
+// is intentionally NOT asserted absent here — this specific fixture (12 cards, 5
+// sessions) is dense enough that there is genuinely no room left for it at
+// 100x30, which this test also locks via the height budget below.
+//
+// This used to run at width 140 (side-by-side): that's now the WRONG fixture for
+// this contract — see TestDashboardCategoryBarsShowInSpareRoom, the regression fix.
+// In side-by-side layout the left column's spare height doesn't cost the shared
+// body anything, so category bars now show there even while compact; only the
+// stacked layout still ties them to !compact.
 func TestDashboardRichSectionsSuppressedWhenCompact(t *testing.T) {
 	m := populatedDashboard(t)
 	m.dashboard.stats.LastWriteTime = time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
@@ -338,16 +345,72 @@ func TestDashboardRichSectionsSuppressedWhenCompact(t *testing.T) {
 	m.dashboard.recentWrites = []audit.Entry{
 		{Timestamp: m.dashboard.stats.LastWriteTime, Provider: "claude", Action: "write", File: "infra.md", Diff: "+ x\n"},
 	}
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 30})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = updated.(model)
 	m.screen = screenDashboard
+	if !m.dashboard.bodyCompact() {
+		t.Fatalf("fixture must still be compact at 100x30 (raw body height=%d)", lipgloss.Height(m.dashboard.renderBody(false)))
+	}
 	out := m.View()
 
 	if lipgloss.Height(out) > 30 {
 		t.Errorf("compact dashboard height %d exceeds terminal 30", lipgloss.Height(out))
 	}
 	if strings.Contains(out, "Memory by category") {
-		t.Error("composition detail must be suppressed in compact mode to preserve the fit")
+		t.Error("composition detail must be suppressed in compact mode to preserve the fit (stacked layout)")
+	}
+}
+
+// TestDashboardCategoryBarsShowInSpareRoom is the regression test: the category
+// breakdown must show whenever the SIDE-BY-SIDE left column has spare height
+// relative to the right column, even when bodyCompactCanonical's worst-case fit
+// test picked compact — that canonical check is deliberately pessimistic (padded
+// to max feed rows) so full-vs-compact never flaps, but it must not also hide
+// bars that would render for free in the shorter left column. Guards against the
+// v1.3.4 regression where the category bars were gated on `compact` instead of
+// on actual spare room.
+func TestDashboardCategoryBarsShowInSpareRoom(t *testing.T) {
+	newModel := func(t *testing.T, liveFeeds bool) model {
+		t.Helper()
+		m := *NewApp(t.TempDir())
+		cards := make([]agentCard, 17)
+		for i := range cards {
+			cards[i] = agentCard{id: fmt.Sprintf("a%d", i), name: fmt.Sprintf("Agent %d", i)}
+		}
+		m.dashboard.cards = cards
+		m.dashboard.stats = &audit.Stats{WritesToday: 2, TotalEntries: 143}
+		m.dashboard.composition = []categoryStat{
+			{label: "projects", items: 60}, {label: "infra", items: 38}, {label: "daily", items: 33},
+			{label: "agents", items: 29}, {label: "preferences", items: 25}, {label: "personal", items: 17, private: true},
+		}
+		if liveFeeds {
+			var writes []audit.Entry
+			var events []audit.ActivityEvent
+			for i := 0; i < 9; i++ {
+				writes = append(writes, audit.Entry{Timestamp: time.Now().Format(time.RFC3339), Provider: "claude", Action: "write", File: fmt.Sprintf("f%d.md", i)})
+				events = append(events, audit.ActivityEvent{ID: int64(i), TS: time.Now(), Provider: "claude", Action: "write", File: fmt.Sprintf("f%d.md", i)})
+			}
+			m.dashboard.recentWrites = writes
+			m.dashboard.activityFeed = events
+		}
+		m.screen = screenDashboard
+		return m
+	}
+
+	for _, liveFeeds := range []bool{false, true} {
+		m := newModel(t, liveFeeds)
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 155, Height: 45})
+		m = updated.(model)
+		m.screen = screenDashboard
+		out := m.View()
+
+		if h := lipgloss.Height(out); h > 45 {
+			t.Errorf("liveFeeds=%v: dashboard height %d exceeds terminal 45", liveFeeds, h)
+		}
+		if !strings.Contains(out, "Memory by category") {
+			t.Errorf("liveFeeds=%v: category bars must show in spare left-column room at 155x45 (compact=%v):\n%s",
+				liveFeeds, m.dashboard.bodyCompact(), stripANSI(out))
+		}
 	}
 }
 

@@ -1032,39 +1032,10 @@ func (m dashboardModel) renderBodyAt(compact bool, feedRows int) string {
 		bold.Render("Memory Store:"),
 		dim.Render(memStorePath),
 	)
-	// Enrichment depth scales with terminal height so the rich dashboard fits more
-	// terminals before falling back to compact: taller panes show more rows.
-	enrichN := dashboardEnrichN(m.height)
-	// Memory-by-category breakdown sits in the left column's spare height — full
-	// mode only, so compact panes don't grow.
-	if !compact {
-		if comp := m.renderComposition(enrichN); comp != "" {
-			diagContent += sep + comp
-		}
-		// The vault-size chart and write-count bars are the priciest rows in this
-		// column (the 30-day spark alone routinely wraps to 2 lines in this
-		// 44-wide box, and the bars add up to 5 more) — reserved for the tallest
-		// enrichment tier (enrichN==9, height>=64) so a borderline-tall terminal
-		// like the reported 198x53 (enrichN==4) still renders FULL, zero-spare-row
-		// mode with the rest of the enrichment intact instead of tipping into
-		// compact. Also gated the same way as the row below: only once there's a
-		// real snapshot to chart — an always-on "no history yet" placeholder would
-		// cost a row for nothing (see TestDashboardRichFitsTallWideTerminal).
-		if enrichN >= 9 {
-			if len(m.vaultSizeHistory) >= 2 {
-				diagContent += "\n" + m.renderVaultSizeChart()
-			}
-			if bars := renderAgentWriteBars(m.agentWriteCounts); bars != "" {
-				diagContent += "\n" + bars
-			}
-		}
-	}
-	diagContent += sep + fmt.Sprintf("🔌 %s\n%s",
-		bold.Render("Active Connections:"), m.renderConnectionsSummary(compact))
-	leftCol := diagStyle.Render(diagContent)
-
 	// Right Column: Connected Agent Grid — only DETECTED brands (shared with the
 	// hit-tester via m.cards), so the grid scales to whatever is installed.
+	// Built BEFORE the left column's category decision below, so that decision
+	// can measure the right column's height (see sideBySide branch).
 	brands := m.cards
 
 	// Decide the grid shape so cards fill the available width: more columns (and
@@ -1096,38 +1067,116 @@ func (m dashboardModel) renderBodyAt(compact bool, feedRows int) string {
 		gridSection = lipgloss.NewStyle().Foreground(ColorDim).Render("No AI agents detected on this machine.\nRun  auxly setup  to wire one up.")
 	}
 
-	rightCol := fmt.Sprintf("%s\n%s", StyleHeader.Render("📡 Connected Agent Brands"), gridSection)
-	// Pending approvals are decorative/supplementary enrichment — dropped first
-	// under height pressure, full mode only (same tier as the composition
-	// breakdown and charts in the left column above).
-	if !compact {
-		if pend := m.renderPendingInline(5); pend != "" {
-			rightCol += sep + pend
+	// buildRightCol renders the right column (agent grid + optional pending +
+	// feeds) for a given model and feed-row budget. Factored out so the category
+	// decision below can measure a CANONICAL (max-feed) right column — built from
+	// m.bodyCompactCanonical() — without duplicating this block.
+	buildRightCol := func(mm dashboardModel, fRows int) string {
+		rc := fmt.Sprintf("%s\n%s", StyleHeader.Render("📡 Connected Agent Brands"), gridSection)
+		// Pending approvals are decorative/supplementary enrichment — dropped first
+		// under height pressure, full mode only (same tier as the composition
+		// breakdown and charts in the left column above).
+		if !compact {
+			if pend := mm.renderPendingInline(5); pend != "" {
+				rc += sep + pend
+			}
 		}
+		// The "what just happened" feeds are the HIGHEST-priority enrichment — they
+		// answer "is anything happening right now" — so they render regardless of
+		// compact, as long as there's data AND feedRows > 0 (renderBody's shrink
+		// loop only falls back to 0 — matching the pre-fix compact baseline of no
+		// feed at all — when even a 1-row feed can't fit). Reported bug: a single
+		// `compact` bit used to gate ALL enrichment (charts, composition, AND the
+		// feed) at once, and bodyCompact()'s fit check measures the CURRENT
+		// content's height — so as connections/composition/feed data grew across
+		// ticks, the same terminal size could flip into compact mid-session and
+		// blank the feed right along with the decorative charts. Compact still
+		// tightens spacing (sep) and drops composition detail / vault chart / write
+		// bars / pending above; it just never drops these while there's room.
+		if fRows > 0 {
+			if feed := mm.renderRecentFeed(fRows); feed != "" {
+				rc += sep + feed
+			}
+			if live := mm.renderActivityFeed(fRows); live != "" {
+				rc += sep + live
+			}
+		}
+		return rc
 	}
-	// The "what just happened" feeds are the HIGHEST-priority enrichment — they
-	// answer "is anything happening right now" — so they render regardless of
-	// compact, as long as there's data AND feedRows > 0 (renderBody's shrink
-	// loop only falls back to 0 — matching the pre-fix compact baseline of no
-	// feed at all — when even a 1-row feed can't fit). Reported bug: a single
-	// `compact` bit used to gate ALL enrichment (charts, composition, AND the
-	// feed) at once, and bodyCompact()'s fit check measures the CURRENT
-	// content's height — so as connections/composition/feed data grew across
-	// ticks, the same terminal size could flip into compact mid-session and
-	// blank the feed right along with the decorative charts. Compact still
-	// tightens spacing (sep) and drops composition detail / vault chart / write
-	// bars / pending above; it just never drops these while there's room.
-	if feedRows > 0 {
-		if feed := m.renderRecentFeed(feedRows); feed != "" {
-			rightCol += sep + feed
+	rightCol := buildRightCol(m, feedRows)
+
+	// Enrichment depth scales with terminal height so the rich dashboard fits more
+	// terminals before falling back to compact: taller panes show more rows.
+	enrichN := dashboardEnrichN(m.height)
+	activeConn := fmt.Sprintf("🔌 %s\n%s",
+		bold.Render("Active Connections:"), m.renderConnectionsSummary(compact))
+
+	// The vault-size chart and write-count bars are the priciest rows in this
+	// column (the 30-day spark alone routinely wraps to 2 lines in this 44-wide
+	// box, and the bars add up to 5 more) — reserved for the tallest enrichment
+	// tier (enrichN==9, height>=64), full mode only, REGARDLESS of layout: this
+	// fix is about the category bars below, not these (see TestDashboardRichFitsTallWideTerminal).
+	// Computed up front so the category fit-check below measures the true final
+	// left column, including these rows when they'll be present.
+	var richExtra string
+	if !compact && enrichN >= 9 {
+		if len(m.vaultSizeHistory) >= 2 {
+			richExtra += "\n" + m.renderVaultSizeChart()
 		}
-		if live := m.renderActivityFeed(feedRows); live != "" {
-			rightCol += sep + live
+		if bars := renderAgentWriteBars(m.agentWriteCounts); bars != "" {
+			richExtra += "\n" + bars
 		}
 	}
 
+	// Memory-by-category breakdown sits in the left column's spare height. The
+	// gate used to be the `compact` flag, but that's the wrong signal: compact is
+	// decided by bodyCompactCanonical's worst-case (max-feed) fit test, so a
+	// terminal size right at the fit boundary picks compact even though the real
+	// left column has room to spare — hiding bars that would render fine. What
+	// actually matters is the layout SHAPE:
+	//   - side-by-side (width>=116): body height = max(left, right), and right
+	//     (agent grid + feeds) is almost always the taller one, so filling
+	//     left's spare room with bars costs nothing — regardless of compact.
+	//   - stacked (width<116): left's height adds directly to the body height,
+	//     so bars only belong there in full mode — unchanged from before.
+	sideBySide := !(m.width > 0 && m.width < 116)
+	var diagExtra string
+	if sideBySide {
+		// Bound against a CANONICAL (max-feed) right column, not the live one:
+		// the live one's height fluctuates with how many recent-writes/live-
+		// activity rows currently exist, which would make bar visibility flap
+		// during a session at a fixed terminal size — the same class of bug
+		// bodyCompactCanonical already fixes for the compact decision itself.
+		// The canonical column, padded to enrichN feed rows and rendered at this
+		// call's feedRows, is a guaranteed upper bound for the real one (real
+		// feed rows can only be fewer — renderRecentFeed/renderActivityFeed cap
+		// at min(len(data), maxRows)), so accepting bars up to that bound can
+		// never make the left column taller than the right column actually is.
+		canonicalRightH := lipgloss.Height(buildRightCol(m.bodyCompactCanonical(), feedRows))
+		for n := enrichN; n >= 1; n-- {
+			comp := m.renderComposition(n)
+			if comp == "" {
+				break // no composition data at all (invariant across n) — stop trying
+			}
+			candidate := diagStyle.Render(diagContent + sep + comp + richExtra + sep + activeConn)
+			if lipgloss.Height(candidate) <= canonicalRightH {
+				diagExtra = comp
+				break
+			}
+		}
+	} else if !compact {
+		// Stacked layout: unchanged from before this fix.
+		diagExtra = m.renderComposition(enrichN)
+	}
+	if diagExtra != "" {
+		diagContent += sep + diagExtra
+	}
+	diagContent += richExtra
+	diagContent += sep + activeConn
+	leftCol := diagStyle.Render(diagContent)
+
 	var dashboardContent string
-	if m.width > 0 && m.width < 116 {
+	if !sideBySide {
 		dashboardContent = lipgloss.JoinVertical(lipgloss.Left, leftCol, "", rightCol)
 	} else {
 		dashboardContent = lipgloss.JoinHorizontal(lipgloss.Top, leftCol, "    ", rightCol)
