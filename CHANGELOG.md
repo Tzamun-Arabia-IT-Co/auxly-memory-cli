@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.5] - 2026-07-05
+
+### Fixed
+
+- **"Memory by category" bars came back.** The category breakdown in the
+  dashboard's System Diagnostics panel disappeared in 1.3.4: it was gated on
+  full-vs-compact, and 1.3.4's stability fix (which measures the maximum body
+  height) picks compact at boundary terminal sizes — hiding bars that actually
+  fit. The bars live in the left column, which is shorter than the agent-grid
+  column, so in the side-by-side layout they fill spare vertical space for free.
+  They're now shown based on that real spare room (measured, never estimated, so
+  they can't overflow) instead of the compact flag, and their visibility depends
+  only on terminal size + agent count — consistent every launch.
+
 ## [1.3.4] - 2026-07-05
 
 Automatic capture-hook wiring and a dashboard that renders the same way every
