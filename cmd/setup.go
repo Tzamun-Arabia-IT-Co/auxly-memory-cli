@@ -602,9 +602,12 @@ func runSetup(cmd *cobra.Command, args []string) error {
 }
 
 // installAuxlySkills writes every getSkillsMap() skill's SKILL.md into the
-// Claude (global + local), Codex (global + local), and Gemini target dirs.
-// extraBanner is appended after the standard update reminder (empty for local
-// setup; a remote banner for `auxly connect`).
+// Claude (global + local) and Kimi skill dirs — the only agents that actually
+// read a SKILL.md file. Codex, Gemini, Antigravity, and Cursor are
+// instruction-based, not skills-native: they get the Auxly memory context
+// block injected into their global context file instead, via
+// installAuxlyContextBlocks below. extraBanner is appended after the standard
+// update reminder (empty for local setup; a remote banner for `auxly connect`).
 func installAuxlySkills(extraBanner string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -617,15 +620,12 @@ func installAuxlySkills(extraBanner string) {
 	// Paths to write skills to
 	globalClaude := filepath.Join(home, ".claude", "skills")
 	localClaude := ".claude/skills"
-	globalCodex := filepath.Join(home, ".codex", "skills")
-	localCodex := ".codex/skills"
-	globalGeminiSkills := filepath.Join(home, ".gemini", "config", "skills")
 
-	targetDirs := []string{globalClaude, localClaude, globalCodex, localCodex, globalGeminiSkills}
+	targetDirs := []string{globalClaude, localClaude}
 
 	for _, baseDir := range targetDirs {
 		// Only write local dirs if we are actually in a directory that is not home
-		if baseDir == localClaude || baseDir == localCodex {
+		if baseDir == localClaude {
 			// Skip local creation if we are in the home folder to avoid cluttering it
 			if wd, err := os.Getwd(); err == nil && wd == home {
 				continue
@@ -662,6 +662,131 @@ func installAuxlySkills(extraBanner string) {
 			_ = os.WriteFile(skillFilePath, []byte(content+updateReminder+extraBanner), 0644)
 		}
 		registerKimiSkillDir(filepath.Join(kimiHome, "config.toml"), skillsRoot)
+	}
+
+	installAuxlyContextBlocks(home)
+}
+
+// auxlyContextBlockStart and auxlyContextBlockEnd delimit the Auxly memory
+// block injected into instruction-based agents' global context files. The
+// markers let installAuxlyContextBlocks / removeAuxlyContextBlock find and
+// replace or strip the block without touching anything else in the file.
+const (
+	auxlyContextBlockStart = "<!-- >>> auxly memory (managed by auxly setup) >>>"
+	auxlyContextBlockEnd   = "<!-- <<< auxly memory <<< -->"
+)
+
+// auxlyContextBlockBody is the block injected between the markers. It tells
+// an instruction-based agent (Codex, Gemini, Antigravity, Cursor) that it has
+// the auxly-memory MCP server and how to use it — these tools don't read
+// SKILL.md, so this is their only onboarding path to the memory tools.
+func auxlyContextBlockBody() string {
+	return "## Auxly Memory\n" +
+		"You have the `auxly-memory` MCP server — the user's local-first, unified\n" +
+		"memory vault shared across their AI agents. Use it proactively:\n" +
+		"- `auxly_skill_sync`: save a durable fact, preference, config, or decision.\n" +
+		"  Pick the best category: identity, personal, preferences, infra, products,\n" +
+		"  projects, daily, business, or agents. Route the user's OWN private-life\n" +
+		"  matters (family, health, personal legal/financial) to `personal` — a\n" +
+		"  company/business matter is NOT personal.\n" +
+		"- `auxly_skill_status` / `auxly_skill_memory`: show connection health and a\n" +
+		"  consolidated profile of what's already known.\n" +
+		"- `auxly_skill_max`: exhaustively self-harvest this entire session into memory.\n" +
+		"- `auxly_memory_recall`: retrieve memories relevant to the current task.\n" +
+		"Whenever you learn a durable developer preference, system config, product\n" +
+		"scope, or decision during this conversation, immediately call\n" +
+		"`auxly_skill_sync` to save it — don't wait to be asked.\n"
+}
+
+// auxlyBlockBounds locates the marker-delimited Auxly block in text, including
+// a single trailing newline right after the end marker (so a replace or strip
+// doesn't accumulate blank lines across repeated runs). ok is false if the
+// start marker is absent, or present with no matching end marker.
+func auxlyBlockBounds(text string) (start, end int, ok bool) {
+	start = strings.Index(text, auxlyContextBlockStart)
+	if start < 0 {
+		return 0, 0, false
+	}
+	rel := strings.Index(text[start:], auxlyContextBlockEnd)
+	if rel < 0 {
+		return 0, 0, false
+	}
+	end = start + rel + len(auxlyContextBlockEnd)
+	if end < len(text) && text[end] == '\n' {
+		end++
+	}
+	return start, end, true
+}
+
+// injectAuxlyContextBlock writes (or refreshes) the Auxly memory block into an
+// instruction-based agent's global context file — the mechanism Codex,
+// Gemini, Antigravity, and Cursor actually read (unlike Claude/Kimi, they
+// don't load SKILL.md). Idempotent: re-running replaces the existing block in
+// place instead of appending a duplicate. Only creates the file if its parent
+// dir already exists — never fabricates a dir for an agent that isn't there.
+func injectAuxlyContextBlock(contextFile string) {
+	if fi, err := os.Stat(filepath.Dir(contextFile)); err != nil || !fi.IsDir() {
+		return
+	}
+
+	block := auxlyContextBlockStart + "\n" + auxlyContextBlockBody() + auxlyContextBlockEnd + "\n"
+
+	existing, err := os.ReadFile(contextFile)
+	if err != nil {
+		_ = os.WriteFile(contextFile, []byte(block), 0644)
+		return
+	}
+	text := string(existing)
+
+	if start, end, ok := auxlyBlockBounds(text); ok {
+		_ = os.WriteFile(contextFile, []byte(text[:start]+block+text[end:]), 0644)
+		return
+	}
+
+	// No existing block: append, with a leading blank line only if the file
+	// already has content.
+	out := text
+	if strings.TrimSpace(out) != "" {
+		if !strings.HasSuffix(out, "\n") {
+			out += "\n"
+		}
+		out += "\n"
+	}
+	out += block
+	_ = os.WriteFile(contextFile, []byte(out), 0644)
+}
+
+// removeAuxlyContextBlock strips the Auxly memory block (markers inclusive)
+// from an instruction-based agent's context file, leaving the rest of the
+// file byte-intact. Reports whether a block was found and removed.
+func removeAuxlyContextBlock(contextFile string) bool {
+	data, err := os.ReadFile(contextFile)
+	if err != nil {
+		return false
+	}
+	text := string(data)
+	start, end, ok := auxlyBlockBounds(text)
+	if !ok {
+		return false
+	}
+	return os.WriteFile(contextFile, []byte(text[:start]+text[end:]), 0644) == nil
+}
+
+// installAuxlyContextBlocks injects the Auxly memory context block into every
+// instruction-based agent's global context file — but only for an agent
+// actually installed on this machine (its detect dir exists). It never
+// creates ~/.cursor or similar for a tool that isn't present.
+func installAuxlyContextBlocks(home string) {
+	targets := map[string]string{
+		filepath.Join(home, ".codex"):       filepath.Join(home, ".codex", "AGENTS.md"),
+		filepath.Join(home, ".gemini"):      filepath.Join(home, ".gemini", "GEMINI.md"),
+		filepath.Join(home, ".antigravity"): filepath.Join(home, ".antigravity", "AGENTS.md"),
+		filepath.Join(home, ".cursor"):      filepath.Join(home, ".cursor", "AGENTS.md"),
+	}
+	for detectDir, contextFile := range targets {
+		if fi, err := os.Stat(detectDir); err == nil && fi.IsDir() {
+			injectAuxlyContextBlock(contextFile)
+		}
 	}
 }
 
@@ -710,6 +835,7 @@ func registerKimiSkillDir(configPath, skillsRoot string) {
 
 func ensureClaudeAndCodexSkills(memPath string) {
 	installAuxlySkills("")
+	printAl("💡 Already-open Claude Code sessions won't see the new skills until you run `/reload-skills` (v2.1.152+) or restart.")
 }
 
 func ensureAntigravitySlashCommands(memPath string) {

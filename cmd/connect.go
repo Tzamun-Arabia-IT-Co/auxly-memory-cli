@@ -1832,7 +1832,9 @@ func launcherMatches(def interface{}, name string) bool {
 }
 
 // removeAuxlySkills deletes the installed /auxly-* skill folders from every
-// agent skills dir. Returns the count of locations touched.
+// agent skills dir, and strips the injected Auxly memory context block from
+// every instruction-based agent's global context file (see
+// installAuxlyContextBlocks). Returns the count of locations touched.
 func removeAuxlySkills() int {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -1860,6 +1862,19 @@ func removeAuxlySkills() int {
 			count++
 		}
 	}
+
+	contextFiles := []string{
+		filepath.Join(home, ".codex", "AGENTS.md"),
+		filepath.Join(home, ".gemini", "GEMINI.md"),
+		filepath.Join(home, ".antigravity", "AGENTS.md"),
+		filepath.Join(home, ".cursor", "AGENTS.md"),
+	}
+	for _, f := range contextFiles {
+		if removeAuxlyContextBlock(f) {
+			count++
+		}
+	}
+
 	return count
 }
 
