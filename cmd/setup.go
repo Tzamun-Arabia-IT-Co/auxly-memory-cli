@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
@@ -503,6 +505,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		} else {
 			printAl("✅ Successfully registered auxly-memory MCP server with Claude Code CLI!")
 		}
+		// Personal ~/.claude/skills files do not reliably surface in Claude's
+		// skill picker on all builds — plugin skills always do. Install the
+		// auxly plugin so the /auxly-* skills load in every session.
+		ensureAuxlyClaudePlugin(claudePath)
 		printAl("")
 	}
 
@@ -831,6 +837,32 @@ func registerKimiSkillDir(configPath, skillsRoot string) {
 	// Key absent — append it.
 	lines = append(lines, "extra_skill_dirs = ["+quoted+"]")
 	_ = os.WriteFile(configPath, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+// ensureAuxlyClaudePlugin adds the auxly marketplace and installs the auxly
+// plugin so Claude Code loads the /auxly-* skills in every session. Personal
+// ~/.claude/skills files do not reliably surface in Claude's skill picker on
+// all builds, but plugin skills always do — so the plugin is the reliable
+// delivery. Best-effort: idempotent (both commands no-op if already
+// added/installed), non-fatal, and time-bounded so a network hang can never
+// block setup.
+func ensureAuxlyClaudePlugin(claudePath string) {
+	printAl("🔌 Installing the auxly skills plugin for Claude Code (may take a moment)...")
+	run := func(args ...string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		c := exec.CommandContext(ctx, claudePath, args...)
+		c.Stdin = strings.NewReader("")
+		c.Stderr = os.Stderr // surface the failure reason; stdout stays quiet
+		return c.Run()
+	}
+	// marketplace add is idempotent; ignore "already exists" errors.
+	_ = run("plugin", "marketplace", "add", "Tzamun-Arabia-IT-Co/auxly-skills")
+	if err := run("plugin", "install", "auxly@auxly"); err != nil {
+		printAlf("💡 Couldn't auto-install the plugin (%v). Run manually: claude plugin install auxly@auxly\r\n", err)
+		return
+	}
+	printAl("✅ Installed the auxly skills plugin for Claude Code (restart Claude to load the /auxly-* skills).")
 }
 
 func ensureClaudeAndCodexSkills(memPath string) {

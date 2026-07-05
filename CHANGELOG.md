@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.6] - 2026-07-05
+
+Skills install through the mechanism each agent actually reads.
+
+### Fixed
+
+- **auxly skills now appear in Claude Code, Codex, Gemini, Antigravity, and
+  Cursor.** auxly wrote a `SKILL.md` directory for every agent, but only
+  *skills-native* tools read those — so most agents showed nothing. Two gaps
+  are closed:
+  - **Claude Code:** personal `~/.claude/skills` files do not reliably surface
+    in Claude's skill picker on current builds — plugin skills always do. The
+    `/auxly-*` memory skills now ship through the `auxly` Claude plugin
+    (auxly-skills 2.5.0), and `auxly setup` auto-adds the marketplace and
+    installs the plugin (best-effort, idempotent, non-fatal, time-bounded) so
+    every session lists them.
+  - **Codex, Gemini, Antigravity, Cursor** are instruction-based — they read a
+    global context file, not a skills directory. auxly was writing `SKILL.md`
+    into `~/.codex/skills` / `~/.gemini/config/skills`, which those tools never
+    read. setup now injects a marked, idempotent Auxly block into their
+    `AGENTS.md` / `GEMINI.md` (gated on the tool being installed) that points at
+    the already-wired `auxly-memory` MCP tools. Kimi's registered skills dir is
+    unchanged.
+
 ## [1.3.5] - 2026-07-05
 
 ### Fixed
