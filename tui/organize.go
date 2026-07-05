@@ -96,7 +96,7 @@ var apiDefaultModels = map[string]string{
 }
 
 var agentModels = map[string][]string{
-	"claude":      []string{"haiku (fast)", "sonnet", "opus"},
+	"claude":      []string{"sonnet (recommended)", "haiku (fast)", "opus"},
 	"codex":       []string{"(default)", "gpt-5.2-codex", "gpt-5.2"},
 	"antigravity": []string{"(uses its configured model)"},
 	"gemini":      []string{"(default)", "gemini-2.5-flash", "gemini-2.5-pro"},
@@ -703,11 +703,17 @@ func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
 		if len(filtered) == 0 {
 			m.mode = orgIdle
 			// Prefer the store's reason ("already tidy — N file(s) unchanged
-			// since last run") over a bare "Nothing to organize", and point at
-			// [F] so a dirty-skip isn't a dead end.
+			// since last run") over a generic line, and point at [F] so a
+			// dirty-skip isn't a dead end.
 			msgText := strings.TrimSpace(msg.res.Message)
 			if msgText == "" {
-				msgText = "Nothing to organize."
+				// The delta gate found changed files and sent them, but the
+				// model returned no ops — the vault is already well-filed
+				// (sync delta-merges each fact into place as you sync, so
+				// organize routinely has nothing to consolidate). Say that,
+				// not a bare "Nothing to organize" that reads like the new
+				// syncs were ignored.
+				msgText = "Already well-organized — your synced facts are in place, nothing to merge or dedupe."
 			}
 			m.status = msgText + "  ·  press F to re-organize everything anyway"
 			m.errMsg = ""

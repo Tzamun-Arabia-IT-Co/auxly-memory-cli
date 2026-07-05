@@ -110,9 +110,12 @@ func TestOrganizeAgentProviderRuns(t *testing.T) {
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 
+	// Tab into the model list, Down to the 2nd entry (now "haiku (fast)" after
+	// sonnet became the recommended default), Enter — verifies a picked
+	// non-default model flows through to planTarget.
 	provider, command, model := m.planTarget()
-	if provider != "Claude Code / CLI" || command != "/bin/echo" || model != "sonnet" {
-		t.Fatalf("agent plan target = (%q, %q, %q), want Claude /bin/echo sonnet", provider, command, model)
+	if provider != "Claude Code / CLI" || command != "/bin/echo" || model != "haiku" {
+		t.Fatalf("agent plan target = (%q, %q, %q), want Claude /bin/echo haiku", provider, command, model)
 	}
 }
 

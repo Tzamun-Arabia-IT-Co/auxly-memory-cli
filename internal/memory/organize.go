@@ -118,7 +118,12 @@ func buildAgentArgs(agentName, model, prompt string) []string {
 	switch p := strings.ToLower(agentName); {
 	case strings.Contains(p, "claude"):
 		if model == "" {
-			model = "haiku"
+			// Default to sonnet: haiku at --effort low is fast but a weak,
+			// inconsistent reorganizer — on a near-tidy vault it routinely
+			// returns zero ops, so organize looked like it did nothing even
+			// when files had changed. sonnet finds the real merges/dedupes;
+			// --effort low keeps it reasonably quick. haiku stays selectable.
+			model = "sonnet"
 		}
 		// Full isolation so the child only sees THIS prompt (verified clean E2E):
 		//   --tools ""           → disable ALL built-in tools (no Read/Bash/etc.)

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.7] - 2026-07-06
+
+### Changed
+
+- **Organize now defaults to `sonnet`, not `haiku`.** haiku at `--effort low`
+  is fast but a weak, inconsistent reorganizer — on a near-tidy vault it
+  routinely returned zero ops, so organize looked like it did nothing even
+  after new syncs. sonnet finds the real merges/dedupes; `--effort low` keeps
+  it quick. haiku stays selectable in the picker for a fast pass.
+- **Clearer "nothing to do" message.** When organize ran on changed files but
+  the model found no consolidation to make, it printed a bare "Nothing to
+  organize" — which read like your new syncs were ignored. It now says
+  "Already well-organized — your synced facts are in place, nothing to merge
+  or dedupe," reflecting that `auxly_skill_sync` already delta-merges each fact
+  into place as you sync (organize is a periodic dedupe, not a sync step).
+
 ## [1.3.6] - 2026-07-05
 
 Skills install through the mechanism each agent actually reads.
