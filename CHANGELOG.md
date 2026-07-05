@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-07-05
+
+Automatic capture-hook wiring and a dashboard that renders the same way every
+launch.
+
+### Added
+
+- **Auto-wire capture hooks on setup.** `auxly setup` (and `auxly connect`) now
+  wires the session-end capture hook for every installed hook-capable agent it
+  finds — no more installing each one by hand. claude and codex get their clean
+  settings-file hooks; gemini, kimi, and antigravity get a `script`-based
+  wrapper appended to your shell rc (`~/.zshrc`). Each is idempotent, gated on
+  the agent actually being present, marked, and removable with
+  `auxly hooks uninstall`. Opt out entirely with `AUXLY_NO_AUTO_HOOKS=1`.
+- **Antigravity capture support.** Antigravity is now a hook-capable agent. Its
+  CLI is invoked as `agy`, so the wrapper shadows `agy` while staying labeled
+  antigravity (status, attribution, and `hooks uninstall --agent antigravity`
+  all key on the antigravity label).
+- **In-panel wire instructions.** Settings → Ops now shows, for the selected
+  agent, exactly what pressing `[i]` will do — a clean settings-file hook, or a
+  `~/.zshrc` wrapper that needs a shell restart.
+
+### Fixed
+
+- **Dashboard rendered inconsistently between launches.** At a fixed terminal
+  size, one launch showed the full System Diagnostics box (real store path +
+  category breakdown) and the next a compact one, because the compact-vs-full
+  decision measured the live render — whose height changed with how many recent
+  writes / activity lines existed. It now measures a canonical (max-feed) body,
+  so the layout depends only on terminal size, not live churn. The store path
+  also always shows in full (compact mode used to abbreviate it to "memory").
+
 ## [1.3.3] - 2026-07-04
 
 A UX-clarity patch: optional features that simply aren't set up no longer
