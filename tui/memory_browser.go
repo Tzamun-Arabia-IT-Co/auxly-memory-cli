@@ -298,8 +298,19 @@ func (m memBrowserModel) scanCmd() tea.Cmd {
 // this tab edits the user's own facts, not agent config.
 func orderMemScan(files []memory.FileInfo) (top, projects []memory.FileInfo) {
 	rank := map[string]int{}
-	for i, name := range memory.OrderedFiles() {
+	i := 0
+	for _, name := range memory.OrderedFiles() {
 		rank[name] = i
+		i++
+	}
+	// Operational files (inbox.md, tasks.md) are not in OrderedFiles() — they're
+	// working files, not fact categories — but the user still wants to SEE them.
+	// Rank them after every fact file, in taxonomy declaration order.
+	for _, c := range memory.Taxonomy {
+		if c.Operational {
+			rank[c.File] = i
+			i++
+		}
 	}
 	for _, f := range files {
 		if strings.HasPrefix(f.Name, "projects/") {

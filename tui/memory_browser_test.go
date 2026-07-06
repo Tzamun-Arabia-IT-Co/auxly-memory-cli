@@ -28,8 +28,10 @@ func TestOrderMemScanTaxonomyOrderAndProjectsNesting(t *testing.T) {
 		{Name: "identity.md"},
 		{Name: "projects/zeta.md"},
 		{Name: "CLAUDE.md"}, // not in the taxonomy — must be excluded entirely
+		{Name: "tasks.md"},  // operational — listed after fact files
 		{Name: "personal.md"},
 		{Name: "projects/alpha.md"},
+		{Name: "inbox.md"}, // operational — listed after fact files
 		{Name: "preferences.md"},
 	}
 	top, projects := orderMemScan(files)
@@ -38,9 +40,11 @@ func TestOrderMemScanTaxonomyOrderAndProjectsNesting(t *testing.T) {
 	for _, f := range top {
 		topNames = append(topNames, f.Name)
 	}
-	want := "identity.md,personal.md,preferences.md,daily.md"
+	// Fact files first (taxonomy order), then operational files at the bottom
+	// in taxonomy declaration order (inbox before tasks).
+	want := "identity.md,personal.md,preferences.md,daily.md,inbox.md,tasks.md"
 	if got := strings.Join(topNames, ","); got != want {
-		t.Fatalf("top order = %q, want taxonomy order %q", got, want)
+		t.Fatalf("top order = %q, want %q", got, want)
 	}
 	for _, n := range topNames {
 		if n == "CLAUDE.md" {

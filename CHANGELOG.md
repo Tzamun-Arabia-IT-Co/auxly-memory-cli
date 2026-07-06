@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-07-06
+
+### Fixed
+
+- **Dashboard Memory tab now lists `inbox.md` and `tasks.md`.** v1.4.0 added
+  these as *operational* categories, which are excluded from the fact-routing
+  guide and the profile order (`OrderedFiles`) — but the Memory browser reused
+  that order for inclusion, so quick-capture notes and the todo list were
+  invisible in the TUI. They now appear (read-only) at the bottom of the
+  top-level file list, after the fact categories.
+
 ## [1.4.0] - 2026-07-06
 
 ### Added
