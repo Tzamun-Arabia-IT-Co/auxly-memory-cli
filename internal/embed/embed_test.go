@@ -9,10 +9,71 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 )
 
+// TestNew_ConfigFallbackAndEnvPrecedence locks the resolution order the MCP
+// server depends on: env var > persisted config > built-in default, and that
+// the local-vs-cloud gate honours a config-set endpoint + config allow-cloud.
+func TestNew_ConfigFallbackAndEnvPrecedence(t *testing.T) {
+	resetBreaker()
+	t.Cleanup(resetBreaker)
+	clearEnv(t) // HOME=temp dir, all embed env cleared
+
+	// No env, no config → built-in local default, enabled.
+	if !New().Enabled() {
+		t.Fatal("default local endpoint should be enabled")
+	}
+
+	// Config LAN endpoint is used when no env is set, and a private IP needs no
+	// allow-cloud opt-in.
+	if err := config.SaveSettings(config.Settings{
+		EmbedEndpoint: "http://192.168.1.141:11434/v1/embeddings",
+		EmbedModel:    "nomic-embed-text",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c := New()
+	if c.url != "http://192.168.1.141:11434/v1/embeddings" {
+		t.Fatalf("config EmbedEndpoint not used: got %q", c.url)
+	}
+	if c.model != "nomic-embed-text" {
+		t.Fatalf("config EmbedModel not used: got %q", c.model)
+	}
+	if !c.Enabled() {
+		t.Fatal("LAN endpoint should be enabled without allow-cloud")
+	}
+
+	// Env wins over config.
+	t.Setenv("AUXLY_EMBED_ENDPOINT", "http://10.0.0.9:11434/v1/embeddings")
+	if got := New().url; got != "http://10.0.0.9:11434/v1/embeddings" {
+		t.Fatalf("env must win over config: got %q", got)
+	}
+	t.Setenv("AUXLY_EMBED_ENDPOINT", "")
+
+	// A PUBLIC config endpoint is disabled until EmbedAllowCloud is set.
+	if err := config.SaveSettings(config.Settings{EmbedEndpoint: "https://embeds.example.com/v1/embeddings"}); err != nil {
+		t.Fatal(err)
+	}
+	if New().Enabled() {
+		t.Fatal("public config endpoint must be disabled without allow-cloud")
+	}
+	if err := config.SaveSettings(config.Settings{
+		EmbedEndpoint:   "https://embeds.example.com/v1/embeddings",
+		EmbedAllowCloud: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !New().Enabled() {
+		t.Fatal("EmbedAllowCloud in config should enable a public endpoint")
+	}
+}
+
 // clearEnv neutralizes every env var that ResolveEndpoint or New consults so a
-// test starts from a deterministic "local default" baseline.
+// test starts from a deterministic "local default" baseline. It also points
+// HOME at an empty temp dir so New()'s config.LoadSettings() fallback reads no
+// persisted EmbedEndpoint/EmbedModel/EmbedAllowCloud from the real machine.
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
@@ -26,6 +87,7 @@ func clearEnv(t *testing.T) {
 	} {
 		t.Setenv(k, "")
 	}
+	t.Setenv("HOME", t.TempDir())
 }
 
 func TestNewModelAndEnabled(t *testing.T) {

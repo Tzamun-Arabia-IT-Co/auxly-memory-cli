@@ -77,6 +77,20 @@ type Settings struct {
 	// detected or active agent. Hiding only affects the dashboard display — it
 	// never stops an agent from connecting or writing.
 	HiddenAgents []string `json:"hiddenAgents,omitempty"`
+
+	// EmbedEndpoint persists the embeddings API URL (OpenAI-compatible
+	// /v1/embeddings) so semantic recall reaches a remote embedder even when
+	// the auxly MCP server — spawned by an agent — has none of the user's
+	// shell env. Env AUXLY_EMBED_ENDPOINT still takes precedence.
+	EmbedEndpoint string `json:"embedEndpoint,omitempty"`
+
+	// EmbedModel persists the embedding model name. Env AUXLY_EMBED_MODEL wins.
+	EmbedModel string `json:"embedModel,omitempty"`
+
+	// EmbedAllowCloud persists the opt-in to send vault text to a non-local
+	// embeddings host (a public IP/hostname). Env AUXLY_EMBED_ALLOW_CLOUD=1
+	// also enables it. Off by default — local/LAN endpoints never need it.
+	EmbedAllowCloud bool `json:"embedAllowCloud,omitempty"`
 }
 
 // settingsPath returns ~/.auxly/settings.json.

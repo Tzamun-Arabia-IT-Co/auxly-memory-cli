@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.9] - 2026-07-06
+
+### Added
+
+- **Persistent embeddings endpoint — remote/LAN embedders now work for agent
+  recall.** `auxly index rebuild` gains `--endpoint`, `--embed-model`, and
+  `--allow-cloud`, saved to `~/.auxly/settings.json`. The embed client resolves
+  each setting **env → config → default**, so the auxly MCP server (spawned by
+  an agent, usually *without* your interactive-shell env) reaches the same
+  embedder for semantic recall. Previously `AUXLY_EMBED_ENDPOINT` was env-only,
+  so agent recall silently fell back to keyword search whenever the server
+  didn't inherit the var. `auxly index status` now shows the configured
+  endpoint.
+
+  Remote Ollama on the LAN:
+  ```
+  auxly index rebuild --endpoint http://192.168.1.141:11434/v1/embeddings
+  ```
+  The local-vs-cloud safety gate is unchanged: a public host still requires
+  `--allow-cloud` (or `AUXLY_EMBED_ALLOW_CLOUD=1`); LAN/private IPs never do.
+  (Note: Ollama's embeddings path is the OpenAI-compatible `/v1/embeddings`,
+  not the native `/api/embeddings`.)
+
 ## [1.3.8] - 2026-07-06
 
 ### Added

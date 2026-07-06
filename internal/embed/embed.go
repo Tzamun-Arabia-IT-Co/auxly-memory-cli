@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/llm"
 )
 
@@ -56,7 +57,17 @@ func New() *Client {
 
 	endpoint := llm.ResolveEndpoint()
 
+	// Resolution order for every embed setting: env var (explicit, per-shell
+	// override) → persisted config (~/.auxly/settings.json) → built-in default.
+	// The config layer is what lets the MCP server — spawned by an agent that
+	// usually does NOT inherit the user's interactive-shell env — reach a
+	// remote embedder for semantic recall.
+	settings := config.LoadSettings()
+
 	model := os.Getenv("AUXLY_EMBED_MODEL")
+	if model == "" {
+		model = settings.EmbedModel
+	}
 	if model == "" {
 		if endpoint.IsCloud {
 			model = cloudEmbedModel
@@ -67,14 +78,19 @@ func New() *Client {
 
 	url := os.Getenv("AUXLY_EMBED_ENDPOINT")
 	if url == "" {
+		url = settings.EmbedEndpoint
+	}
+	if url == "" {
 		url = endpoint.EmbeddingsURL()
 	}
 
 	// Gate on the LOCALITY of the EFFECTIVE embeddings URL (the one the request
 	// will actually hit), NOT on endpoint.IsCloud. A cloud override via
-	// AUXLY_EMBED_ENDPOINT / AUXLY_LLM_BASE / OLLAMA_HOST would otherwise slip the
-	// vault out to a public host without the opt-in.
-	enabled := isLocalEmbedURL(url) || os.Getenv("AUXLY_EMBED_ALLOW_CLOUD") == "1"
+	// AUXLY_EMBED_ENDPOINT / AUXLY_LLM_BASE / OLLAMA_HOST — or a persisted
+	// EmbedEndpoint — would otherwise slip the vault out to a public host
+	// without the opt-in. The opt-in itself is honoured from env OR config.
+	allowCloud := os.Getenv("AUXLY_EMBED_ALLOW_CLOUD") == "1" || settings.EmbedAllowCloud
+	enabled := isLocalEmbedURL(url) || allowCloud
 
 	return &Client{
 		url:      url,
