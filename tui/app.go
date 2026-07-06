@@ -110,7 +110,7 @@ func NewApp(memoryPath string) *model {
 		auditTrail: newAuditTrailModel(logger),
 		browser:    newBrowserModel(store),
 		diff:       newDiffModel(pendingMgr, logger),
-		analytics:  newAnalyticsModel(logger, usageMgr),
+		analytics:  newAnalyticsModel(logger, usageMgr, store),
 		settings:   newSettingsModel(memoryPath, logger),
 		ssh:        newSSHModel(),
 		skills:     newSkillsModel(),

@@ -1004,14 +1004,15 @@ func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Mode selector: h/l cycle Consolidate ↔ Split projects ↔ Find
-	// contradictions. Neither key is bound to anything else on this idle
-	// screen, so nothing below ever collides with it.
+	// Mode selector (Step 1): ←/→ (and h/l) cycle Consolidate ↔ Split projects
+	// ↔ Find contradictions. Handled before the picker below so ←/→ always
+	// means "switch action"; Tab moves between the Provider/Model columns. This
+	// split is exactly what the footer promises, so nothing collides.
 	switch msg.String() {
-	case "h":
+	case "h", "left":
 		m.cycleRunMode(-1)
 		return m, nil
-	case "l":
+	case "l", "right":
 		m.cycleRunMode(1)
 		return m, nil
 	}
@@ -1049,7 +1050,7 @@ func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 				m.resetProviderModels()
 			}
 		}
-	case "tab", "right", "left":
+	case "tab", "shift+tab":
 		if m.focus == focusProvider {
 			m.focus = focusModel
 			// Moving to the model list on an API provider with nothing fetched yet
@@ -2009,7 +2010,7 @@ func (m organizeModel) idleView() string {
 			filesPart + orgDimStyle.Render(" · history in Audit Trail (0)") + "\n")
 	}
 
-	b.WriteString("\n" + StyleFooter.Render("h/l mode · ↑↓ choose · Enter: Provider→Model→confirm · F re-run all · Tab switch · e edit URL · f refetch · 1-9/0 tabs"))
+	b.WriteString("\n" + StyleFooter.Render("← → action · ↑↓ choose · Tab: Provider↔Model · Enter run · F re-run all · e edit URL · f refetch · [ ] tabs"))
 	return b.String()
 }
 
@@ -2017,15 +2018,20 @@ func (m organizeModel) idleView() string {
 // contradictions row at the top of the idle screen plus a one-line
 // description of whichever is selected.
 func (m organizeModel) modeSelectorView() string {
+	active := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
 	chips := make([]string, len(orgRunModeInfos))
 	for i, info := range orgRunModeInfos {
 		if orgRunMode(i) == m.runMode {
-			chips[i] = lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary).Render("[ " + info.label + " ]")
+			chips[i] = active.Render("▸ " + info.label + " ◂")
 		} else {
 			chips[i] = orgDimStyle.Render(info.label)
 		}
 	}
-	return strings.Join(chips, "   ") + "\n" + orgDimStyle.Render(orgRunModeInfos[m.runMode].desc)
+	label := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary).Render("Step 1 · Choose action")
+	hint := orgDimStyle.Render("(← → switch)")
+	return label + "   " + hint + "\n" +
+		strings.Join(chips, "    ") + "\n" +
+		orgDimStyle.Render(orgRunModeInfos[m.runMode].desc)
 }
 
 // nonConsolidateIdleView renders the Split projects / Find contradictions
@@ -2044,7 +2050,7 @@ func (m organizeModel) nonConsolidateIdleView() string {
 	if m.status != "" {
 		b.WriteString("\n" + orgGoodStyle.Render(m.status) + "\n")
 	}
-	b.WriteString("\n" + StyleFooter.Render("h/l mode · enter run · 1-9/0 tabs"))
+	b.WriteString("\n" + StyleFooter.Render("← → action · Enter run · [ ] tabs"))
 	return b.String()
 }
 

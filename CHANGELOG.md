@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.8] - 2026-07-06
+
+### Added
+
+- **Recall analytics in the TUI.** The Analytics tab (6) gains a third sub-tab,
+  **Recall** (←/→ to switch) — the same per-file hit tables (7/30/90d), dead
+  files, hot facts, and fallback rate that `auxly stats --recall` prints, now
+  live in the dashboard.
+
+### Changed
+
+- **Memory Org mode selection is discoverable.** The Consolidate / Split
+  projects / Find contradictions row is now a labeled step ("Step 1 · Choose
+  action") with an active-mode marker (`▸ … ◂`) and a "(← → switch)" hint, and
+  the arrow keys switch it — `Tab` now moves only between the Provider/Model
+  columns. Previously the modes read as static text and only the undocumented
+  `h`/`l` keys switched them.
+
 ## [1.3.7] - 2026-07-06
 
 ### Changed

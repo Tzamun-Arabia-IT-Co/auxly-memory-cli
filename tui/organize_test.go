@@ -369,6 +369,17 @@ func TestOrgRunMode_CycleWraps(t *testing.T) {
 	if m.runMode != orgRunModeContradictions {
 		t.Fatalf("h from Consolidate should wrap back to Contradictions, got %v", m.runMode)
 	}
+
+	// The arrow keys are the primary (discoverable) mode switch — ← / → must
+	// cycle the same way h / l do, since the header advertises "(← → switch)".
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if m.runMode != orgRunModeConsolidate {
+		t.Fatalf("→ from Contradictions should wrap to Consolidate, got %v", m.runMode)
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if m.runMode != orgRunModeContradictions {
+		t.Fatalf("← from Consolidate should wrap to Contradictions, got %v", m.runMode)
+	}
 }
 
 // TestOrgRunMode_SplitEnterStartsRunning proves Enter on Split projects mode

@@ -8,6 +8,7 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/usage"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -15,17 +16,34 @@ import (
 
 type analyticsModel struct {
 	logger *audit.Logger
+	store  *memory.Store
 	stats  *audit.Stats
 
-	// Sub-tabs: 0 = Activity (audit metrics), 1 = Usage (live quota panel).
+	// Sub-tabs: 0 = Activity (audit metrics), 1 = Usage (live quota panel),
+	// 2 = Recall (recall-usage analytics).
 	activeTab    int
 	usageMgr     *usage.Manager
 	usageReports map[string]usage.Report
 	liveUsage    bool
+	recall       *recallData
 }
 
 type analyticsRefreshMsg struct {
 	stats *audit.Stats
+}
+
+// recallData holds everything renderRecallPanel needs, fetched off-thread by
+// recallFetchCmd. Nil until the first fetch completes.
+type recallData struct {
+	fileStats []audit.RecallFileStats
+	dead      []string
+	hotFacts  []audit.HotFact
+	fallbackQ int
+	totalQ    int
+}
+
+type recallDataMsg struct {
+	data *recallData
 }
 
 // kvCount is a single (key, count) pair used for stable, sorted rendering.
@@ -34,12 +52,63 @@ type kvCount struct {
 	count int
 }
 
-func newAnalyticsModel(logger *audit.Logger, usageMgr *usage.Manager) analyticsModel {
+func newAnalyticsModel(logger *audit.Logger, usageMgr *usage.Manager, store *memory.Store) analyticsModel {
 	return analyticsModel{
 		logger:       logger,
+		store:        store,
 		usageMgr:     usageMgr,
 		usageReports: map[string]usage.Report{},
 		liveUsage:    config.LoadSettings().LiveUsage,
+	}
+}
+
+// recallFetchCmd runs the four recall-analytics queries off-thread (bubbletea
+// forbids blocking I/O in Update/View) and computes the dead-file list. Any
+// error yields recallDataMsg{data: nil} so the panel just shows "Loading…"
+// forever rather than crashing the TUI.
+func recallFetchCmd(logger *audit.Logger, store *memory.Store) tea.Cmd {
+	return func() tea.Msg {
+		if logger == nil || store == nil {
+			return recallDataMsg{data: nil}
+		}
+		fileStats, err := logger.RecallStatsByFile()
+		if err != nil {
+			return recallDataMsg{data: nil}
+		}
+		hotFacts, err := logger.HotFacts(30, 5)
+		if err != nil {
+			return recallDataMsg{data: nil}
+		}
+		fallbackQ, totalQ, err := logger.RecallFallbackRate(30)
+		if err != nil {
+			return recallDataMsg{data: nil}
+		}
+
+		seen := make(map[string]bool, len(fileStats))
+		for _, s := range fileStats {
+			seen[s.File] = true
+		}
+		files, err := store.List()
+		if err != nil {
+			return recallDataMsg{data: nil}
+		}
+		var dead []string
+		for _, f := range files {
+			if f.IsDir || f.Name == "unified_memory.md" || strings.HasPrefix(f.Name, ".") {
+				continue
+			}
+			if !seen[f.Name] {
+				dead = append(dead, f.Name)
+			}
+		}
+
+		return recallDataMsg{data: &recallData{
+			fileStats: fileStats,
+			dead:      dead,
+			hotFacts:  hotFacts,
+			fallbackQ: fallbackQ,
+			totalQ:    totalQ,
+		}}
 	}
 }
 
@@ -52,10 +121,11 @@ func (m analyticsModel) Refresh() tea.Cmd {
 		}
 		return analyticsRefreshMsg{stats: stats}
 	}
+	cmds := []tea.Cmd{statsCmd, recallFetchCmd(m.logger, m.store)}
 	if m.liveUsage && m.usageMgr != nil {
-		return tea.Batch(statsCmd, usageFetchCmd(m.usageMgr))
+		cmds = append(cmds, usageFetchCmd(m.usageMgr))
 	}
-	return statsCmd
+	return tea.Batch(cmds...)
 }
 
 func (m analyticsModel) Update(msg tea.Msg) (analyticsModel, tea.Cmd) {
@@ -66,10 +136,14 @@ func (m analyticsModel) Update(msg tea.Msg) (analyticsModel, tea.Cmd) {
 		for _, r := range msg.reports {
 			m.usageReports[r.Provider] = r
 		}
+	case recallDataMsg:
+		m.recall = msg.data
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "left", "h", "right", "l":
-			m.activeTab = 1 - m.activeTab // toggle Activity <-> Usage
+		case "right", "l":
+			m.activeTab = (m.activeTab + 1) % 3 // cycle Activity -> Usage -> Recall
+		case "left", "h":
+			m.activeTab = (m.activeTab + 2) % 3
 		}
 	}
 	return m, nil
@@ -85,6 +159,9 @@ func (m analyticsModel) View(width int) string {
 	if m.activeTab == 1 {
 		return title + "\n" + tabs + "\n\n" + m.renderUsagePanel(width)
 	}
+	if m.activeTab == 2 {
+		return title + "\n" + tabs + "\n\n" + m.renderRecallPanel(width)
+	}
 
 	if m.stats == nil {
 		return title + "\n" + tabs + "\n\n" + lipgloss.NewStyle().Foreground(ColorDim).Render("Loading…")
@@ -99,19 +176,22 @@ func (m analyticsModel) View(width int) string {
 	return title + "\n" + tabs + "\n\n" + strings.Join(sections, "\n\n")
 }
 
-// renderSubTabs draws the Activity/Usage selector. Switched with ←/→ (the global
-// number keys are reserved for top-level screen navigation).
+// renderSubTabs draws the Activity/Usage/Recall selector. Switched with ←/→
+// (the global number keys are reserved for top-level screen navigation).
 func (m analyticsModel) renderSubTabs() string {
 	on := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
 	off := lipgloss.NewStyle().Foreground(ColorDim)
-	activity, usage := off.Render("  Activity  "), off.Render("  Usage  ")
-	if m.activeTab == 0 {
+	activity, usage, recall := off.Render("  Activity  "), off.Render("  Usage  "), off.Render("  Recall  ")
+	switch m.activeTab {
+	case 0:
 		activity = on.Render("▸ Activity ")
-	} else {
+	case 1:
 		usage = on.Render("▸ Usage ")
+	case 2:
+		recall = on.Render("▸ Recall ")
 	}
 	hint := off.Render("  (←/→ switch)")
-	return activity + usage + hint
+	return activity + usage + recall + hint
 }
 
 // usagePanelOrder fixes the row order so the panel doesn't reshuffle.
@@ -192,6 +272,75 @@ func usageIdentityLine(r usage.Report) string {
 		parts = append(parts, r.Org)
 	}
 	return strings.Join(parts, "  ·  ")
+}
+
+// renderRecallPanel mirrors `auxly stats --recall` (cmd/stats.go runRecallStats)
+// inside the TUI: which vault files agents actually recall from, which never
+// get hit, the hottest individual facts, and the semantic-fallback rate.
+func (m analyticsModel) renderRecallPanel(width int) string {
+	dim := lipgloss.NewStyle().Foreground(ColorDim)
+	head := lipgloss.NewStyle().Bold(true).Foreground(ColorPrimary)
+
+	if m.recall == nil {
+		return dim.Render("Loading…")
+	}
+	d := m.recall
+	if d.totalQ == 0 {
+		return dim.Render("No recall activity recorded yet — analytics appear after agents start recalling.")
+	}
+
+	var b strings.Builder
+	b.WriteString(head.Render("🔎 Recall usage (accepted hits)") + "\n")
+	b.WriteString(dim.Render(fmt.Sprintf("   %-24s %4s %4s %4s  %s", "FILE", "7D", "30D", "90D", "LAST HIT")) + "\n")
+	for _, s := range d.fileStats {
+		b.WriteString(fmt.Sprintf("   %-24s %4d %4d %4d  %s\n",
+			truncate(s.File, 24), s.Hits7, s.Hits30, s.Hits90, humanLastHit(s.LastHit)))
+	}
+
+	b.WriteString("\n" + head.Render("Dead files (zero recall hits)") + "\n")
+	if len(d.dead) == 0 {
+		b.WriteString("   " + dim.Render("every file has recall hits 🎉") + "\n")
+	} else {
+		for _, name := range d.dead {
+			b.WriteString("   " + dim.Render(name) + "\n")
+		}
+	}
+
+	b.WriteString("\n" + head.Render("Hot facts (30d)") + "\n")
+	if len(d.hotFacts) == 0 {
+		b.WriteString("   " + dim.Render("none yet") + "\n")
+	} else {
+		for _, hf := range d.hotFacts {
+			b.WriteString("   " + dim.Render(fmt.Sprintf("%s · %d× (fact %s)", hf.File, hf.Hits, hf.LineHash)) + "\n")
+		}
+	}
+
+	pct := 0
+	if d.totalQ > 0 {
+		pct = d.fallbackQ * 100 / d.totalQ
+	}
+	b.WriteString("\n" + fmt.Sprintf("Fallback rate (30d): %d/%d queries (%d%%)", d.fallbackQ, d.totalQ, pct) + "\n")
+	if pct > 50 {
+		b.WriteString(lipgloss.NewStyle().Foreground(ColorWarning).
+			Render("⚠ high fallback — embeddings often unavailable; check `auxly index status`") + "\n")
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// humanLastHit renders a coarse "Nd ago" age like humanLastHit in cmd/stats.go,
+// at day granularity since recall history spans up to 90 days. Duplicated
+// (not imported) because cmd must not depend on tui, and tui must not depend
+// on cmd.
+func humanLastHit(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	d := time.Since(t)
+	if d < 24*time.Hour {
+		return "today"
+	}
+	return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 }
 
 // ── KPI cards ───────────────────────────────────────────────────────────────
