@@ -52,9 +52,23 @@ func TestPersonalTier(t *testing.T) {
 	if IsPersonalFile("identity.md") {
 		t.Error("identity.md should be shared, not personal")
 	}
+	// inbox.md is personal too — quick-capture notes are private (off for
+	// remotes by default). tasks.md is shared.
+	if !IsPersonalFile("inbox.md") {
+		t.Error("inbox.md should be personal-tier (private notes)")
+	}
+	if IsPersonalFile("tasks.md") {
+		t.Error("tasks.md should be shared, not personal")
+	}
 	personal := PersonalFiles()
-	if len(personal) != 1 || personal[0] != "personal.md" {
-		t.Errorf("PersonalFiles() = %v, want [personal.md]", personal)
+	want := map[string]bool{"personal.md": true, "inbox.md": true}
+	if len(personal) != len(want) {
+		t.Errorf("PersonalFiles() = %v, want keys %v", personal, want)
+	}
+	for _, f := range personal {
+		if !want[f] {
+			t.Errorf("PersonalFiles() has unexpected %q", f)
+		}
 	}
 }
 
@@ -85,6 +99,14 @@ func TestTaxonomyIntegrity(t *testing.T) {
 func TestRenderForPrompt(t *testing.T) {
 	out := RenderForPrompt()
 	for _, c := range Taxonomy {
+		if c.Operational {
+			// Operational files (inbox/tasks) are working files, not fact
+			// destinations — they must NOT appear in the routing guide.
+			if strings.Contains(out, c.File) {
+				t.Errorf("RenderForPrompt should omit operational file %s", c.File)
+			}
+			continue
+		}
 		if !strings.Contains(out, c.File) {
 			t.Errorf("RenderForPrompt missing %s", c.File)
 		}

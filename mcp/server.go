@@ -427,6 +427,36 @@ func (s *Server) getTools() []tool {
 			},
 		},
 		{
+			Name:        "auxly_task_list",
+			Description: "List the shared todo list (tasks.md): open tasks first, then completed. Use this to see what the user and other agents have queued.",
+			InputSchema: inputSchema{
+				Type:       "object",
+				Properties: map[string]property{},
+			},
+		},
+		{
+			Name:        "auxly_task_add",
+			Description: "Add a task to the shared todo list (tasks.md). Use for work you discover or plan that should be tracked. Respects trust: read_only/require_approval providers are asked to have the user add it instead.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]property{
+					"text": {Type: "string", Description: "The task, one line (e.g. 'fix the ollama timeout')"},
+				},
+				Required: []string{"text"},
+			},
+		},
+		{
+			Name:        "auxly_task_done",
+			Description: "Mark an open task complete. 'match' is either the task's number from auxly_task_list or a unique substring of its text.",
+			InputSchema: inputSchema{
+				Type: "object",
+				Properties: map[string]property{
+					"match": {Type: "string", Description: "Open-task number (from auxly_task_list) or a unique substring of the task text"},
+				},
+				Required: []string{"match"},
+			},
+		},
+		{
 			Name:        "auxly_skill_init",
 			Description: "Slash skill '/auxly-init': Run the onboarding and training setup, scan current chat context/system prompt, and sync all existing preferences to Auxly.",
 			InputSchema: inputSchema{
@@ -571,6 +601,17 @@ func (s *Server) handleToolCall(req *jsonRPCRequest) {
 	case "auxly_pending_list":
 		s.logActivity("", "pending", "")
 		result = s.toolPendingList()
+	case "auxly_task_list":
+		s.logActivity("", "task_list", "")
+		result = s.toolTaskList()
+	case "auxly_task_add":
+		text, _ := params.Arguments["text"].(string)
+		s.logActivity("", "task_add", "")
+		result = s.toolTaskAdd(text)
+	case "auxly_task_done":
+		match, _ := params.Arguments["match"].(string)
+		s.logActivity("", "task_done", "")
+		result = s.toolTaskDone(match)
 	case "auxly_skill_init":
 		s.logActivity("", "skill_init", "")
 		result = s.toolSkillInit()
@@ -937,6 +978,98 @@ func (s *Server) toolPendingList() toolResult {
 	}
 	sb.WriteString("\nHuman must run 'auxly approve <file>' to apply.")
 	return toolResult{Content: []toolContent{{Type: "text", Text: sb.String()}}}
+}
+
+func (s *Server) toolTaskList() toolResult {
+	if !s.canRead(memory.TasksFile) {
+		return toolResult{Content: []toolContent{{Type: "text", Text: "🔒 The shared task list is not shared with this remote connection."}}, IsError: true}
+	}
+	tasks, err := s.store.ListTasks()
+	if err != nil {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}}, IsError: true}
+	}
+
+	var open, done []memory.Task
+	for _, t := range tasks {
+		if t.Done {
+			done = append(done, t)
+		} else {
+			open = append(open, t)
+		}
+	}
+	if len(open) == 0 && len(done) == 0 {
+		return toolResult{Content: []toolContent{{Type: "text", Text: "📋 No tasks yet. Add one with auxly_task_add."}}}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("📋 Tasks — %d open, %d done\n\n", len(open), len(done)))
+	for i, t := range open {
+		sb.WriteString(fmt.Sprintf("%d. [ ] %s\n", i+1, t.Text))
+	}
+	for _, t := range done {
+		sb.WriteString(fmt.Sprintf("   [x] %s\n", t.Text))
+	}
+	return toolResult{Content: []toolContent{{Type: "text", Text: sb.String()}}}
+}
+
+// taskWriteGate resolves the caller's provider and rejects writes only when the
+// remote lacks share access or the provider is read_only. Unlike
+// auxly_memory_write, tasks are NOT gated by require_approval: a todo entry is a
+// low-stakes, attributed, visible, deletable operational line — not a memory
+// claim — so there is no pending/diff queue for it. read_only stays a hard no.
+func (s *Server) taskWriteGate() (provider string, bad *toolResult) {
+	if !s.canWrite(memory.TasksFile) {
+		return "", &toolResult{Content: []toolContent{{Type: "text", Text: "🔒 This remote connection does not have write access to the shared task list."}}, IsError: true}
+	}
+	provider = s.resolveProvider()
+	trustCfg, err := trust.Load(s.memoryPath)
+	if err != nil {
+		return "", &toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error loading trust config: %v", err)}}, IsError: true}
+	}
+	if trustCfg.GetTrustLevel(provider) == trust.LevelReadOnly {
+		return "", &toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("❌ Provider '%s' is read_only. Task rejected.", provider)}}, IsError: true}
+	}
+	return provider, nil
+}
+
+func (s *Server) toolTaskAdd(text string) toolResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(text) == "" {
+		return toolResult{Content: []toolContent{{Type: "text", Text: "Error: text parameter required"}}, IsError: true}
+	}
+	provider, bad := s.taskWriteGate()
+	if bad != nil {
+		return *bad
+	}
+	t, err := s.store.AddTask(text, provider, time.Now())
+	if err != nil {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}}, IsError: true}
+	}
+	if s.logger != nil {
+		s.logger.LogWithSource(fmt.Sprintf("%s-mcp", provider), provider, "task_add", memory.TasksFile, t.Text, "task", "auto", s.sourceMeta)
+	}
+	return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("✅ Added task: %s", t.Text)}}}
+}
+
+func (s *Server) toolTaskDone(match string) toolResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(match) == "" {
+		return toolResult{Content: []toolContent{{Type: "text", Text: "Error: match parameter required"}}, IsError: true}
+	}
+	provider, bad := s.taskWriteGate()
+	if bad != nil {
+		return *bad
+	}
+	t, err := s.store.CompleteTask(match, time.Now())
+	if err != nil {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}}, IsError: true}
+	}
+	if s.logger != nil {
+		s.logger.LogWithSource(fmt.Sprintf("%s-mcp", provider), provider, "task_done", memory.TasksFile, t.Text, "task", "auto", s.sourceMeta)
+	}
+	return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("✅ Completed: %s", t.Text)}}}
 }
 
 // describeRemote builds a compact "<ip>, <os>" description from source meta,

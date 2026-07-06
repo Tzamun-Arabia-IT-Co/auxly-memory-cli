@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-06
+
+### Added
+
+- **Quick capture — `auxly note` (alias `auxly q`).** Append a timestamped
+  thought to `inbox.md` with zero friction: no category decision, no LLM, works
+  offline. Takes text as arguments (`auxly q fix the ollama timeout`) or reads
+  piped stdin (`pbpaste | auxly note`). Entries file themselves later — the
+  Consolidate organize pass now sweeps `inbox.md` into the proper category
+  files.
+
+- **Shared task list — `auxly todo` + agent task tools.** A todo list in
+  `tasks.md` that you and your agents share; it git-syncs like any memory file.
+  - CLI: `auxly todo` (list open + done), `auxly todo <text>` (add),
+    `auxly todo done <number|text>` (complete by open-task number or a unique
+    substring). Aliases: `task`, `tasks`.
+  - MCP: agents get `auxly_task_list`, `auxly_task_add`, and `auxly_task_done`,
+    so an agent can log work it discovers and see what you have queued. Task
+    writes are rejected only for `read_only` providers — a todo entry is a
+    low-stakes, attributed, deletable operational line, not a memory claim, so
+    it is deliberately not gated by require_approval.
+  - `tasks.md` is plain human-editable checkboxes; hand-typed
+    `- [ ] thing` lines parse fine. It is never touched by the organize pass.
+
+- **`inbox` and `tasks` categories** join the taxonomy as *operational* files:
+  real categories for ACL, the dashboard, and (for inbox) the organize sweep,
+  but hidden from the "where facts go" routing guide and the `/auxly-max`
+  harvest so agents never file facts into them. `inbox.md` is private
+  (personal tier, off for remotes by default); `tasks.md` is shared.
+
 ## [1.3.9] - 2026-07-06
 
 ### Added

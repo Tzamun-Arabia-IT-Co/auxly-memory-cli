@@ -146,6 +146,8 @@ func helpText() string {
 	sb.WriteString("\r\n")
 
 	sb.WriteString(bold + "Memory Management:" + reset + "\r\n")
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"note"+reset, "Quick-capture a thought into inbox.md (alias: q)"))
+	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"todo"+reset, "Shared todo list you and your agents share (tasks.md)"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"list"+reset, "List all active memory files in the vault"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"view"+reset, "Print the contents of a specific memory file"))
 	sb.WriteString(fmt.Sprintf("  %-12s %s\r\n", cyan+"write"+reset, "Write a change/diff to memory (respects trust levels)"))

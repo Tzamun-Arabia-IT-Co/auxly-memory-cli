@@ -25,6 +25,12 @@ type Category struct {
 	Tier        Tier     // shared | personal
 	Description string   // one-line purpose, injected into prompts
 	Keywords    []string // substrings that route a fact here (fallback router)
+	// Operational marks a file that is NOT a destination for extracted facts —
+	// inbox (quick-capture) and tasks (todo list) are working files, not memory
+	// buckets. They are hidden from the "where facts go" routing guide and the
+	// /auxly-max harvest, but remain real categories for ACL, the dashboard, and
+	// (for inbox) the organize sweep.
+	Operational bool
 }
 
 // Taxonomy is the CANONICAL, ordered category list — the single source of truth.
@@ -97,6 +103,22 @@ var Taxonomy = []Category{
 		Tier:        TierShared,
 		Description: "AI-agent activity and onboarding events",
 		Keywords:    []string{"agent", "onboarding", "mcp", "claude", "cursor", "codex", "gemini", "copilot"},
+	},
+	{
+		Slug:        "inbox",
+		File:        "inbox.md",
+		Tier:        TierPersonal,
+		Description: "unfiled quick-capture notes (`auxly note`) — NOT a destination for new facts; the organize pass should re-file each entry into its proper category and remove it from here",
+		Keywords:    nil,
+		Operational: true,
+	},
+	{
+		Slug:        "tasks",
+		File:        "tasks.md",
+		Tier:        TierShared,
+		Description: "shared todo list (`auxly todo`, agent task tools) — checkbox lines, never reorganized",
+		Keywords:    nil,
+		Operational: true,
 	},
 }
 
@@ -262,7 +284,9 @@ func IsOrganizableFile(file string) bool {
 	if !ok {
 		return false
 	}
-	return c.Slug != "agents"
+	// agents.md is activity bookkeeping; tasks.md is a checkbox list — neither
+	// may be reshuffled. inbox.md IS swept (organize re-files its entries out).
+	return c.Slug != "agents" && c.Slug != "tasks"
 }
 
 // OrganizableFiles returns the taxonomy files the organize pass may touch.
@@ -300,6 +324,9 @@ func renderTaxonomy(include, writable func(file string) bool) string {
 		if include != nil && !include(c.File) {
 			continue // remote scope: hide files this caller cannot access
 		}
+		if include == nil && c.Operational {
+			continue // unscoped fact-routing guide: inbox/tasks are not fact destinations
+		}
 		tag := ""
 		switch {
 		case include == nil && c.Tier == TierPersonal:
@@ -324,6 +351,9 @@ func renderTaxonomy(include, writable func(file string) bool) string {
 func OrderedFiles() []string {
 	out := make([]string, 0, len(Taxonomy))
 	for _, c := range Taxonomy {
+		if c.Operational {
+			continue // inbox/tasks are working files, not part of the memory profile/harvest
+		}
 		out = append(out, c.File)
 	}
 	return out
