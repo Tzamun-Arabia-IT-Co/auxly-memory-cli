@@ -219,6 +219,15 @@ func knownIDETargets(home string) []ideTarget {
 	}
 	targets = append(targets, ideTarget{filepath.Join(copilotBaseDir, "mcp-config.json"), "GitHub Copilot CLI", copilotBaseDir, false, "copilot"})
 
+	// 9. VS Code native MCP (1.102+) — <AppSupport>/Code/User/mcp.json. UNLIKE
+	// every other target this uses a top-level "servers" key, NOT "mcpServers"
+	// (VS Code silently ignores mcpServers here — the entry shows nothing). The
+	// schema is pinned per-target in writeMCPConfigEntry by ProviderID=="vscode",
+	// because Void (a real VS Code fork) also uses mcp.json but wants mcpServers,
+	// so the shared basename cannot decide the key.
+	vscodeBaseDir := detect.AppSupportDir(home, "Code")
+	targets = append(targets, ideTarget{filepath.Join(vscodeBaseDir, "User", "mcp.json"), "VS Code", vscodeBaseDir, false, "vscode"})
+
 	return targets
 }
 
@@ -276,7 +285,26 @@ func writeMCPConfigEntry(t ideTarget, serverDef map[string]interface{}) (string,
 		config = make(map[string]interface{})
 	}
 
-	if t.IsClaudeDesktop || filepath.Base(path) == "settings.json" || filepath.Base(path) == "mcp_config.json" || filepath.Base(path) == "mcpServers.json" || filepath.Base(path) == "mcp-config.json" {
+	if t.ProviderID == "vscode" {
+		// VS Code's native MCP file keys servers under "servers", not
+		// "mcpServers" (which it ignores). Pinned by ProviderID because the
+		// mcp.json basename is shared with Void, which wants mcpServers.
+		servers, ok := config["servers"].(map[string]interface{})
+		if !ok {
+			servers = make(map[string]interface{})
+		}
+		servers["auxly-memory"] = serverDef
+		config["servers"] = servers
+		// Drop a stale auxly-memory a wrong-keyed prior version may have written
+		// under "mcpServers" (VS Code ignores it), without touching anything else
+		// the user has there.
+		if legacy, ok := config["mcpServers"].(map[string]interface{}); ok {
+			delete(legacy, "auxly-memory")
+			if len(legacy) == 0 {
+				delete(config, "mcpServers")
+			}
+		}
+	} else if t.IsClaudeDesktop || filepath.Base(path) == "settings.json" || filepath.Base(path) == "mcp_config.json" || filepath.Base(path) == "mcpServers.json" || filepath.Base(path) == "mcp-config.json" {
 		// Claude Desktop, Cursor, VS Code, Antigravity, and GitHub Copilot CLI put
 		// servers inside the "mcpServers" key
 		servers, ok := config["mcpServers"].(map[string]interface{})
@@ -668,6 +696,23 @@ func installAuxlySkills(extraBanner string) {
 			_ = os.WriteFile(skillFilePath, []byte(content+updateReminder+extraBanner), 0644)
 		}
 		registerKimiSkillDir(filepath.Join(kimiHome, "config.toml"), skillsRoot)
+	}
+
+	// GitHub Copilot CLI loads slash commands from ~/.copilot/skills/<name>/SKILL.md
+	// (same convention as Claude/Kimi, auto-discovered — no config registration
+	// needed, unlike Kimi). So the auxly skills show as /auxly-* in Copilot's slash
+	// menu. Only write when Copilot is installed; COPILOT_HOME can relocate it.
+	copilotHome := filepath.Join(home, ".copilot")
+	if ch := os.Getenv("COPILOT_HOME"); ch != "" {
+		copilotHome = ch
+	}
+	if fi, err := os.Stat(copilotHome); err == nil && fi.IsDir() {
+		copilotSkills := filepath.Join(copilotHome, "skills")
+		for skillName, content := range commands {
+			skillDir := filepath.Join(copilotSkills, skillName)
+			_ = os.MkdirAll(skillDir, 0755)
+			_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content+updateReminder+extraBanner), 0644)
+		}
 	}
 
 	installAuxlyContextBlocks(home)

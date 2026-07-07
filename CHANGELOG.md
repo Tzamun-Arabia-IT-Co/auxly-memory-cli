@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-07-08
+
+### Fixed
+
+- **VS Code MCP now wired by `auxly setup`.** VS Code's native MCP file
+  (`<AppSupport>/Code/User/mcp.json`) uses a top-level **`servers`** key — auxly
+  had no VS Code target and its writer only emitted `mcpServers`, which VS Code
+  silently ignores. Setup now registers VS Code and writes the `servers` schema
+  (pinned by provider, because Void — a VS Code fork — shares the `mcp.json`
+  filename but wants `mcpServers`). A stale `mcpServers.auxly-memory` a prior
+  version may have written is migrated to `servers`, leaving any other entries
+  untouched. Provider tag: `vscode`.
+
+- **Auxly skills now appear in GitHub Copilot CLI's slash menu.** Copilot CLI
+  loads slash commands from `~/.copilot/skills/<name>/SKILL.md` (the same
+  convention as Claude and Kimi), but `installAuxlySkills` targeted only Claude
+  and Kimi — so Copilot got the MCP tools but no `/auxly-*` commands. Setup now
+  writes the 10 auxly skills there too (auto-discovered, no config registration
+  needed). `COPILOT_HOME` is honored; skills are only written when Copilot is
+  installed.
+
 ## [1.4.1] - 2026-07-06
 
 ### Fixed
