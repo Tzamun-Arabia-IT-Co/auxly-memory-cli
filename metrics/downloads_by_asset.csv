@@ -12085,7 +12085,7 @@ date,tag,asset,downloads
 2026-07-07,v1.0.16,auxly-cli_1.0.16_linux_amd64.deb,1
 2026-07-07,v1.0.16,auxly-cli_1.0.16_linux_amd64.rpm,1
 2026-07-07,v1.0.16,auxly-cli_1.0.16_linux_arm64.deb,1
-2026-07-07,v1.0.16,auxly-cli_1.0.16_linux_arm64.rpm,1
+2026-07-07,v1.0.16,auxly-cli_1.0.16_linux_arm64.rpm,2
 2026-07-07,v1.0.16,auxly-cli_darwin_amd64.tar.gz,1
 2026-07-07,v1.0.16,auxly-cli_darwin_arm64.tar.gz,2
 2026-07-07,v1.0.16,auxly-cli_linux_amd64.tar.gz,1
@@ -12474,8 +12474,8 @@ date,tag,asset,downloads
 2026-07-07,v1.3.7,auxly-linux-arm64,5
 2026-07-07,v1.3.7,auxly-windows-amd64.exe,8
 2026-07-07,v1.3.7,auxly-windows-arm64.exe,4
-2026-07-07,v1.3.8,auxly-1.3.8-checksums.txt,20
-2026-07-07,v1.3.8,auxly-1.3.8-checksums.txt.minisig,19
+2026-07-07,v1.3.8,auxly-1.3.8-checksums.txt,21
+2026-07-07,v1.3.8,auxly-1.3.8-checksums.txt.minisig,20
 2026-07-07,v1.3.8,auxly-cli_1.3.8_linux_amd64.deb,0
 2026-07-07,v1.3.8,auxly-cli_1.3.8_linux_amd64.rpm,0
 2026-07-07,v1.3.8,auxly-cli_1.3.8_linux_arm64.deb,0
@@ -12488,7 +12488,7 @@ date,tag,asset,downloads
 2026-07-07,v1.3.8,auxly-cli_windows_arm64.zip,0
 2026-07-07,v1.3.8,auxly-darwin-amd64,1
 2026-07-07,v1.3.8,auxly-darwin-arm64,1
-2026-07-07,v1.3.8,auxly-linux-amd64,16
+2026-07-07,v1.3.8,auxly-linux-amd64,17
 2026-07-07,v1.3.8,auxly-linux-arm64,1
 2026-07-07,v1.3.8,auxly-windows-amd64.exe,5
 2026-07-07,v1.3.8,auxly-windows-arm64.exe,0
@@ -12510,8 +12510,8 @@ date,tag,asset,downloads
 2026-07-07,v1.3.9,auxly-linux-arm64,1
 2026-07-07,v1.3.9,auxly-windows-amd64.exe,5
 2026-07-07,v1.3.9,auxly-windows-arm64.exe,0
-2026-07-07,v1.4.0,auxly-1.4.0-checksums.txt,16
-2026-07-07,v1.4.0,auxly-1.4.0-checksums.txt.minisig,13
+2026-07-07,v1.4.0,auxly-1.4.0-checksums.txt,17
+2026-07-07,v1.4.0,auxly-1.4.0-checksums.txt.minisig,14
 2026-07-07,v1.4.0,auxly-cli_1.4.0_linux_amd64.deb,0
 2026-07-07,v1.4.0,auxly-cli_1.4.0_linux_amd64.rpm,0
 2026-07-07,v1.4.0,auxly-cli_1.4.0_linux_arm64.deb,0
@@ -12524,7 +12524,7 @@ date,tag,asset,downloads
 2026-07-07,v1.4.0,auxly-cli_windows_arm64.zip,0
 2026-07-07,v1.4.0,auxly-darwin-amd64,3
 2026-07-07,v1.4.0,auxly-darwin-arm64,4
-2026-07-07,v1.4.0,auxly-linux-amd64,18
+2026-07-07,v1.4.0,auxly-linux-amd64,19
 2026-07-07,v1.4.0,auxly-linux-arm64,4
 2026-07-07,v1.4.0,auxly-windows-amd64.exe,4
 2026-07-07,v1.4.0,auxly-windows-arm64.exe,3
