@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-07-08
+
+### Fixed
+
+- **`auxly host down` now actually stops serving.** It reported "stopped and
+  removed" but left the reverse-tunnel ssh processes alive, so the box kept
+  serving and the dashboard kept showing `● serving`. Root cause: the tunnel
+  reaper ran `pgrep -f "-R <port>:localhost:<port>"`, and pgrep parses the
+  leading `-R` as an unknown flag (exit 2) — so it matched nothing and killed
+  nothing. Fixed by passing the pattern after `--`. `host down` now terminates
+  every reverse tunnel (including orphans left by a prior config), so the TUI's
+  live probe correctly flips to `● tunnels down`.
+
+- **`auxly host` status no longer claims "serving" when it isn't.** The header
+  printed "serving N box(es)" whenever relays were configured, ignoring whether
+  the keep-alive was running. It now reads "configured for N box(es), NOT
+  serving (run `auxly host up`)" when the keep-alive is stopped.
+
 ## [1.4.2] - 2026-07-08
 
 ### Fixed

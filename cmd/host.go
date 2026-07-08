@@ -1125,9 +1125,16 @@ func runHostStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("machine's memory reachable from a remote box through a relay.")
 		return nil
 	}
-	fmt.Printf("🛰️  Auxly memory host — serving %d box(es)\n", len(relays))
-
+	// "serving" reflects whether the keep-alive is actually loaded, not just
+	// whether relays are configured — otherwise `auxly host down` (which leaves
+	// host.yaml intact but unloads the keep-alive) would still report "serving".
 	loaded, detail := keepAliveStatus()
+	if loaded {
+		fmt.Printf("🛰️  Auxly memory host — serving %d box(es)\n", len(relays))
+	} else {
+		fmt.Printf("🛰️  Auxly memory host — configured for %d box(es), NOT serving (run `auxly host up`)\n", len(relays))
+	}
+
 	if loaded {
 		fmt.Printf("   Keep-alive   : ✓ %s\n", detail)
 	} else {
@@ -1419,6 +1426,13 @@ func tunnelKillPatterns(relays []hostConfig) []string {
 // without this, `host down` on Windows leaves the supervisor + ssh.exe alive
 // while falsely reporting success). Best-effort: a missing tool or no match
 // degrades to an empty slice, never a false "terminated N".
+// pgrepMatchArgs is the flag prefix for `pgrep` before the pattern. The `--`
+// terminator is REQUIRED: our per-relay patterns start with "-R …", and
+// without `--` pgrep parses that as an unknown flag (exit 2, err set), so
+// findTunnelPIDs returned nothing and `host down` reaped no tunnels — leaving
+// orphaned reverse tunnels alive and the host stuck showing "serving".
+func pgrepMatchArgs() []string { return []string{"-f", "--"} }
+
 func findTunnelPIDs(patterns []string) []int {
 	var pids []int
 	for _, pat := range patterns {
@@ -1430,7 +1444,8 @@ func findTunnelPIDs(patterns []string) []int {
 			ps := fmt.Sprintf("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*%s*' } | Select-Object -ExpandProperty ProcessId", pat)
 			out, err = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps).Output()
 		} else {
-			out, err = exec.Command("pgrep", "-f", pat).Output()
+			pargs := append(pgrepMatchArgs(), pat)
+			out, err = exec.Command("pgrep", pargs...).Output()
 		}
 		if err != nil {
 			continue
