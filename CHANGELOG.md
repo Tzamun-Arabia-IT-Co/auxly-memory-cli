@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-08-01
+
+### Fixed
+
+- **Adding a new server no longer saves a relay it could never reach.** Setup
+  persisted the relay to `host.yaml` *before* checking anything, so every failed
+  add left an entry behind permanently — and the keep-alive then dialled that
+  dead relay forever (one user's `host-tunnel.log` had grown to 4.9 MB of
+  `Connection refused`). Setup now does a TCP reachability check on the relay's
+  SSH port first and saves nothing if it fails. The error names the port it
+  tried and how to supply a different one, because the usual cause is an sshd on
+  a non-default port being silently dialled on 22 forever.
+
+- **A first-time add that stops for SSH key setup now rolls itself back.** In
+  the dashboard's captured (non-interactive) run, a relay whose key isn't
+  installed yet stops with "passwordless SSH isn't set up" — but it had already
+  written the relay, handing the keep-alive a relay it could never authenticate
+  to. The entry is now removed again unless it was already there before the
+  attempt. Pressing `[p]` to enter the password re-adds it as before.
+
+- **The dashboard's `● serving` light now follows `auxly host up`/`down`.**
+  It was drawn from a bare process scan for `ssh … -R …:localhost:`, which is
+  blind to the keep-alive service — so after `auxly host down` the light stayed
+  green (the unloaded service's ssh children linger briefly as orphans), and any
+  unrelated reverse tunnel of the user's own turned it green too. Serving now
+  requires both the keep-alive service to be loaded *and* a tunnel to be
+  running, using the same check `auxly host` prints (new `internal/hostsvc`, so
+  the CLI and the TUI can no longer disagree). A host whose keep-alive is up but
+  whose relays aren't binding now says so, instead of advising `auxly host up`
+  when it is already running.
+
 ## [1.4.3] - 2026-07-08
 
 ### Fixed

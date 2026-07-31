@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/hostsvc"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
 	"github.com/spf13/cobra"
@@ -149,9 +150,9 @@ func writeRelayOffer(hc hostConfig) error {
 
 const (
 	defaultReversePort = 2222
-	launchdLabel       = "io.auxly.host"
-	systemdUnitName    = "auxly-host.service"
-	windowsTaskName    = "Auxly-Host"
+	launchdLabel       = hostsvc.LaunchdLabel
+	systemdUnitName    = hostsvc.SystemdUnitName
+	windowsTaskName    = hostsvc.WindowsTaskName
 )
 
 // hostConfig is persisted at ~/.auxly/host.yaml. It is NOT secret (no keys,
@@ -712,9 +713,21 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 	// useless without a local sshd to forward to.
 	checkLocalSSHD(hc.localPort())
 
-	// Persist before doing anything else so `tunnel`/`status` can read it. Upsert
-	// (not overwrite) so connecting this box keeps every previously-connected box's
-	// tunnel alive — the keep-alive supervises one tunnel per relay.
+	// Refuse to save a relay we cannot even open a TCP connection to. This runs
+	// BEFORE the upsert on purpose: a saved relay is picked up by the keep-alive
+	// supervisor forever, so persisting an unreachable one turned every failed
+	// "add a new server" into a permanent flapping tunnel (and megabytes of
+	// "Connection refused" in host-tunnel.log) that the user had no UI to remove.
+	// Nothing is written unless the relay answers.
+	if err := relaySSHReachable(host, port); err != nil {
+		return err
+	}
+
+	// Persist only now, before the key/provision work, so `tunnel`/`status` can
+	// read it. Upsert (not overwrite) so connecting this box keeps every
+	// previously-connected box's tunnel alive — the keep-alive supervises one
+	// tunnel per relay.
+	alreadyKnown := hostConfigExists(hc.Rendezvous)
 	if err := upsertHostConfig(hc); err != nil {
 		return err
 	}
@@ -729,6 +742,14 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 		// auth isn't already set up, stop with a token the TUI keys off to guide a
 		// one-time terminal run, rather than blocking.
 		if !sshKeyAuthOK(relayProfile) {
+			// Roll the relay back out of host.yaml unless it was already there
+			// before this run. The add did not complete, so leaving it behind
+			// would hand the keep-alive a relay it can never authenticate to.
+			// The TUI's [p] password retry re-runs setup with the same
+			// rendezvous, which simply re-adds it.
+			if !alreadyKnown {
+				_, _ = removeHostConfig(hc.Rendezvous)
+			}
 			fmt.Printf("⚠️  Passwordless SSH to the relay %s isn't set up yet.\n", relayTarget)
 			fmt.Println("   Run `auxly host setup` once in a terminal to install the key (it'll ask for the relay password).")
 			fmt.Println("AUXLY_KEY_REQUIRED")
@@ -826,6 +847,50 @@ func runHostProvision(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return firstErr
+}
+
+// relaySSHReachable checks that the relay actually answers on its SSH port
+// before we commit it to host.yaml. It is a plain TCP dial, NOT an auth check:
+// installing the key is the whole point of setup, so a relay that refuses
+// *credentials* is fine here — one that refuses the *connection* is not.
+//
+// The error text names the port it tried, because the common cause is an sshd
+// on a non-default port: the address is then accepted, saved, and dialled on
+// 22 forever with nothing but "Connection refused" to show for it.
+func relaySSHReachable(host string, port int) error {
+	if port == 0 {
+		port = defaultSSHPort
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), relayProbeTimeout)
+	if err != nil {
+		return fmt.Errorf("relay %s is not reachable on SSH port %d: %w\n"+
+			"   • if its sshd listens on another port, include it: user@%s:PORT\n"+
+			"   • otherwise check the box is up and its firewall allows you\n"+
+			"   Nothing was saved", host, port, err, host)
+	}
+	_ = conn.Close()
+	return nil
+}
+
+// relayProbeTimeout bounds the pre-save reachability dial. Short on purpose:
+// this runs in front of an interactive/TUI add, and a relay that needs longer
+// than this to accept a TCP connection is not one the keep-alive can hold.
+const relayProbeTimeout = 5 * time.Second
+
+// hostConfigExists reports whether a relay with this rendezvous is already
+// saved, so a failed add can roll back its own entry without deleting one the
+// user already had.
+func hostConfigExists(rendezvous string) bool {
+	relays, _, err := loadHostConfigs()
+	if err != nil {
+		return false
+	}
+	for _, r := range relays {
+		if strings.EqualFold(strings.TrimSpace(r.Rendezvous), strings.TrimSpace(rendezvous)) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkLocalSSHD warns if nothing is listening on this machine's sshd port.
@@ -1473,38 +1538,9 @@ func uninstallKeepAlive() error {
 }
 
 // keepAliveStatus reports whether the service is loaded and a human detail.
-func keepAliveStatus() (bool, string) {
-	switch runtime.GOOS {
-	case "darwin":
-		out, err := exec.Command("launchctl", "list", launchdLabel).CombinedOutput()
-		if err != nil {
-			return false, "not loaded (start with `auxly host up`)"
-		}
-		_ = out
-		return true, "loaded (launchd)"
-	case "linux":
-		out, err := exec.Command("systemctl", "--user", "is-active", systemdUnitName).CombinedOutput()
-		state := strings.TrimSpace(string(out))
-		if err != nil || state != "active" {
-			if state == "" {
-				state = "inactive"
-			}
-			return false, state + " (start with `auxly host up`)"
-		}
-		return true, "active (systemd --user)"
-	case "windows":
-		out, err := exec.Command("schtasks", "/Query", "/TN", windowsTaskName).CombinedOutput()
-		if err != nil {
-			return false, "not registered (start with `auxly host up`)"
-		}
-		if strings.Contains(string(out), "Running") {
-			return true, "running (Task Scheduler)"
-		}
-		return true, "registered (Task Scheduler)"
-	default:
-		return false, "unmanaged on this OS"
-	}
-}
+// The check itself lives in internal/hostsvc so the TUI's serving light reads
+// the SAME state this status line prints — see that package's doc comment.
+func keepAliveStatus() (bool, string) { return hostsvc.Loaded() }
 
 // --- macOS: launchd LaunchAgent ---
 

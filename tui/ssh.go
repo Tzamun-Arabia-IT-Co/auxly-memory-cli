@@ -15,6 +15,7 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/clipboard"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/hostsvc"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 )
 
@@ -289,7 +290,22 @@ type hostInfo struct {
 	ReversePort    int    `yaml:"reverse_port"`
 	HostUser       string `yaml:"host_user"`
 	RelayCount     int    `yaml:"-"` // number of relays served (1 unless multi-relay)
-	TunnelUp       bool   `yaml:"-"` // a reverse-tunnel process is actually running
+	TunnelUp       bool   `yaml:"-"` // serving: keep-alive loaded AND a tunnel process running
+	KeepAlive      bool   `yaml:"-"` // the `auxly host up`/`down` service is loaded
+}
+
+// hostServing reports whether this machine is REALLY serving memory right now.
+//
+// Both halves are required. The keep-alive service is what `auxly host up` and
+// `auxly host down` toggle, so it is the user's intent; the tunnel process is
+// the reality. Checking only the process — which is what this did before —
+// meant `auxly host down` left the light green: the unloaded service's ssh
+// children linger for a moment as orphans, and an unrelated `ssh -R` of the
+// user's own matched the scan forever. Checking only the service would go
+// green while every relay was actually failing to bind.
+func hostServing() (serving, keepAlive bool) {
+	loaded, _ := hostsvc.Loaded()
+	return loaded && hostTunnelsLive(), loaded
 }
 
 // hostTunnelsLive (defined per-OS in ssh_tunnels_unix.go / ssh_tunnels_windows.go)
@@ -357,7 +373,7 @@ func readHostInfo() (hostInfo, bool) {
 	if yaml.Unmarshal(data, &list) == nil && len(list.Relays) > 0 {
 		h := list.Relays[0]
 		h.RelayCount = len(list.Relays)
-		h.TunnelUp = hostTunnelsLive()
+		h.TunnelUp, h.KeepAlive = hostServing()
 		return h, true
 	}
 	// Legacy single-relay form.
@@ -366,7 +382,7 @@ func readHostInfo() (hostInfo, bool) {
 		return hostInfo{}, false
 	}
 	h.RelayCount = 1
-	h.TunnelUp = hostTunnelsLive()
+	h.TunnelUp, h.KeepAlive = hostServing()
 	return h, true
 }
 
@@ -1829,7 +1845,15 @@ func (m sshModel) View() string {
 			lines = append(lines, "  "+dim.Render("Relay   ")+relay+dim.Render(fmt.Sprintf("   reverse port %d → local :22", m.host.ReversePort)))
 		}
 		if !m.host.TunnelUp {
-			lines = append(lines, "  "+warn.Render("⚠ no reverse tunnel running")+dim.Render(" — boxes can't reach your memory. Start it with ")+accent.Render("auxly host up"))
+			// Two very different failures. Service stopped is what `auxly host
+			// down` does — telling the user to run `host up` is the right advice.
+			// Service loaded but nothing bound means a relay is refusing the
+			// forward, and `host up` would be useless advice there.
+			if !m.host.KeepAlive {
+				lines = append(lines, "  "+warn.Render("⚠ host is down")+dim.Render(" — boxes can't reach your memory. Start it with ")+accent.Render("auxly host up"))
+			} else {
+				lines = append(lines, "  "+warn.Render("⚠ keep-alive is running but no relay tunnel is bound")+dim.Render(" — see ")+accent.Render("auxly host")+dim.Render(" for the failing relay"))
+			}
 		}
 		lines = append(lines, "  "+dim.Render("Boxes below use your memory through it.  Down it with ")+accent.Render("auxly host down"))
 		lines = append(lines, "")
