@@ -36,6 +36,10 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	fmt.Print(dim + "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" + reset + "\r\n")
 	fmt.Print("🔍 Checking for local repository or remote updates...\r\n\r\n")
 
+	// Path the new binary actually landed on, so the shadowed-install check below
+	// can compare it against whatever `auxly` resolves to on PATH.
+	updatedBin := ""
+
 	// Check if we are inside a Git repository (Dev Mode)
 	isGit := false
 	wd, err := os.Getwd()
@@ -153,6 +157,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			_ = exec.Command("codesign", "--force", "--sign", "-", targetBin).Run()
 		}
 
+		updatedBin = targetBin
 		fmt.Print("🎉 " + bold + green + "SUCCESS! Auxly has been rebuilt and updated successfully!" + reset + "\r\n")
 		fmt.Printf("   ↳ Global path: %s\r\n", targetBin)
 		fmt.Printf("   ↳ Active version: dev-latest\r\n\r\n")
@@ -180,6 +185,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			fmt.Printf("   You can also run: %s\r\n\r\n", update.InstallerCommand())
 			return err
 		}
+		updatedBin = path
 		fmt.Print("🎉 " + bold + green + "Updated to the latest release!" + reset + "\r\n")
 		fmt.Printf("   ↳ Path: %s\r\n", path)
 		if out, verr := exec.Command(path, "--version").CombinedOutput(); verr == nil {
@@ -194,5 +200,67 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		fmt.Printf("📂 Added new memory files: %s\r\n\r\n", strings.Join(created, ", "))
 	}
 
+	warnIfShadowedInstall(updatedBin)
+
 	return nil
+}
+
+// warnIfShadowedInstall reports the case where the update landed on one binary
+// but the shell would run a DIFFERENT, older auxly. Updating the running
+// executable is correct, yet a leftover copy earlier in PATH then wins every
+// time the user types `auxly` — so the update looks like it silently did
+// nothing, and a fixed bug looks unfixed. (Seen in the wild: the TUI launched
+// from ~/.bun/bin/auxly at the new version while a typed `auxly host down`
+// still hit a stale ~/.local/bin/auxly.) Best-effort and never fatal — the
+// update itself already succeeded.
+func warnIfShadowedInstall(updated string) {
+	if updated == "" {
+		return
+	}
+	shell, err := exec.LookPath("auxly")
+	if err != nil {
+		return // nothing on PATH to shadow it
+	}
+	if sameBinary(shell, updated) {
+		return // the shell runs exactly what we just updated
+	}
+	bold := "\033[1m"
+	warn := "\033[38;5;214m"
+	dim := "\033[38;5;240m"
+	reset := "\033[0m"
+	fmt.Printf("%s%s⚠️  A DIFFERENT auxly is first on your PATH — your shell will keep running the old one:%s\r\n", bold, warn, reset)
+	fmt.Printf("   updated : %s\r\n", updated)
+	shellVer := "unknown version"
+	if out, verr := exec.Command(shell, "--version").CombinedOutput(); verr == nil {
+		shellVer = strings.TrimSpace(firstLine(string(out)))
+	}
+	fmt.Printf("   `auxly` : %s  %s(%s)%s\r\n", shell, dim, shellVer, reset)
+	fmt.Printf("   %sFix: delete the stale copy, or re-run this update as `%s update`.%s\r\n\r\n", dim, shell, reset)
+}
+
+// sameBinary reports whether two paths resolve to the same file, so a symlinked
+// install (e.g. a Homebrew shim pointing into the Caskroom) is not mistaken for
+// a competing copy.
+func sameBinary(a, b string) bool {
+	ra, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		ra = a
+	}
+	rb, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		rb = b
+	}
+	if ra == rb {
+		return true
+	}
+	// Different paths can still be the same file (hard link, bind mount).
+	fa, err := os.Stat(ra)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(rb)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fa, fb)
 }

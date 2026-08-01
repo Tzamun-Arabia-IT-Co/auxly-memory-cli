@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.5] - 2026-08-01
+
+### Fixed
+
+- **`auxly update` now warns when a different auxly on your PATH will keep
+  winning.** Update correctly replaces the *running* binary, but a leftover copy
+  earlier in PATH then shadows it — so every `auxly …` you type still runs the
+  old version, the update looks like it did nothing, and an already-fixed bug
+  looks unfixed. Reported in the wild: a dashboard launched from
+  `~/.bun/bin/auxly` at the new version while a typed `auxly host down` still hit
+  a stale `~/.local/bin/auxly`. Update now compares what it wrote against what
+  `auxly` resolves to and, when they differ, prints both paths, the shadowing
+  binary's version, and how to fix it. Symlinked and hard-linked installs (a
+  Homebrew shim into the Caskroom) are correctly treated as one binary, not a
+  shadow.
+
 ## [1.4.4] - 2026-08-01
 
 ### Fixed
