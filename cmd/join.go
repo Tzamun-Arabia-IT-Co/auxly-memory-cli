@@ -32,6 +32,8 @@ import (
 var (
 	joinName string
 	joinUser string
+	joinHost string
+	joinPort int
 )
 
 var joinCmd = &cobra.Command{
@@ -54,6 +56,8 @@ login "ssh <host>" would use) before join can succeed.`,
 func init() {
 	joinCmd.Flags().StringVar(&joinName, "name", "", "profile name for the host (default: the host's address)")
 	joinCmd.Flags().StringVar(&joinUser, "user", "", "SSH login on the host (default: your normal SSH default)")
+	joinCmd.Flags().StringVar(&joinHost, "host", "", "override host/IP address the joiner should connect to")
+	joinCmd.Flags().IntVar(&joinPort, "port", 0, "override host SSH port")
 	rootCmd.AddCommand(joinCmd)
 }
 
@@ -61,6 +65,12 @@ func runJoin(cmd *cobra.Command, args []string) error {
 	tok, err := invite.Decode(args[0])
 	if err != nil {
 		return fmt.Errorf("that doesn't look like an auxly invite token: %w", err)
+	}
+	if h := strings.TrimSpace(joinHost); h != "" {
+		tok.Host = h
+	}
+	if joinPort > 0 {
+		tok.Port = joinPort
 	}
 	if err := validateInviteToken(tok); err != nil {
 		return err
@@ -121,7 +131,8 @@ func runJoin(cmd *cobra.Command, args []string) error {
 	// inject shell syntax. validateInviteToken (above) also defensively
 	// rejects a Secret/Host outside their expected charset before we ever get
 	// here — belt and suspenders.
-	consumeArgv, aerr := buildConsumeArgv(hostAuxlyBin(p), tok, clientName)
+	fam, _, _ := detectRemoteOS(consumeProfile)
+	consumeArgv, aerr := buildConsumeArgv(hostAuxlyBin(p), tok, clientName, fam)
 	if aerr != nil {
 		return aerr
 	}
@@ -185,15 +196,25 @@ func validateInviteToken(tok invite.Token) error {
 }
 
 // buildConsumeArgv is the pure command-construction path for the SSH exec
-// that carries tok.Secret: every dynamic field is shellQuote'd into its own
-// single-quoted token before assembly (remoteShellArgv's POSIX branch), so
+// that carries tok.Secret: every dynamic field is shellQuote'd/psQuote'd into its own
+// literal argument before assembly (POSIX or PowerShell), so
 // OpenSSH's remote-shell join can never see Secret/client as anything but
 // inert literal text — never shell syntax, no matter what characters they
 // contain.
-func buildConsumeArgv(hostBin string, tok invite.Token, client string) ([]string, error) {
+func buildConsumeArgv(hostBin string, tok invite.Token, client string, fam ...remoteOS) ([]string, error) {
+	osFamily := classifyOS("")
+	if len(fam) > 0 && fam[0] != osUnknown {
+		osFamily = fam[0]
+	}
 	posix := hostBin + " host consume " + shellQuote(tok.Secret) +
 		" --client " + shellQuote(client) + " --hostname " + shellQuote(client)
-	return remoteShellArgv(classifyOS(""), posix, "")
+	powershell := `& "` + hostBin + `" host consume ` + psQuote(tok.Secret) +
+		` --client ` + psQuote(client) + ` --hostname ` + psQuote(client)
+	if !strings.Contains(hostBin, "/") && !strings.Contains(hostBin, `\`) && !strings.Contains(hostBin, "%") {
+		powershell = hostBin + ` host consume ` + psQuote(tok.Secret) +
+			` --client ` + psQuote(client) + ` --hostname ` + psQuote(client)
+	}
+	return remoteShellArgv(osFamily, posix, powershell)
 }
 
 // joinCompletionMessage renders the final join outcome. The invite is
@@ -237,6 +258,9 @@ func joinPreflight(tok invite.Token, now time.Time, probe func(host string, port
 	}
 	fp, err := probe(tok.Host, tok.Port)
 	if err != nil {
+		if strings.HasSuffix(tok.Host, ".local") {
+			return fmt.Errorf("could not verify %s:%d's SSH identity (%w) — '%s' is a .local hostname unresolvable across some networks/Windows. Try `auxly join <token> --host <ip>` or mint on the host with `auxly host invite --host <ip>`", tok.Host, tok.Port, err, tok.Host)
+		}
 		return fmt.Errorf("could not verify %s:%d's SSH identity (%w) — this looks like a connectivity problem, not necessarily a bad invite", tok.Host, tok.Port, err)
 	}
 	if fp != tok.Fingerprint {

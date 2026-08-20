@@ -14,7 +14,8 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/vaultcrypt"
 )
 
-func TestResolveHeadlessAgent_EmptyMeansDirectLLM(t *testing.T) {
+func TestResolveHeadlessAgent_EmptyWithEnvMeansDirectLLM(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
 	name, path, err := resolveHeadlessAgent("")
 	if err != nil || name != "" || path != "" {
 		t.Fatalf("resolveHeadlessAgent(\"\") = (%q, %q, %v), want empty/no error", name, path, err)
@@ -57,7 +58,7 @@ func TestRunOrganizeDecryptTemporarily_NonTTYWithoutYesRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = runOrganizeDecryptTemporarily(store, "Claude Code / CLI", "/bin/echo", []string{"personal.md"})
+	err = runOrganizeDecryptTemporarily(store, "Claude Code / CLI", "/bin/echo", []string{"personal.md"}, memory.OrganizeRunOpts{})
 	if err == nil {
 		t.Fatal("expected a refusal without --yes on non-interactive stdin")
 	}
@@ -101,7 +102,7 @@ func TestRunOrganizeDecryptTemporarily_YesFlagRunsAndRestores(t *testing.T) {
 	// /bin/echo stands in for the CLI agent: it just echoes its args, so the
 	// organize model call fails to parse as JSON — that's fine, this test is
 	// only checking the decrypt/restore bracket, not a real organize result.
-	_ = runOrganizeDecryptTemporarily(store, "Claude Code / CLI", "/bin/echo", []string{"personal.md"})
+	_ = runOrganizeDecryptTemporarily(store, "Claude Code / CLI", "/bin/echo", []string{"personal.md"}, memory.OrganizeRunOpts{})
 
 	raw, err := os.ReadFile(filepath.Join(memPath, "personal.md"))
 	if err != nil {

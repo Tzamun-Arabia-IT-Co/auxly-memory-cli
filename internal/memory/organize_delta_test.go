@@ -314,3 +314,67 @@ func TestDeltaMode_NoFallbackOnNonParseFailure(t *testing.T) {
 		t.Fatalf("original failure message must be preserved, got %q", res.Message)
 	}
 }
+
+func TestDeltaOps_FindLine_MatchesUnprefixedAndNormalizedBullets(t *testing.T) {
+	root := t.TempDir()
+	s := &Store{Root: root}
+	content := "- User prefers dark theme\n- Server IP is 192.168.1.50\n"
+	writeVaultFile(t, root, "preferences.md", content)
+	writeVaultFile(t, root, "infra.md", "")
+
+	exec := func(ctx context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
+		// Bullet is emitted without the leading "- " prefix and with slight whitespace
+		resp := deltaResp(
+			deltaOp{Op: "move", File: "preferences.md", Bullet: "Server IP is 192.168.1.50", ToFile: "infra.md"},
+			deltaOp{Op: "merge", File: "preferences.md", Bullet: "  User prefers dark theme  ", MergedText: "- User strongly prefers dark theme"},
+		)
+		return organizeRun{jsonContent: resp, modelUsed: "fake", tokensUsed: 10}, OrganizeResult{}, true
+	}
+
+	prop, res := s.planOrganizeOpts(context.Background(), "", false, OrganizeRunOpts{DeltaMode: true}, exec)
+	if !res.Success {
+		t.Fatalf("delta plan failed: %s", res.Message)
+	}
+
+	byName := map[string]ProposedChange{}
+	for _, c := range prop.Changes {
+		byName[c.Name] = c
+	}
+	if strings.Contains(byName["preferences.md"].NewContent, "192.168.1.50") {
+		t.Fatalf("moved fact still present in preferences: %q", byName["preferences.md"].NewContent)
+	}
+	if !strings.Contains(byName["infra.md"].NewContent, "192.168.1.50") {
+		t.Fatalf("moved fact missing from infra.md: %q", byName["infra.md"].NewContent)
+	}
+	if !strings.Contains(byName["preferences.md"].NewContent, "strongly prefers dark theme") {
+		t.Fatalf("merged fact missing from preferences.md: %q", byName["preferences.md"].NewContent)
+	}
+}
+
+func TestExtractJSON_StripsThinkBlocks(t *testing.T) {
+	raw := "<think>\nI should review the files.\n{ \"inner_fake_json\": true }\n</think>\n```json\n{\n  \"ops\": [\n    { \"op\": \"move\", \"file\": \"preferences.md\", \"bullet\": \"- test\", \"toFile\": \"infra.md\" }\n  ]\n}\n```\n"
+	got := extractJSON(raw)
+	if !strings.Contains(got, `"ops"`) || strings.Contains(got, "inner_fake_json") {
+		t.Fatalf("extractJSON failed to strip think blocks: %q", got)
+	}
+}
+
+func TestNormalizeOrganizeChatURL(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"https://api.openai.com", "https://api.openai.com/v1/chat/completions"},
+		{"https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions"},
+		{"https://generativelanguage.googleapis.com/v1beta/openai", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"},
+		{"http://localhost:11434", "http://localhost:11434/v1/chat/completions"},
+		{"http://localhost:11434/v1", "http://localhost:11434/v1/chat/completions"},
+		{"http://localhost:8000/v1/chat/completions", "http://localhost:8000/v1/chat/completions"},
+	}
+
+	for _, tc := range cases {
+		if got := normalizeOrganizeChatURL(tc.input); got != tc.want {
+			t.Errorf("normalizeOrganizeChatURL(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}

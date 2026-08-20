@@ -112,13 +112,42 @@ func (s *Store) applyDeltaOps(files []organizeFile, ops []deltaOp) (changes []Pr
 		lines[f.Name] = strings.Split(f.Content, "\n")
 	}
 
-	// findLine returns the index of the line in lines[file] whose TRIMMED
-	// text exactly equals want, or -1. Exact match only — see SAFETY above.
+	trimBullet := func(s string) string {
+		s = strings.TrimSpace(s)
+		s = strings.TrimPrefix(s, "- ")
+		s = strings.TrimPrefix(s, "* ")
+		return strings.TrimSpace(s)
+	}
+
+	// findLine returns the index of the line in lines[file] matching want, or -1.
+	// Matches verbatim first, then stripped of bullet marker, then normalized.
 	findLine := func(file, want string) int {
 		want = strings.TrimSpace(want)
+		if want == "" {
+			return -1
+		}
+		// 1. Exact trimmed match
 		for i, l := range lines[file] {
 			if strings.TrimSpace(l) == want {
 				return i
+			}
+		}
+		// 2. Trimmed of "- " or "* " prefix
+		wantTrimmed := trimBullet(want)
+		if wantTrimmed != "" {
+			for i, l := range lines[file] {
+				if trimBullet(l) == wantTrimmed {
+					return i
+				}
+			}
+		}
+		// 3. Normalized comparison (whitespace runs + case insensitive)
+		wantNorm := normalizeFact(want)
+		if wantNorm != "" {
+			for i, l := range lines[file] {
+				if normalizeFact(l) == wantNorm {
+					return i
+				}
 			}
 		}
 		return -1
@@ -163,8 +192,9 @@ func (s *Store) applyDeltaOps(files []organizeFile, ops []deltaOp) (changes []Pr
 				dropped = append(dropped, fmt.Sprintf("move op has an invalid target %q — dropped, bullet kept in %s", op.ToFile, op.File))
 				continue
 			}
+			factText := lines[op.File][idx]
 			removeLine(op.File, idx)
-			appends = append(appends, pendingAppend{to: op.ToFile, from: op.File, fact: ensureBullet(op.Bullet)})
+			appends = append(appends, pendingAppend{to: op.ToFile, from: op.File, fact: ensureBullet(factText)})
 		case "merge":
 			idx := findLine(op.File, op.Bullet)
 			if idx == -1 {

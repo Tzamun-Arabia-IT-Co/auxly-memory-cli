@@ -16,6 +16,8 @@ func TestClassifySelftestFailure(t *testing.T) {
 	}{
 		{name: "ssh transport no json", exitCode: 255, isExit: true, sawJSON: false, phase: "handshake", want: "ssh"},
 		{name: "missing host binary no json", exitCode: 127, isExit: true, sawJSON: false, phase: "handshake", want: "hostbin"},
+		{name: "windows missing host binary no json (exit 1)", exitCode: 1, isExit: true, sawJSON: false, phase: "handshake", want: "hostbin"},
+		{name: "windows missing host binary no json (exit 9009)", exitCode: 9009, isExit: true, sawJSON: false, phase: "handshake", want: "hostbin"},
 		{name: "ran but no handshake", exitCode: 1, isExit: true, sawJSON: true, phase: "handshake", want: "server"},
 		{name: "read failure after handshake", exitCode: 1, isExit: true, sawJSON: true, phase: "read", want: "read"},
 	}

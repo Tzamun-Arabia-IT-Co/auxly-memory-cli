@@ -614,7 +614,12 @@ func (s *Store) GetEstimatedTokens() int {
 
 // OrganizeVault executes a smart LLM consolidation batch across all memory files.
 func (s *Store) OrganizeVault() OrganizeResult {
-	return s.OrganizeVaultWithAgent("Direct LLM", "", false)
+	return s.OrganizeVaultOpts(OrganizeRunOpts{})
+}
+
+// OrganizeVaultOpts executes organize with explicit options (e.g. ForceAll).
+func (s *Store) OrganizeVaultOpts(opts OrganizeRunOpts) OrganizeResult {
+	return s.OrganizeVaultWithAgentOpts("Direct LLM", "", false, opts)
 }
 
 // organizeRun is the raw model output of one consolidation run, before it is
@@ -1104,7 +1109,12 @@ func (s *Store) PlanOrganizeWithAgentOpts(ctx context.Context, agentName, agentP
 }
 
 func (s *Store) OrganizeVaultWithAgent(agentName, agentPath string, skipEncrypted bool) OrganizeResult {
-	prop, res := s.PlanOrganizeWithAgent(context.Background(), agentName, agentPath, "", skipEncrypted)
+	return s.OrganizeVaultWithAgentOpts(agentName, agentPath, skipEncrypted, OrganizeRunOpts{})
+}
+
+// OrganizeVaultWithAgentOpts executes organize via a CLI agent with explicit options (e.g. ForceAll).
+func (s *Store) OrganizeVaultWithAgentOpts(agentName, agentPath string, skipEncrypted bool, opts OrganizeRunOpts) OrganizeResult {
+	prop, res := s.PlanOrganizeWithAgentOpts(context.Background(), agentName, agentPath, "", skipEncrypted, opts)
 	if !res.Success {
 		return res
 	}
@@ -1116,7 +1126,13 @@ func (s *Store) OrganizeVaultWithAgent(agentName, agentPath string, skipEncrypte
 	}
 	diff := s.ApplyOrganizeChanges(prop.Changes)
 	msg := fmt.Sprintf("✓ Memory vault organized successfully using %s!", prop.ModelUsed)
-	if len(prop.SkippedEncrypted) > 0 {
+	if strings.TrimSpace(diff) == "" {
+		if strings.TrimSpace(res.Message) != "" {
+			msg = res.Message
+		} else {
+			msg = "Already well-organized — your synced facts are in place, nothing to merge or dedupe."
+		}
+	} else if len(prop.SkippedEncrypted) > 0 {
 		msg += fmt.Sprintf(" (%d encrypted file(s) skipped: %s)", len(prop.SkippedEncrypted), strings.Join(prop.SkippedEncrypted, ", "))
 	}
 	return OrganizeResult{Success: true, Message: msg, Diff: diff, TokensUsed: prop.TokensUsed, Warning: prop.Warning}
@@ -1138,13 +1154,24 @@ func blockOnFactLoss(prop OrganizeProposal) (bool, OrganizeResult) {
 	}
 }
 
-// extractJSON isolates the JSON object from any markdown code fences or surrounding
-// prose/log noise an agent CLI may print. It first unwraps a ```json fence, then
-// returns the FIRST balanced top-level object via a string-aware brace scan, so
-// trailing prose — even prose that itself contains braces (e.g. "Let me know if
-// {…}") — is dropped instead of being concatenated onto the payload. Falls back to
-// the first/last brace span when no balanced object is found.
+// extractJSON isolates the JSON object from any markdown code fences, reasoning/think
+// blocks, or surrounding prose/log noise an agent CLI or model may print. It strips
+// <think> blocks, unwraps ```json fences, and returns the first balanced JSON object.
 func extractJSON(input string) string {
+	// Strip reasoning blocks (<think>...</think>) from modern thinking models
+	for {
+		startThink := strings.Index(input, "<think>")
+		if startThink == -1 {
+			break
+		}
+		endThink := strings.Index(input, "</think>")
+		if endThink == -1 {
+			input = input[startThink+7:]
+			break
+		}
+		input = input[:startThink] + input[endThink+8:]
+	}
+
 	if startIdx := strings.Index(input, "```json"); startIdx != -1 {
 		rest := input[startIdx+7:]
 		if endIdx := strings.Index(rest, "```"); endIdx != -1 {
@@ -1157,7 +1184,9 @@ func extractJSON(input string) string {
 		}
 	}
 	if obj := firstBalancedObject(input); obj != "" {
-		return obj
+		if json.Valid([]byte(obj)) {
+			return obj
+		}
 	}
 	firstBrace := strings.Index(input, "{")
 	lastBrace := strings.LastIndex(input, "}")
@@ -1280,7 +1309,11 @@ func isJSONStringCloser(s string, j int) bool {
 func normalizeOrganizeChatURL(endpoint string) string {
 	apiURL := strings.TrimRight(endpoint, "/")
 	if !strings.HasSuffix(apiURL, "/v1/chat/completions") && !strings.HasSuffix(apiURL, "/chat/completions") {
-		apiURL = apiURL + "/v1/chat/completions"
+		if strings.HasSuffix(apiURL, "/v1") || strings.HasSuffix(apiURL, "/openai") {
+			apiURL = apiURL + "/chat/completions"
+		} else {
+			apiURL = apiURL + "/v1/chat/completions"
+		}
 	}
 	return apiURL
 }
@@ -1413,7 +1446,7 @@ func (s *Store) PlanOrganizeWithProviderOpts(ctx context.Context, provider, cust
 		return OrganizeProposal{}, res
 	}
 	return s.planOrganizeOpts(ctx, "", false, opts, func(c context.Context, sys, user string) (organizeRun, OrganizeResult, bool) {
-		return s.runOrganizeChat(c, strings.TrimRight(baseURL, "/")+"/v1/chat/completions", model, apiKey, sys, user)
+		return s.runOrganizeChat(c, normalizeOrganizeChatURL(baseURL), model, apiKey, sys, user)
 	})
 }
 

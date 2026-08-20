@@ -11,6 +11,7 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/clipboard"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/invite"
 	"github.com/spf13/cobra"
 )
@@ -112,7 +113,11 @@ func runHostInvite(cmd *cobra.Command, args []string) error {
 
 	host := strings.TrimSpace(hostInviteHost)
 	if host == "" {
-		host = localHostname()
+		if ip := detect.LocalIP(); ip != "" && ip != "127.0.0.1" {
+			host = ip
+		} else {
+			host = localHostname()
+		}
 	}
 	port := hostInvitePort
 	if port == 0 {

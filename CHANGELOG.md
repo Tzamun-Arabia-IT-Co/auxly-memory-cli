@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.6] - 2026-08-21
+
+### Fixed
+
+- **Cross-platform `host invite` & `join` now pair via reachable LAN IP.** Minting an
+  invite token via `auxly host invite` (or TUI Remote `[I]`) previously defaulted
+  to `os.Hostname()` (`*.local` on macOS), which Windows and remote Linux machines
+  cannot resolve over standard DNS — causing `auxly join` to fail during SSH host-key
+  verification (`ssh-keyscan: exit status 1`). Invites now automatically detect and
+  embed the host's active non-loopback LAN IPv4 address (`detect.LocalIP()`).
+- **Added `--host` and `--port` override flags to `auxly join`.** Joiners can now
+  pass `--host <ip/hostname>` and `--port <port>` to override the embedded address
+  in existing tokens if network routing requires custom endpoints or VPN addresses.
+- **On-demand Memory Organize always consolidates and shows diffs.** Starting an
+  organize run from the TUI (Tab 5 `Memory Org`) or CLI (`auxly organize`) now always
+  processes all memory files (`ForceAll: true`) upon selection, immediately presenting
+  the before/after Diff Review screen rather than being bypassed by the clean-file ledger.
+- **Thinking model support & resilient delta matching in Organize.** `extractJSON`
+  now cleanly strips `<think>...</think>` reasoning blocks emitted by modern thinking
+  models before parsing. Bullet matching in `internal/memory/organize_delta.go` now
+  supports trimmed prefix and whitespace normalization so valid move/merge operations
+  are never dropped.
+
 ## [1.4.5] - 2026-08-01
 
 ### Fixed

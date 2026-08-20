@@ -293,7 +293,7 @@ func IsOrganizableFile(file string) bool {
 func OrganizableFiles() []string {
 	var out []string
 	for _, c := range Taxonomy {
-		if c.Slug != "agents" {
+		if c.Slug != "agents" && c.Slug != "tasks" {
 			out = append(out, c.File)
 		}
 	}

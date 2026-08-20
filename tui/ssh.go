@@ -961,10 +961,16 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 	case sshModeResult:
 		if m.twoWayFailed && m.twoWayHost != "" {
 			switch msg.String() {
+			case "u", "U":
+				host := m.twoWayHost
+				m.twoWayFailed = false
+				m.twoWayHost = ""
+				return m.beginCaptured("Wiring this machine to use "+host+"'s memory", "use", host)
 			case "h", "H":
 				// Relay tunnel — the real fix for a NAT'd host. Suspends the TUI to
 				// run the interactive `auxly host setup` (asks for the relay).
 				m.twoWayFailed = false
+				m.twoWayHost = ""
 				return m, runHost("setup")
 			case "m", "M":
 				// Re-open the method picker for this host, keeping it as the host.
@@ -981,6 +987,7 @@ func (m sshModel) handleKey(msg tea.KeyMsg) (sshModel, tea.Cmd) {
 					}
 				}
 				m.twoWayFailed = false
+				m.twoWayHost = ""
 				m.mode = sshModeForm
 				m.formStep = formStepMethod
 				m.editingHost = true
@@ -2146,6 +2153,7 @@ func (m sshModel) View() string {
 		lines = append(lines, "")
 		switch {
 		case m.twoWayFailed && m.twoWayHost != "":
+			lines = append(lines, accent.Render("[u]")+dim.Render(" use this host's memory from this machine (client mode)"))
 			lines = append(lines, accent.Render("[h]")+dim.Render(" set up the relay tunnel on this machine (recommended for a NAT'd host)"))
 			lines = append(lines, accent.Render("[m]")+dim.Render(" try a different connection method   ·   any other key: close"))
 		case m.progressNeeded && len(m.pendingKeyArgs) > 0:

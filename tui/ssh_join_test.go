@@ -106,3 +106,27 @@ func TestJoinCompletionSuccessAndFailure(t *testing.T) {
 		t.Fatalf("progressOut = %v, want the partial-success wording (not a generic failure)", m2.progressOut)
 	}
 }
+
+func TestTwoWayFailedOffersUse(t *testing.T) {
+	m := sshModel{
+		mode:         sshModeResult,
+		twoWayFailed: true,
+		twoWayHost:   "myremote",
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "[u]") || !strings.Contains(view, "client mode") {
+		t.Fatalf("view = %q, expected to offer [u] client mode when two-way check fails", view)
+	}
+
+	m, cmd := m.Update(keyRunes("u"))
+	if m.mode != sshModeProgress {
+		t.Fatalf("mode after pressing [u] = %q, want %q", m.mode, sshModeProgress)
+	}
+	if !strings.Contains(m.progressTitle, "myremote") {
+		t.Fatalf("progressTitle = %q, want it to mention myremote", m.progressTitle)
+	}
+	if cmd == nil {
+		t.Fatal("pressing [u] should return a non-nil command to drive the captured run")
+	}
+}

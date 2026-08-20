@@ -319,7 +319,7 @@ func classifySelftestFailure(exitCode int, isExit bool, sawJSON bool, phase stri
 		switch exitCode {
 		case 255:
 			return "ssh"
-		case 127:
+		case 127, 9009, 1:
 			return "hostbin"
 		}
 	}

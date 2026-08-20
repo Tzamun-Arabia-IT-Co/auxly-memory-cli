@@ -25,20 +25,15 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.3.0
+## 🆕 What's New in Version 1.4.6
 
-**A major security and usability milestone** — vault encryption at rest, one-command SSH pairing, real-time recall playgrounds, fact decay & review, and contradiction sweeps.
+- **🌐 Cross-Platform LAN Pairing (`auxly host invite` & `auxly join`).** Invites now automatically detect and embed the host's reachable LAN IP (`detect.LocalIP()`) instead of `.local` mDNS hostnames, ensuring seamless pairing with Windows and Linux clients. Added `--host` and `--port` override flags to `auxly join`.
+- **🧠 Interactive On-Demand Memory Organize.** Starting an organize run from the TUI (Tab 5 `Memory Org`) or CLI (`auxly organize`) now always evaluates all memory files and transitions directly to the Diff Review screen.
+- **⚡ Thinking Model & Delta Matching Support.** Strips `<think>` blocks cleanly from reasoning models and improves bullet matching so valid facts are never dropped during reorganization.
+- **📝 Quick Notes (`auxly note`) & Shared Todos (`auxly todo`).** Capture fleeting thoughts directly into `inbox.md` and manage shared cross-agent tasks in `tasks.md`.
+- **🔍 PATH Shadow Warning.** `auxly update` alerts you if a competing binary earlier in your shell `$PATH` shadows the newly installed version.
 
-- **🔒 Vault encryption at rest.** Run `auxly encrypt init` to secure memory files via `age` X25519 encryption, storing keys in the macOS Keychain or `0600` file fallback outside the vault. It operates fail-closed, prunes index plaintext, and allows safe git syncing of ciphertext.
-- **🔑 One-command pairing.** Mints secure, single-use invitation tokens via `auxly host invite` (TUI `[i]`), which consumer machines join atomically using `auxly join <token>` over safe host-key-pinned SSH connections.
-- **🎮 Recall playground.** Hit `?` in the TUI Memory tab to test queries against the real recall pipeline with live score bars, relevance floor indicators, and provider lenses showing exactly what connected ACLs permit.
-- **⏳ Fact decay & review.** Keep your vault clean. `auxly review` and TUI Review (`-`) identify stale, recall-silent facts using a first-seen ledger, allowing you to archive them to `.archive/` (never deleted) or restamp them.
-- **🧹 Contradiction sweep.** `auxly organize --contradictions` spots cross-file similar facts using embeddings, resolves duplicates/clashes via a single LLM call, and queues them for pending review with dated traces.
-- **📈 Trust auto-tuning.** Suggests promotions (to `auto`) or demotions (to `read_only`) for agents automatically as approval evidence accumulates.
-- **🗂️ Memory browser.** Browse and edit your full memory vault directly inside the TUI's Memory tab ('=' key), with all changes flowing through the pending queue for security.
-- **📊 Dashboard & approvals upgrades.** Richer live activity feeds, sparklines, write bars, colorized diffs, TTL badges, and batch approvals by agent or file with conflict-skip capability.
-
-Looking for **1.2.0** (per-project memory, remote keep-alive, auto-capture), **Semantic Recall** from 1.1.0, or past Windows fixes? See the [CHANGELOG](CHANGELOG.md) for the full history.
+Looking for past release details? See the [CHANGELOG](CHANGELOG.md) for the full history.
 
 ---
 
@@ -609,7 +604,7 @@ auxly host down        # stop serving
 Pairing a consumer machine with a memory host is as simple as generating an invite token on the host and joining from the client. Note that the joiner must already have SSH login access to the host; the invite authorizes the Auxly memory pairing, not OS-level user access.
 
 1. On the **host**, run `auxly host invite` (or press `i` in the TUI's Remote tab). This mints a secure, single-use token pinned to the host's SSH public key, complete with a configurable time-to-live (TTL). You can manage invites with `auxly host invite --list` and `auxly host invite --revoke`.
-2. On the **consumer**, run `auxly join <token>`.
+2. On the **consumer**, run `auxly join <token>` (or `auxly join <token> --host <ip>` if connecting across custom network topologies or VPNs).
 
 The join command connects to the host, verifies the host key pin directly on the connection carrying the secret (utilizing temporary `known_hosts` and `StrictHostKeyChecking=yes` for injection safety), provisions the consumer via the existing self-test path, and atomically burns the invite token on the host. Token fields are strictly validated and shell-quoted as hostile input to prevent exploit vectors.
 
@@ -802,7 +797,7 @@ Auxly is a standard **stdio MCP server**, so *any* MCP-capable tool can share th
 | `auxly connect …` | Link this machine to a remote memory host |
 | `auxly host …` | Serve this machine's memory to other boxes |
 | `auxly host invite` | Mint a single-use token pinned to host SSH key for one-command pairing |
-| `auxly join <token>` | Pair with an inviting memory host securely in one command |
+| `auxly join <token>` | Pair with an inviting memory host securely (`--host` and `--port` optional) |
 | `auxly usage show \| auth` | Live agent quota (opt-in) |
 | `auxly index rebuild` | Wipe and rebuild the semantic recall index from the vault |
 | `auxly index status` | Show semantic index stats (provider, model, chunk count) |

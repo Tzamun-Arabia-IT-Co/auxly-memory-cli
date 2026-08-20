@@ -519,7 +519,7 @@ func (m organizeModel) runPlanCmd(ctx context.Context) tea.Cmd {
 	provider, target, model := m.planTarget()
 	prov := m.currentProvider()
 	skipEncrypted := m.skipEncryptedRun
-	opts := memory.OrganizeRunOpts{ForceAll: m.forceRun}
+	opts := memory.OrganizeRunOpts{ForceAll: true}
 	return func() tea.Msg {
 		var prop memory.OrganizeProposal
 		var res memory.OrganizeResult
@@ -715,7 +715,7 @@ func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
 				// syncs were ignored.
 				msgText = "Already well-organized — your synced facts are in place, nothing to merge or dedupe."
 			}
-			m.status = msgText + "  ·  press F to re-organize everything anyway"
+			m.status = msgText
 			m.errMsg = ""
 			m.forceRun = false
 			return m, restoreCmd

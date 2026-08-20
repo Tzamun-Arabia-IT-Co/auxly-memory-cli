@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -20,6 +21,7 @@ import (
 var organizeSplitProjects bool
 var organizeContradictions bool
 var organizeAgent string
+var organizeForce bool
 var organizeSkipEncrypted bool
 var organizeDecryptTemporarily bool
 var organizeAssumeYes bool
@@ -37,6 +39,8 @@ func init() {
 		"find cross-file contradicting or duplicate facts via embedding similarity (queued as pending changes for review)")
 	organizeCmd.Flags().StringVar(&organizeAgent, "agent", "",
 		"run via an installed CLI agent instead of the Direct LLM provider (e.g. claude, codex, gemini — see `auxly agents`)")
+	organizeCmd.Flags().BoolVarP(&organizeForce, "force", "f", false,
+		"force a full re-organize across all files, bypassing the dirty-file check")
 	organizeCmd.Flags().BoolVar(&organizeSkipEncrypted, "skip-encrypted", false,
 		"with --agent: exclude encrypted file(s) from this run instead of refusing")
 	organizeCmd.Flags().BoolVar(&organizeDecryptTemporarily, "decrypt-temporarily", false,
@@ -75,17 +79,31 @@ func runOrganize(cmd *cobra.Command, args []string) error {
 		fmt.Printf("📂 Organizing %s (%d/%d)…\n", file, current, total)
 	}
 
+	opts := memory.OrganizeRunOpts{ForceAll: true}
+
 	estTokens := store.GetEstimatedTokens()
 	fmt.Printf("🧠 Starting On-Demand Memory Organize...\n")
 	fmt.Printf("📊 Estimated Token Cost: ~%d tokens\n", estTokens)
-	fmt.Printf("⌛ Contacting active LLM provider for batch consolidation...\n\n")
+	if agentName != "" {
+		fmt.Printf("⌛ Running consolidation via %s...\n\n", agentName)
+	} else {
+		fmt.Printf("⌛ Contacting active LLM provider for batch consolidation...\n\n")
+	}
 
 	if agentPath == "" {
-		res := store.OrganizeVault()
+		res := store.OrganizeVaultOpts(opts)
 		if !res.Success {
 			return fmt.Errorf("organize failed: %s", res.Message)
 		}
 		fmt.Println(res.Message)
+		if strings.TrimSpace(res.Diff) != "" {
+			fmt.Println()
+			fmt.Println(res.Diff)
+		}
+		if res.Warning != "" {
+			fmt.Println()
+			fmt.Println(res.Warning)
+		}
 		return nil
 	}
 
@@ -95,14 +113,22 @@ func runOrganize(cmd *cobra.Command, args []string) error {
 	enc := store.EncryptedOrganizableFiles()
 	switch {
 	case len(enc) == 0 || organizeSkipEncrypted:
-		res := store.OrganizeVaultWithAgent(agentName, agentPath, organizeSkipEncrypted)
+		res := store.OrganizeVaultWithAgentOpts(agentName, agentPath, organizeSkipEncrypted, opts)
 		if !res.Success {
 			return fmt.Errorf("organize failed: %s", res.Message)
 		}
 		fmt.Println(res.Message)
+		if strings.TrimSpace(res.Diff) != "" {
+			fmt.Println()
+			fmt.Println(res.Diff)
+		}
+		if res.Warning != "" {
+			fmt.Println()
+			fmt.Println(res.Warning)
+		}
 		return nil
 	case organizeDecryptTemporarily:
-		return runOrganizeDecryptTemporarily(store, agentName, agentPath, enc)
+		return runOrganizeDecryptTemporarily(store, agentName, agentPath, enc, opts)
 	default:
 		return fmt.Errorf(
 			"organize via %s would expose decrypted content on the process command line (encrypted: %s)\n"+
@@ -115,23 +141,46 @@ func runOrganize(cmd *cobra.Command, args []string) error {
 // resolveHeadlessAgent maps --agent's value (a provider key like "claude", or
 // a substring of an installed agent's display name) to that agent's canonical
 // name + executable path, via the same detection the TUI's provider picker
-// uses (buildOrgProviders in tui/organize.go). Empty name means "no agent" —
-// the Direct LLM default, unaffected by anything below.
+// uses (buildOrgProviders in tui/organize.go). When name is empty, it checks
+// if Direct LLM is configured; if not, it auto-selects the first installed CLI
+// agent (mirroring the TUI initialIdx default).
 func resolveHeadlessAgent(name string) (agentName, agentPath string, err error) {
 	name = strings.TrimSpace(name)
-	if name == "" {
+	if name != "" {
+		for _, a := range detect.InstalledAgents() {
+			isCLI := strings.Contains(a.Name, "CLI") || strings.Contains(a.Name, "Code") || a.Connection == "MCP+Shell" || a.Connection == "Shell"
+			if !isCLI || a.Command == "" {
+				continue
+			}
+			if strings.EqualFold(a.Provider, name) || strings.Contains(strings.ToLower(a.Name), strings.ToLower(name)) {
+				return a.Name, a.Command, nil
+			}
+		}
+		return "", "", fmt.Errorf("no installed CLI agent matches --agent %q (see `auxly agents`)", name)
+	}
+
+	// Empty name: if cloud API key or custom host is set in env, use Direct LLM.
+	if os.Getenv("OPENAI_API_KEY") != "" || os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("OLLAMA_HOST") != "" || os.Getenv("AUXLY_LLM_BASE") != "" {
 		return "", "", nil
 	}
+	// Check if local Ollama or port 8000 is live
+	client := &http.Client{Timeout: 300 * time.Millisecond}
+	if resp, err := client.Get("http://localhost:11434/api/tags"); err == nil {
+		resp.Body.Close()
+		return "", "", nil
+	}
+	if resp, err := client.Get("http://localhost:8000/v1/models"); err == nil {
+		resp.Body.Close()
+		return "", "", nil
+	}
+	// Fall back to first installed CLI agent (same as TUI initialIdx)
 	for _, a := range detect.InstalledAgents() {
 		isCLI := strings.Contains(a.Name, "CLI") || strings.Contains(a.Name, "Code") || a.Connection == "MCP+Shell" || a.Connection == "Shell"
-		if !isCLI || a.Command == "" {
-			continue
-		}
-		if strings.EqualFold(a.Provider, name) || strings.Contains(strings.ToLower(a.Name), strings.ToLower(name)) {
+		if isCLI && a.Command != "" {
 			return a.Name, a.Command, nil
 		}
 	}
-	return "", "", fmt.Errorf("no installed CLI agent matches --agent %q (see `auxly agents`)", name)
+	return "", "", nil
 }
 
 // isStdinTTY reports whether stdin is an interactive terminal — used to
@@ -168,7 +217,7 @@ func decryptTemporarilyPromptText(files []string) string {
 // defer, so no exit path skips it (MAJOR 4: a re-encrypt failure must also
 // make this return a non-nil error, or the process exits 0 with plaintext
 // left on disk).
-func runOrganizeDecryptTemporarily(store *memory.Store, agentName, agentPath string, files []string) error {
+func runOrganizeDecryptTemporarily(store *memory.Store, agentName, agentPath string, files []string, opts memory.OrganizeRunOpts) error {
 	if !organizeAssumeYes {
 		if !isStdinTTY() {
 			return fmt.Errorf("--decrypt-temporarily needs confirmation and stdin isn't a terminal — re-run with --yes to confirm non-interactively")
@@ -188,7 +237,7 @@ func runOrganizeDecryptTemporarily(store *memory.Store, agentName, agentPath str
 		return fmt.Errorf("decrypt for organize: %w", derr)
 	}
 	return runOrganizeWithRestore(func() memory.OrganizeResult {
-		return store.OrganizeVaultWithAgent(agentName, agentPath, false)
+		return store.OrganizeVaultWithAgentOpts(agentName, agentPath, false, opts)
 	}, restore, files)
 }
 
@@ -217,6 +266,14 @@ func runOrganizeWithRestore(run func() memory.OrganizeResult, restore func() err
 		return
 	}
 	fmt.Println(res.Message)
+	if strings.TrimSpace(res.Diff) != "" {
+		fmt.Println()
+		fmt.Println(res.Diff)
+	}
+	if res.Warning != "" {
+		fmt.Println()
+		fmt.Println(res.Warning)
+	}
 	return
 }
 

@@ -225,13 +225,16 @@ func probeClient(ctx context.Context, c clientEntry) clientHealth {
 		h.detail = err.Error()
 		return h
 	}
-	out, err := runSSHCtx(ctx, p, "auxly", "--version")
-	if err != nil {
-		h.detail = firstLine(out)
+	banner, verr := remoteAuxlyVersionBanner(p)
+	if verr != nil {
+		h.detail = firstLine(banner)
+		if h.detail == "" {
+			h.detail = verr.Error()
+		}
 		return h
 	}
 	h.reachable = true
-	h.version = strings.TrimSpace(firstLine(out))
+	h.version = strings.TrimSpace(firstLine(banner))
 	// Wiring: the box's remotes.yaml must still carry this host's entry. POSIX
 	// first, Windows fallback — the file lives at ~/.auxly/remotes.yaml either way.
 	wout, werr := runSSHCtx(ctx, p, "cat", "$HOME/.auxly/remotes.yaml")
@@ -256,7 +259,8 @@ func probeClient(ctx context.Context, c clientEntry) clientHealth {
 	}
 	// End-to-end truth signal: the selftest execs the exact launcher the box's
 	// agents use and performs a real memory read through it.
-	if out, serr := runSSHCtx(ctx, p, "auxly", "connect-mcp", offerName(), "--selftest"); serr == nil {
+	bin := hostAuxlyBin(p)
+	if out, serr := runSSHCtx(ctx, p, bin, "connect-mcp", offerName(), "--selftest"); serr == nil {
 		h.link = strings.TrimSpace(firstLine(out))
 	} else {
 		h.link = strings.TrimSpace(firstLine(out))
@@ -380,7 +384,7 @@ func runHostDisconnect(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("🔌 Disconnecting %s (%s)...\n", c.Name, c.Target)
-	out, err := runSSH(p, "auxly", "connect", "disconnect", offerName(), "--purge")
+	out, err := runSSH(p, hostAuxlyBin(p), "connect", "disconnect", offerName(), "--purge")
 	if err != nil {
 		fmt.Printf("   ⚠ remote disconnect failed: %v\n   %s\n", err, firstLine(out))
 		return err
@@ -408,7 +412,7 @@ func runHostReconnect(cmd *cobra.Command, args []string) error {
 	// Fresh connection (withoutMux): never reuse a ControlMaster that may have been
 	// opened before auxly was installed on the box (its session carries the stale
 	// pre-install PATH, so `auxly …` would fail with 'auxly is not recognized').
-	out, err := runSSH(withoutMux(p), "auxly", "connect", "auto")
+	out, err := runSSH(withoutMux(p), hostAuxlyBin(p), "connect", "auto")
 	if err != nil {
 		fmt.Printf("   ⚠ remote reconnect failed: %v\n   %s\n", err, firstLine(out))
 		return err

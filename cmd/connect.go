@@ -217,6 +217,20 @@ func persistDetectedOS(p remoteProfile, osName string) {
 	_ = upsertRemote(saved) // best-effort: on failure we simply re-detect next time
 }
 
+// persistDetectedHostBin records an auto-detected HostBin back onto a SAVED profile
+// so future invocations know the exact binary path without walking fallbacks.
+func persistDetectedHostBin(p remoteProfile, hostBin string) {
+	if strings.TrimSpace(hostBin) == "" {
+		return
+	}
+	saved, ok := findRemote(p.Name)
+	if !ok || strings.TrimSpace(saved.HostBin) != "" {
+		return
+	}
+	saved.HostBin = hostBin
+	_ = upsertRemote(saved)
+}
+
 // ---------------------------------------------------------------------------
 // SSH helpers
 // ---------------------------------------------------------------------------
@@ -370,7 +384,15 @@ func pollVerifyAuxly(p remoteProfile, timeout, interval time.Duration) (string, 
 	return pollVerifyWith(func() (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), installProbeTimeout)
 		defer cancel()
-		return runSSHCtx(ctx, p, hostAuxlyBin(p), "--version")
+		out, err := runSSHCtx(ctx, p, hostAuxlyBin(p), "--version")
+		if err == nil && strings.TrimSpace(out) != "" {
+			return out, nil
+		}
+		// Windows fallback: if hostAuxlyBin failed, try the known Windows install path via PowerShell
+		if out2, err2 := runRemoteScriptCtx(ctx, p, osWindows, "", `& "`+winAuxlyAbsPath+`" --version`); err2 == nil && strings.TrimSpace(out2) != "" {
+			return out2, nil
+		}
+		return out, err
 	}, timeout, interval)
 }
 
@@ -406,6 +428,12 @@ func probeHostReachable(p remoteProfile) error {
 		ctx, cancel := context.WithTimeout(context.Background(), hostProbeTimeout)
 		defer cancel()
 		_, err := runSSHCtx(ctx, p, hostAuxlyBin(p), "--version")
+		if err == nil {
+			return nil
+		}
+		if _, werr := runRemoteScriptCtx(ctx, p, osWindows, "", `& "`+winAuxlyAbsPath+`" --version`); werr == nil {
+			return nil
+		}
 		return err
 	}, hostProbeAttempts, hostProbeBackoff)
 }
@@ -604,8 +632,15 @@ func runDoctor(p remoteProfile) error {
 		fmt.Printf("   ✓ Host reachable (Windows: %s)\n", detail)
 		stepLine("connect", "ok")
 		persistDetectedOS(p, "windows")
-		if out, verErr := runSSH(p, "auxly", "--version"); verErr == nil {
+		if out, verErr := runSSH(p, hostAuxlyBin(p), "--version"); verErr == nil {
 			fmt.Println("   ✓ auxly present on host (Windows)")
+			ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
+			return nil
+		}
+		if out, verErr := runRemoteScript(p, osWindows, "", `& "`+winAuxlyAbsPath+`" --version`); verErr == nil {
+			fmt.Println("   ✓ auxly present on host (Windows)")
+			p.HostBin = winAuxlyAbsPath
+			persistDetectedHostBin(p, winAuxlyAbsPath)
 			ensureRemoteCurrentAndWired(p, out, remoteUpdateOptIn())
 			return nil
 		}
@@ -621,10 +656,12 @@ func runDoctor(p remoteProfile) error {
 		}
 		// Re-probe in a fresh ssh session. A new session re-reads PATH from the
 		// registry; if it's not live yet, fall back to the conventional install path.
-		out, verErr := runSSH(p, "auxly", "--version")
+		out, verErr := runSSH(p, hostAuxlyBin(p), "--version")
 		if verErr != nil {
 			if out2, e2 := runRemoteScript(p, osWindows, "", `& "`+winAuxlyAbsPath+`" --version`); e2 == nil {
 				out, verErr = strings.TrimSpace(out2), nil
+				p.HostBin = winAuxlyAbsPath
+				persistDetectedHostBin(p, winAuxlyAbsPath)
 			}
 		}
 		if verErr != nil {
@@ -930,17 +967,15 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 			// macOS omits /usr/local/bin, so it is strictly less reliable than
 			// an absolute path and is already the implicit fallback).
 			ranForReal := err == nil || time.Since(started) > 30*time.Second
-			if ranForReal && originalDead && bin != hostAuxlyBin(p) && strings.HasPrefix(bin, "/") {
+			if ranForReal && originalDead && bin != hostAuxlyBin(p) && isReparableHostBin(bin) {
 				repairHostBin(p, bin) // this candidate served a session — remember it
 			}
 			if err == nil {
 				return nil // clean exit — the client closed the stream
 			}
 			code, isExit := sshExitCode(err)
-			// 127 is the POSIX not-found convention; a Windows host reports a
-			// different code, so the chain (and repairHostBin) is POSIX-hosts
-			// only — a Windows host fails straight through with the raw error.
-			if isExit && code == 127 && ci < len(candidates)-1 {
+			// 127 is the POSIX not-found convention; Windows cmd.exe / PowerShell report 1 or 9009
+			if isHostBinNotFound(code, isExit) && ci < len(candidates)-1 {
 				if ci == 0 {
 					originalDead = true
 				}
@@ -957,17 +992,44 @@ func runConnectMCP(cmd *cobra.Command, args []string) error {
 	return fmt.Errorf("auxly not found on host %s at any known location — reinstall it there or fix host_bin in remotes.yaml", p.Host)
 }
 
+// isReparableHostBin reports whether bin is a specific, persistent path worth saving.
+func isReparableHostBin(bin string) bool {
+	bin = strings.TrimSpace(bin)
+	if bin == "" || bin == "auxly" || bin == "auxly.exe" {
+		return false
+	}
+	if strings.HasPrefix(bin, "/") || strings.Contains(bin, `:\`) || strings.HasPrefix(bin, `%`) || strings.HasPrefix(bin, `$`) {
+		return true
+	}
+	return false
+}
+
+// isHostBinNotFound reports whether the exit code indicates the binary was not found.
+func isHostBinNotFound(exitCode int, isExit bool) bool {
+	if !isExit {
+		return false
+	}
+	return exitCode == 127 || exitCode == 9009 || exitCode == 1
+}
+
 // hostBinCandidates is the launch order for the auxly binary on the host: the
-// profile's host_bin first, then PATH, then the standard install locations.
-// $HOME expands in the remote POSIX shell. The chain only advances on POSIX
-// exit 127 — a Windows host's missing-command code differs, so Windows hosts
-// get candidate #1 only and surface the raw error (see the launcher loop).
+// profile's host_bin first, then PATH, then the standard install locations (POSIX + Windows).
+// $HOME expands in remote POSIX shells; %LOCALAPPDATA% expands in Windows cmd.exe.
 func hostBinCandidates(p remoteProfile) []string {
 	cands := []string{}
 	if strings.TrimSpace(p.HostBin) != "" {
 		cands = append(cands, p.HostBin)
 	}
-	for _, c := range []string{"auxly", "$HOME/.bun/bin/auxly", "/usr/local/bin/auxly", "$HOME/.local/bin/auxly"} {
+	for _, c := range []string{
+		"auxly",
+		"$HOME/.bun/bin/auxly",
+		"/usr/local/bin/auxly",
+		"$HOME/.local/bin/auxly",
+		`%LOCALAPPDATA%\Programs\auxly\auxly.exe`,
+		`%USERPROFILE%\AppData\Local\Programs\auxly\auxly.exe`,
+		`%USERPROFILE%\.auxly\bin\auxly.exe`,
+		"auxly.exe",
+	} {
 		dup := false
 		for _, have := range cands {
 			if have == c {
@@ -1219,6 +1281,9 @@ func runConnectAdd(cmd *cobra.Command, args []string) error {
 		}
 	} else if err := bootstrapKeyAuth(p); err != nil {
 		fmt.Printf("⚠️  Key setup skipped/failed: %v\n", err)
+		// Continue execution to allow the doctor to run even if key setup failed
+		// For the doctor check, we need to return an error if this is a non-interactive setup
+		// but for TUI batch mode, we already handled the case, so we only log this issue
 	}
 	if err := runDoctor(p); err != nil {
 		return err
@@ -2019,8 +2084,9 @@ func provisionRemote(p remoteProfile, backAddr string) error {
 
 	// Wire on a FRESH connection: the shared ControlMaster may predate the
 	// auxly install on the box (stale PATH).
+	bin := hostAuxlyBin(p)
 	target := currentLogin() + "@" + backAddr
-	wireArgs := []string{"auxly", "connect", "use", offerName(), "--method", "public", "--host", target, "--host-bin", hostBin}
+	wireArgs := []string{bin, "connect", "use", offerName(), "--method", "public", "--host", target, "--host-bin", hostBin}
 	if p.MemPath != "" {
 		wireArgs = append(wireArgs, "--mem-path", p.MemPath)
 	}
@@ -2038,7 +2104,7 @@ func provisionRemote(p remoteProfile, backAddr string) error {
 	// agents will use and calls auxly_memory_list through it).
 	fmt.Println("🔎 Verifying the box can actually read this memory...")
 	stepLine("selftest", "start")
-	if out, serr := runSSH(withoutMux(p), "auxly", "connect-mcp", offerName(), "--selftest"); serr == nil {
+	if out, serr := runSSH(withoutMux(p), bin, "connect-mcp", offerName(), "--selftest"); serr == nil {
 		stepLine("selftest", "ok")
 		fmt.Printf("   ✅ box read this machine's memory: %s\n", firstLine(out))
 	} else {
@@ -2155,31 +2221,31 @@ func runConnectWizard() error {
 
 	// Step 3: doctor.
 	if err := runDoctor(p); err != nil {
-		return err
+		return fmt.Errorf("doctor failed: %w", err)
 	}
 
 	// Step 4: test.
 	if err := connectTest(p); err != nil {
-		return err
+		return fmt.Errorf("connection test failed: %w", err)
 	}
 
 	// Step 5: save FIRST — valid consumer profile either way, and lets the [u]
 	// fallback find it if the two-way check fails.
 	if err := upsertRemote(p); err != nil {
-		return err
+		return fmt.Errorf("failed to save profile: %w", err)
 	}
 	fmt.Printf("💾 Saved remote profile %q\n", p.Name)
 
 	// Step 5b: return path (the box must reach this machine back).
 	backAddr, err := checkTwoWay(p)
 	if err != nil {
-		return err
+		return fmt.Errorf("two-way check failed: %w", err)
 	}
 
 	// Step 6: wire the box's agents to this machine's memory (or --standalone).
 	if err := provisionRemote(p, backAddr); err != nil {
 		fmt.Printf("✗ memory-link wiring failed: %v\n", err)
-		return err
+		return fmt.Errorf("memory-link wiring failed: %w", err)
 	}
 
 	// Step 7: summary.

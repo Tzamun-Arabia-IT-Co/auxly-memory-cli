@@ -169,6 +169,17 @@ func TestBuildConsumeArgvBlocksInjection(t *testing.T) {
 	}
 }
 
+func TestBuildConsumeArgvWindows(t *testing.T) {
+	tok := invite.Token{Secret: "abcdefg234567", Host: "winhost", Port: 22}
+	argv, err := buildConsumeArgv("auxly", tok, "clientbox", osWindows)
+	if err != nil {
+		t.Fatalf("buildConsumeArgv(osWindows) error = %v", err)
+	}
+	if len(argv) < 5 || argv[0] != "powershell" || argv[3] != "-EncodedCommand" {
+		t.Fatalf("buildConsumeArgv(osWindows) = %v, want powershell -EncodedCommand", argv)
+	}
+}
+
 func TestJoinCompletionMessage(t *testing.T) {
 	t.Run("selftest failure: warns the invite is already consumed and reports failure", func(t *testing.T) {
 		msg, joined := joinCompletionMessage("alice@host", "host", "⚠ selftest: FAIL probe: dial tcp: refused", false)

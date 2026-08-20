@@ -125,7 +125,7 @@ func repairClientWiring(c clientEntry, why string) {
 	defer cancel()
 	// Target THIS host's offer by name: a box wired to multiple memory hosts
 	// has several offers on disk, and a bare `connect auto` refuses to choose.
-	if out, err := runSSHCtx(ctx, withoutMux(p), "auxly", "connect", "auto", offerName()); err != nil {
+	if out, err := runSSHCtx(ctx, withoutMux(p), hostAuxlyBin(p), "connect", "auto", offerName()); err != nil {
 		// Reachable but unrepaired must never be silent — this is the exact
 		// "drift persists with no diagnostic trail" trap.
 		fmt.Fprintf(os.Stderr, "⚠ re-wire of %s failed (%s): %v — %s\n", c.Name, why, err, firstLine(out))

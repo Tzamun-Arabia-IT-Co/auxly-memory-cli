@@ -1,6 +1,7 @@
 # Binaries and executable files
 auxly
 auxly-cli
+auxly-dev
 *.exe
 *.exe~
 *.dll
