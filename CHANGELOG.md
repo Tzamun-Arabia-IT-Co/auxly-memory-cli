@@ -5,7 +5,34 @@ All notable changes to Auxly Memory CLI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] - 2026-09-17
+
+### Added
+
+- **Orphan sweep (`auxly organize --sweep` + TUI Memory Org "Sweep orphans" + doctor check).** Vault
+  roots accumulate files the taxonomy cannot govern — hand-dropped notes (`infrastructure.md` next to
+  `infra.md`), stale exports, loose project notes — which Consolidate can never see, so duplicates
+  linger forever. The sweep detects them (runtime whitelist derived from the embedded templates plus
+  auxly-owned files), re-files their bullets into taxonomy targets via the same review-gated pending
+  queue every other organize mode uses (`auxly approve --agent organize-sweep`), and applies the
+  split-projects two-phase safety contract: additions queue first; a later run queues orphan
+  deletions only for bullets PROVABLY present in a target — rejecting an addition can never lose a
+  fact. Model-proposed destinations are validated against a mechanical allowlist (taxonomy minus
+  `inbox.md` plus existing `projects/<slug>.md`) so the sweep can never mint new orphans; encrypted
+  orphans are skipped, never decrypted; empty/heading-only husks are removed under the vault lock
+  only when no pending entry still targets them; non-memory files (`.bak`, `.txt`, …) are reported,
+  never touched. `auxly doctor` now flags orphan files and points at the sweep.
+- **Shared headless-LLM resolver (`detect.ResolveHeadlessLLM`).** The "Direct LLM if configured,
+  otherwise first installed CLI agent" decision (and its env/probe list) now lives once in
+  `internal/llm` + `internal/detect` instead of being re-implemented per caller — and the fallback
+  agent is filtered to the verified-invocation set (claude/codex/antigravity/gemini/cursor), so a
+  headless run can never land on a CLI whose one-shot flags are unverified.
+
+### Removed
+
+- **Dead `--force` flag on `auxly organize`.** Registered in v1.4.6 but never read (on-demand
+  organize always evaluates every file); the flag lied. The always-evaluate-everything behavior is
+  unchanged.
 
 ## [1.4.6] - 2026-08-21
 

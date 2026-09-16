@@ -25,13 +25,11 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.4.6
+## 🆕 What's New in Version 1.5.0
 
-- **🌐 Cross-Platform LAN Pairing (`auxly host invite` & `auxly join`).** Invites now automatically detect and embed the host's reachable LAN IP (`detect.LocalIP()`) instead of `.local` mDNS hostnames, ensuring seamless pairing with Windows and Linux clients. Added `--host` and `--port` override flags to `auxly join`.
-- **🧠 Interactive On-Demand Memory Organize.** Starting an organize run from the TUI (Tab 5 `Memory Org`) or CLI (`auxly organize`) now always evaluates all memory files and transitions directly to the Diff Review screen.
-- **⚡ Thinking Model & Delta Matching Support.** Strips `<think>` blocks cleanly from reasoning models and improves bullet matching so valid facts are never dropped during reorganization.
-- **📝 Quick Notes (`auxly note`) & Shared Todos (`auxly todo`).** Capture fleeting thoughts directly into `inbox.md` and manage shared cross-agent tasks in `tasks.md`.
-- **🔍 PATH Shadow Warning.** `auxly update` alerts you if a competing binary earlier in your shell `$PATH` shadows the newly installed version.
+- **🧹 Orphan Sweep (`auxly organize --sweep` + TUI "Sweep orphans" + `auxly doctor`).** Vault roots accumulate stray files no organize mode could ever see — hand-dropped notes, stale exports, loose project files. The sweep detects them, re-files their bullets into the right taxonomy files through the same review-gated pending queue (`auxly approve --agent organize-sweep`), and applies the split-projects two-phase safety contract: additions queue first, and an orphan's deletions are only ever queued for bullets provably present in a target — rejecting an addition can never lose a fact. Drained husk files are cleaned up, encrypted files are never decrypted, and non-memory files (`.bak`, `.txt`) are reported, never touched. `auxly doctor` now flags orphan files and points at the sweep.
+- **🧠 Smarter Headless LLM Resolution.** Organize-family features with no model configured now share one resolver (`detect.ResolveHeadlessLLM`): Direct LLM when reachable, otherwise the first installed CLI agent with a *verified* one-shot invocation — no more dying on an unreachable `localhost:11434`, and no more falling back to agents whose headless flags were never verified.
+- **🚮 Removed the dead `--force` flag on `auxly organize`.** Registered in v1.4.6 but never read — on-demand organize always evaluates every file; the flag lied.
 
 Looking for past release details? See the [CHANGELOG](CHANGELOG.md) for the full history.
 
