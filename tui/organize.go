@@ -46,6 +46,7 @@ const (
 	orgRunModeConsolidate orgRunMode = iota
 	orgRunModeSplit
 	orgRunModeContradictions
+	orgRunModeSweep
 )
 
 type orgRunModeInfo struct {
@@ -57,6 +58,7 @@ var orgRunModeInfos = [...]orgRunModeInfo{
 	orgRunModeConsolidate:    {"Consolidate", "Merge, dedupe, and reorganize your memory files using a provider you choose."},
 	orgRunModeSplit:          {"Split projects", "Break projects.md into one file per project (Direct LLM) — queued in Approvals."},
 	orgRunModeContradictions: {"Find contradictions", "Find cross-file contradicting or duplicate facts (embeddings + Direct LLM) — queued in Approvals."},
+	orgRunModeSweep:          {"Sweep orphans", "Re-file loose vault-root files that organize can't see into the taxonomy — queued in Approvals."},
 }
 
 type orgDecision int
@@ -605,6 +607,23 @@ func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
 		}
 		return m, nil
 	case orgContradictionsRunMsg:
+		if m.mode != orgRunning {
+			return m, nil
+		}
+		if m.runCancel != nil {
+			m.runCancel()
+			m.runCancel = nil
+		}
+		m.mode = orgIdle
+		if msg.err != "" {
+			m.errMsg = msg.err
+			m.status = ""
+		} else {
+			m.errMsg = ""
+			m.status = msg.summary
+		}
+		return m, nil
+	case orgSweepRunMsg:
 		if m.mode != orgRunning {
 			return m, nil
 		}
@@ -1183,6 +1202,16 @@ func (m organizeModel) startNonConsolidateRun() (organizeModel, tea.Cmd) {
 	case orgRunModeContradictions:
 		m.runProvider = "Embeddings + Direct LLM"
 		return m, tea.Batch(m.runContradictionsCmd(ctx), orgSpinTick())
+	case orgRunModeSweep:
+		// Display label only — runSweepCmd re-resolves authoritatively for
+		// the actual model call (Direct LLM when configured, else the first
+		// CLI agent with a verified headless invocation).
+		if name, _ := detect.ResolveHeadlessLLM(); name != "" {
+			m.runProvider = name
+		} else {
+			m.runProvider = "Direct LLM"
+		}
+		return m, tea.Batch(m.runSweepCmd(ctx), orgSpinTick())
 	}
 	return m, nil
 }
@@ -1312,6 +1341,111 @@ func (m organizeModel) runContradictionsCmd(ctx context.Context) tea.Cmd {
 		}
 		return orgContradictionsRunMsg{summary: fmt.Sprintf("Queued %d contradiction/duplicate finding(s) as pending; review in Approvals (tab 4).", queued)}
 	}
+}
+
+// orgSweepRunMsg carries the result of the TUI's Sweep orphans run —
+// tui-only counterpart to cmd/organize.go's runSweep, built on the same
+// shared memory.Store.PlanSweepRun core.
+type orgSweepRunMsg struct {
+	summary string
+	err     string
+}
+
+// runSweepCmd runs memory.Store.PlanSweepRun (the same core runSweep uses)
+// and queues whatever it computed via the pending package — memory.Store
+// can't do that itself (internal/pending already imports internal/memory).
+// It also performs the guarded empty-file removal: candidates a pending
+// entry still targets are kept (approving an addition would resurrect the
+// file), the rest are removed with emptiness re-verified under the vault
+// lock inside Store.RemoveEmptyVaultFiles. The orgRunning spinner is this
+// mode's only "still working" feedback.
+func (m organizeModel) runSweepCmd(ctx context.Context) tea.Cmd {
+	store := m.store
+	memPath := m.memoryPath
+	return func() tea.Msg {
+		agentName, agentPath := detect.ResolveHeadlessLLM()
+		result, err := store.PlanSweepRun(ctx, memPath, memory.SweepOpts{AgentName: agentName, AgentPath: agentPath}, nil)
+		mgr := pending.NewManager(memPath)
+		// The cleanup writes were computed before the possibly-failing LLM
+		// call — queue and report them regardless of err (runSweep parity).
+		for _, w := range result.CleanupWrites {
+			if _, werr := mgr.WriteFrom(w.TargetFile, w.Diff, "organize-sweep"); werr != nil {
+				return orgSweepRunMsg{err: "queue orphan cleanup for " + w.TargetFile + ": " + werr.Error()}
+			}
+		}
+		if err != nil {
+			return orgSweepRunMsg{err: err.Error()}
+		}
+		queuedBullets, queuedFiles := 0, 0
+		for _, w := range result.Writes {
+			if _, werr := mgr.WriteFrom(w.TargetFile, w.Diff, "organize-sweep"); werr != nil {
+				return orgSweepRunMsg{err: fmt.Sprintf("queue %s: %v", w.TargetFile, werr)}
+			}
+			queuedBullets += w.Count
+			queuedFiles++
+		}
+		removedEmpty := 0
+		if len(result.RemoveEmpty) > 0 {
+			targeted := map[string]bool{}
+			if entries, lerr := mgr.List(); lerr == nil {
+				for _, e := range entries {
+					if info, ierr := mgr.Info(e.Name); ierr == nil && info.Target != "" {
+						targeted[info.Target] = true
+					}
+				}
+			}
+			var candidates []string
+			for _, n := range result.RemoveEmpty {
+				if !targeted[n] {
+					candidates = append(candidates, n)
+				}
+			}
+			removedEmpty = len(store.RemoveEmptyVaultFiles(candidates))
+		}
+		return orgSweepRunMsg{summary: sweepRunSummary(result, queuedBullets, queuedFiles, removedEmpty)}
+	}
+}
+
+// sweepRunSummary renders the TUI's one-line Sweep orphans result, mirroring
+// runSweep's CLI messages but always pointing at the Approvals tab — the
+// pending queue IS the review for every non-Consolidate mode. Pure function
+// so it is directly testable without a store.
+func sweepRunSummary(result memory.SweepResult, queuedBullets, queuedFiles, removedEmpty int) string {
+	if result.NothingToSweep {
+		if len(result.OtherOrphans) > 0 {
+			return fmt.Sprintf("No orphan memory files to sweep; %d non-memory file(s) listed by `auxly doctor`.", len(result.OtherOrphans))
+		}
+		return "Vault root is clean — no orphan files."
+	}
+	var lines []string
+	if n := orgWriteCount(result.CleanupWrites); n > 0 {
+		lines = append(lines, fmt.Sprintf("Queued removal of %d already re-homed bullet(s) from orphan file(s).", n))
+	}
+	if queuedFiles > 0 {
+		msg := fmt.Sprintf("Queued %d re-file addition(s) across %d file(s)", queuedBullets, queuedFiles)
+		if result.SkippedCount > 0 {
+			msg += fmt.Sprintf("; %d bullet(s) unmatched and left in place", result.SkippedCount)
+		}
+		lines = append(lines, msg+".")
+	}
+	if removedEmpty > 0 {
+		lines = append(lines, fmt.Sprintf("Removed %d empty orphan file(s).", removedEmpty))
+	}
+	if len(lines) == 0 {
+		return "Nothing queued — orphan file(s) had no re-fileable bullets (see `auxly doctor`)."
+	}
+	lines = append(lines, "Review in Approvals (tab 4), approve with agent organize-sweep. Re-run after approving to queue the orphan cleanup.")
+	return strings.Join(lines, " ")
+}
+
+// orgWriteCount sums a PendingWrite list's bullet counts (TUI-local twin of
+// cmd's pendingWriteCount — cmd is not importable from here).
+func orgWriteCount(ws []memory.PendingWrite) int {
+	n := 0
+	for _, w := range ws {
+		n += w.Count
+	}
+	return n
 }
 
 func (m *organizeModel) moveProvider(delta int) bool {

@@ -100,6 +100,29 @@ func ResolveEndpoint() Endpoint {
 	}
 }
 
+// ConfiguredOrReachable reports whether a Direct LLM endpoint is usable right
+// now: any provider env var set, or a local OpenAI-compatible server answering
+// on the conventional ports (Ollama's :11434, vLLM/LM Studio's :8000). This is
+// the single source of truth for the "is Direct LLM an option" decision — the
+// env/probe list must never be re-implemented per caller, or the CLI-agent
+// fallback and the endpoint resolver drift apart.
+func ConfiguredOrReachable() bool {
+	if os.Getenv("OPENAI_API_KEY") != "" || os.Getenv("GEMINI_API_KEY") != "" ||
+		os.Getenv("OLLAMA_HOST") != "" || os.Getenv("AUXLY_LLM_BASE") != "" {
+		return true
+	}
+	client := &http.Client{Timeout: probeTimeout}
+	if resp, err := client.Get("http://localhost:11434/api/tags"); err == nil {
+		resp.Body.Close()
+		return true
+	}
+	if resp, err := client.Get("http://localhost:8000/v1/models"); err == nil {
+		resp.Body.Close()
+		return true
+	}
+	return false
+}
+
 // SelfHealModel queries modelsURL (800ms) and returns the first served model id
 // (data[0].id) when present, preventing 404s on Ollama/vLLM where the configured
 // default model may not be installed. On any error or empty list it returns the

@@ -361,24 +361,35 @@ func TestOrgRunMode_CycleWraps(t *testing.T) {
 	}
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if m.runMode != orgRunModeSweep {
+		t.Fatalf("l three times = %v, want orgRunModeSweep", m.runMode)
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 	if m.runMode != orgRunModeConsolidate {
-		t.Fatalf("l three times should wrap back to Consolidate, got %v", m.runMode)
+		t.Fatalf("l four times should wrap back to Consolidate, got %v", m.runMode)
 	}
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
-	if m.runMode != orgRunModeContradictions {
-		t.Fatalf("h from Consolidate should wrap back to Contradictions, got %v", m.runMode)
+	if m.runMode != orgRunModeSweep {
+		t.Fatalf("h from Consolidate should wrap back to Sweep, got %v", m.runMode)
 	}
 
 	// The arrow keys are the primary (discoverable) mode switch — ← / → must
 	// cycle the same way h / l do, since the header advertises "(← → switch)".
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	if m.runMode != orgRunModeConsolidate {
-		t.Fatalf("→ from Contradictions should wrap to Consolidate, got %v", m.runMode)
+		t.Fatalf("→ from Sweep should wrap to Consolidate, got %v", m.runMode)
 	}
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
-	if m.runMode != orgRunModeContradictions {
-		t.Fatalf("← from Consolidate should wrap to Contradictions, got %v", m.runMode)
+	if m.runMode != orgRunModeSweep {
+		t.Fatalf("← from Consolidate should wrap to Sweep, got %v", m.runMode)
+	}
+
+	// The infos array is indexed by the mode const — a missing entry would
+	// panic at render time, so pin the registry size to the const count.
+	if len(orgRunModeInfos) != int(orgRunModeSweep)+1 {
+		t.Fatalf("orgRunModeInfos has %d entries, want %d", len(orgRunModeInfos), int(orgRunModeSweep)+1)
 	}
 }
 
@@ -419,6 +430,75 @@ func TestOrgRunMode_ContradictionsEnterStartsRunning(t *testing.T) {
 	}
 	if um.runProvider != "Embeddings + Direct LLM" {
 		t.Errorf("runProvider = %q, want %q", um.runProvider, "Embeddings + Direct LLM")
+	}
+}
+
+// TestOrgRunMode_SweepEnterStartsRunning mirrors the split case for Sweep
+// orphans mode. The provider label is environment-dependent (a configured
+// Direct LLM wins; otherwise the first verified CLI agent), so pin the env to
+// force the deterministic Direct LLM label.
+func TestOrgRunMode_SweepEnterStartsRunning(t *testing.T) {
+	store := organizeTestStore(t)
+	m := newOrganizeModel(store, store.Root, nil)
+	m.runMode = orgRunModeSweep
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	um, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if um.mode != orgRunning {
+		t.Fatalf("mode = %v, want orgRunning", um.mode)
+	}
+	if cmd == nil {
+		t.Fatal("Enter on Sweep orphans must dispatch the run command")
+	}
+	if um.runProvider != "Direct LLM" {
+		t.Errorf("runProvider = %q, want %q", um.runProvider, "Direct LLM")
+	}
+}
+
+// TestSweepRunSummary covers the pure summary builder's branches.
+func TestSweepRunSummary(t *testing.T) {
+	clean := sweepRunSummary(memory.SweepResult{NothingToSweep: true}, 0, 0, 0)
+	if !strings.Contains(clean, "no orphan files") {
+		t.Fatalf("clean summary: %q", clean)
+	}
+	others := sweepRunSummary(memory.SweepResult{NothingToSweep: true, OtherOrphans: []string{"a.bak"}}, 0, 0, 0)
+	if !strings.Contains(others, "non-memory file(s)") {
+		t.Fatalf("others summary: %q", others)
+	}
+	queued := sweepRunSummary(memory.SweepResult{SkippedCount: 2}, 5, 2, 1)
+	for _, want := range []string{"5 re-file addition(s) across 2 file(s)", "2 bullet(s) unmatched", "Removed 1 empty orphan file(s)", "organize-sweep"} {
+		if !strings.Contains(queued, want) {
+			t.Fatalf("queued summary missing %q: %q", want, queued)
+		}
+	}
+	cleanup := sweepRunSummary(memory.SweepResult{CleanupWrites: []memory.PendingWrite{{TargetFile: "x.md", Diff: "-- a\n", Count: 3}}}, 0, 0, 0)
+	if !strings.Contains(cleanup, "3 already re-homed bullet(s)") {
+		t.Fatalf("cleanup summary: %q", cleanup)
+	}
+	nothing := sweepRunSummary(memory.SweepResult{}, 0, 0, 0)
+	if !strings.Contains(nothing, "Nothing queued") {
+		t.Fatalf("nothing summary: %q", nothing)
+	}
+}
+
+// TestOrgSweepRunMsg_SetsStatusAndReturnsIdle mirrors the split case: a late
+// result after cancel is dropped; a real one lands on the idle screen.
+func TestOrgSweepRunMsg_SetsStatusAndReturnsIdle(t *testing.T) {
+	store := organizeTestStore(t)
+	m := newOrganizeModel(store, store.Root, nil)
+	m.mode = orgIdle // simulate a cancelled run that already left orgRunning
+	if _, cmd := m.Update(orgSweepRunMsg{summary: "late"}); cmd != nil || m.status == "late" {
+		t.Fatal("late sweep result must be dropped after cancel")
+	}
+
+	m.mode = orgRunning
+	m2, _ := m.Update(orgSweepRunMsg{summary: "queued 3 bullet(s)"})
+	if m2.mode != orgIdle || m2.status != "queued 3 bullet(s)" || m2.errMsg != "" {
+		t.Fatalf("status routing wrong: mode=%v status=%q err=%q", m2.mode, m2.status, m2.errMsg)
+	}
+	m3, _ := m.Update(orgSweepRunMsg{err: "boom"})
+	if m3.errMsg != "boom" || m3.status != "" {
+		t.Fatalf("error routing wrong: status=%q err=%q", m3.status, m3.errMsg)
 	}
 }
 

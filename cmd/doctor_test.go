@@ -43,6 +43,34 @@ func TestDoctorReportInitializedVault(t *testing.T) {
 	}
 }
 
+// TestDoctorReport_OrphanHygiene: orphan vault-root files (outside taxonomy,
+// templates, and auxly-owned files) get a warning pointing at the sweep; a
+// clean root gets the all-clear line. OrphanRootFiles reads the dir directly,
+// so workspace overlays cannot skew the result.
+func TestDoctorReport_OrphanHygiene(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, ".initialized"), []byte("1"), 0644)
+	os.WriteFile(filepath.Join(dir, "identity.md"), []byte("- name wael\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "infrastructure.md"), []byte("- stray\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "infra.md.bak-1"), []byte("old\n"), 0644)
+
+	out := doctorReport(dir, false)
+	if !strings.Contains(out, "orphan file(s) in vault root") || !strings.Contains(out, "infrastructure.md") {
+		t.Fatalf("doctor missed the orphan warning:\n%s", out)
+	}
+	if !strings.Contains(out, "auxly organize --sweep") {
+		t.Fatalf("orphan warning lacks the sweep hint:\n%s", out)
+	}
+
+	clean := t.TempDir()
+	os.WriteFile(filepath.Join(clean, ".initialized"), []byte("1"), 0644)
+	os.WriteFile(filepath.Join(clean, "identity.md"), []byte("- name wael\n"), 0644)
+	out = doctorReport(clean, false)
+	if !strings.Contains(out, "no orphan files in vault root") {
+		t.Fatalf("clean root must get the all-clear line:\n%s", out)
+	}
+}
+
 // TestDoctorReport_HealsInterruptedOrganize simulates a "decrypt temporarily"
 // organize run that got killed before its restore() ran: the crash-recovery
 // sentinel is present and personal.md is plaintext on disk despite being

@@ -149,6 +149,17 @@ func doctorReport(memPath string, probeLinks bool) string {
 		} else {
 			line("✓", "no interrupted organize to heal", "")
 		}
+
+		// 4e. Vault hygiene: root files outside every governed surface — not
+		// taxonomy, not projects/, not seeded setup files. Consolidate can
+		// never see them, so they linger (and duplicate facts) forever. Pure
+		// detection: the sweep command owns any action.
+		if mdOrphans, otherOrphans, oerr := store.OrphanRootFiles(); oerr == nil && len(mdOrphans)+len(otherOrphans) > 0 {
+			names := append(append([]string(nil), mdOrphans...), otherOrphans...)
+			line("⚠", fmt.Sprintf("%d orphan file(s) in vault root invisible to organize: %s", len(names), strings.Join(names, ", ")), "re-file them with `auxly organize --sweep` (reviewed as pending changes); non-memory files, remove manually")
+		} else if oerr == nil {
+			line("✓", "no orphan files in vault root", "")
+		}
 	}
 
 	// 5. Agents + MCP wiring
