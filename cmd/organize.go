@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -20,8 +19,8 @@ import (
 
 var organizeSplitProjects bool
 var organizeContradictions bool
+var organizeSweep bool
 var organizeAgent string
-var organizeForce bool
 var organizeSkipEncrypted bool
 var organizeDecryptTemporarily bool
 var organizeAssumeYes bool
@@ -37,10 +36,10 @@ func init() {
 		"split the projects.md monolith into projects/<slug>.md files (queued as pending changes for review)")
 	organizeCmd.Flags().BoolVar(&organizeContradictions, "contradictions", false,
 		"find cross-file contradicting or duplicate facts via embedding similarity (queued as pending changes for review)")
+	organizeCmd.Flags().BoolVar(&organizeSweep, "sweep", false,
+		"re-file orphan vault-root files (outside the taxonomy) into the right memory files (queued as pending changes for review)")
 	organizeCmd.Flags().StringVar(&organizeAgent, "agent", "",
 		"run via an installed CLI agent instead of the Direct LLM provider (e.g. claude, codex, gemini — see `auxly agents`)")
-	organizeCmd.Flags().BoolVarP(&organizeForce, "force", "f", false,
-		"force a full re-organize across all files, bypassing the dirty-file check")
 	organizeCmd.Flags().BoolVar(&organizeSkipEncrypted, "skip-encrypted", false,
 		"with --agent: exclude encrypted file(s) from this run instead of refusing")
 	organizeCmd.Flags().BoolVar(&organizeDecryptTemporarily, "decrypt-temporarily", false,
@@ -54,8 +53,14 @@ func runOrganize(cmd *cobra.Command, args []string) error {
 	if err := requireInit(); err != nil {
 		return err
 	}
-	if organizeSplitProjects && organizeContradictions {
-		return fmt.Errorf("--split-projects and --contradictions: one mode at a time")
+	modes := 0
+	for _, on := range []bool{organizeSplitProjects, organizeContradictions, organizeSweep} {
+		if on {
+			modes++
+		}
+	}
+	if modes > 1 {
+		return fmt.Errorf("--split-projects, --contradictions, --sweep: one mode at a time")
 	}
 	if organizeSkipEncrypted && organizeDecryptTemporarily {
 		return fmt.Errorf("--skip-encrypted and --decrypt-temporarily: one mode at a time")
@@ -66,6 +71,9 @@ func runOrganize(cmd *cobra.Command, args []string) error {
 	}
 	if organizeSplitProjects {
 		return runSplitProjects(store)
+	}
+	if organizeSweep {
+		return runSweep(store)
 	}
 
 	agentName, agentPath, aerr := resolveHeadlessAgent(organizeAgent)
@@ -141,9 +149,10 @@ func runOrganize(cmd *cobra.Command, args []string) error {
 // resolveHeadlessAgent maps --agent's value (a provider key like "claude", or
 // a substring of an installed agent's display name) to that agent's canonical
 // name + executable path, via the same detection the TUI's provider picker
-// uses (buildOrgProviders in tui/organize.go). When name is empty, it checks
-// if Direct LLM is configured; if not, it auto-selects the first installed CLI
-// agent (mirroring the TUI initialIdx default).
+// uses (buildOrgProviders in tui/organize.go). When name is empty it defers to
+// detect.ResolveHeadlessLLM: Direct LLM when configured/reachable, else the
+// first installed CLI agent with a VERIFIED headless invocation (never a bare
+// `-p` agent that would hang in interactive mode).
 func resolveHeadlessAgent(name string) (agentName, agentPath string, err error) {
 	name = strings.TrimSpace(name)
 	if name != "" {
@@ -158,29 +167,8 @@ func resolveHeadlessAgent(name string) (agentName, agentPath string, err error) 
 		}
 		return "", "", fmt.Errorf("no installed CLI agent matches --agent %q (see `auxly agents`)", name)
 	}
-
-	// Empty name: if cloud API key or custom host is set in env, use Direct LLM.
-	if os.Getenv("OPENAI_API_KEY") != "" || os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("OLLAMA_HOST") != "" || os.Getenv("AUXLY_LLM_BASE") != "" {
-		return "", "", nil
-	}
-	// Check if local Ollama or port 8000 is live
-	client := &http.Client{Timeout: 300 * time.Millisecond}
-	if resp, err := client.Get("http://localhost:11434/api/tags"); err == nil {
-		resp.Body.Close()
-		return "", "", nil
-	}
-	if resp, err := client.Get("http://localhost:8000/v1/models"); err == nil {
-		resp.Body.Close()
-		return "", "", nil
-	}
-	// Fall back to first installed CLI agent (same as TUI initialIdx)
-	for _, a := range detect.InstalledAgents() {
-		isCLI := strings.Contains(a.Name, "CLI") || strings.Contains(a.Name, "Code") || a.Connection == "MCP+Shell" || a.Connection == "Shell"
-		if isCLI && a.Command != "" {
-			return a.Name, a.Command, nil
-		}
-	}
-	return "", "", nil
+	agentName, agentPath = detect.ResolveHeadlessLLM()
+	return agentName, agentPath, nil
 }
 
 // isStdinTTY reports whether stdin is an interactive terminal — used to
@@ -367,6 +355,116 @@ func runSplitProjects(store *memory.Store) error {
 	fmt.Println("   2. Re-run `auxly organize --split-projects` — it queues the projects.md cleanup")
 	fmt.Println("      ONLY for bullets whose new sub-file copy was actually approved (no fact can be lost).")
 	return nil
+}
+
+// runSweep re-files orphan vault-root files into the taxonomy — entirely
+// through the pending queue, same review-first shape as runSplitProjects:
+// this run queues ADDITIONS into taxonomy targets; a later run queues the
+// orphan deletions for bullets PROVABLY re-homed (verified present in a
+// target), so rejecting an addition can never lose a fact. Empty md orphans
+// are removed directly — under the vault lock, emptiness re-verified, and
+// never while a pending entry still targets the file. Non-md orphans (.bak,
+// .txt, …) are reported only: the sweep never destructively touches
+// non-memory files.
+func runSweep(store *memory.Store) error {
+	memPath := getMemoryPath()
+	mgr := pending.NewManager(memPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	hooks := &memory.SweepHooks{
+		BackedUp:     func(path string) { fmt.Printf("   ✓ Backed up → %s\n", path) },
+		PlanningFile: func(name string) { fmt.Printf("   📄 %s\n", name) },
+		Planning: func() {
+			fmt.Println("🧠 Planning orphan re-file (LLM picks the right memory file)...")
+		},
+	}
+	agentName, agentPath := detect.ResolveHeadlessLLM()
+	if agentName != "" {
+		fmt.Printf("⌛ Sweep via %s...\n\n", agentName)
+	} else {
+		fmt.Printf("⌛ Sweep via Direct LLM...\n\n")
+	}
+	result, err := store.PlanSweepRun(ctx, memPath, memory.SweepOpts{AgentName: agentName, AgentPath: agentPath}, hooks)
+
+	// Queue what was computed regardless of err — the cleanup writes (and
+	// their backups) were computed BEFORE the possibly-failing LLM call,
+	// exactly like runSplitProjects: a planning failure must not drop them.
+	for _, w := range result.CleanupWrites {
+		name, werr := mgr.WriteFrom(w.TargetFile, w.Diff, "organize-sweep")
+		if werr != nil {
+			return fmt.Errorf("queue orphan cleanup for %s: %w", w.TargetFile, werr)
+		}
+		fmt.Printf("   ⏳ %s — remove %d bullet(s) already re-homed  (%s)\n", w.TargetFile, w.Count, name)
+	}
+	if err != nil {
+		return err
+	}
+	for _, w := range result.Writes {
+		name, werr := mgr.WriteFrom(w.TargetFile, w.Diff, "organize-sweep")
+		if werr != nil {
+			return fmt.Errorf("queue sweep for %s: %w", w.TargetFile, werr)
+		}
+		fmt.Printf("   ⏳ %s ← %d bullet(s)  (%s)\n", w.TargetFile, w.Count, name)
+	}
+
+	// Guarded empty-file removal: skip anything a pending entry still targets
+	// (approving that addition would resurrect the file), then remove the
+	// rest — emptiness re-verified under the vault lock inside the call.
+	if len(result.RemoveEmpty) > 0 {
+		targeted := map[string]bool{}
+		if entries, lerr := mgr.List(); lerr == nil {
+			for _, e := range entries {
+				if info, ierr := mgr.Info(e.Name); ierr == nil && info.Target != "" {
+					targeted[info.Target] = true
+				}
+			}
+		}
+		var candidates []string
+		for _, n := range result.RemoveEmpty {
+			if !targeted[n] {
+				candidates = append(candidates, n)
+			}
+		}
+		if removed := store.RemoveEmptyVaultFiles(candidates); len(removed) > 0 {
+			fmt.Printf("   🗑 removed empty file(s): %s\n", strings.Join(removed, ", "))
+		}
+	}
+
+	// Everything the sweep will NOT touch, so nothing is silently ignored.
+	for _, n := range result.EncryptedSkipped {
+		fmt.Printf("   🔒 %s skipped (encrypted at rest) — the sweep never decrypts\n", n)
+	}
+	for _, n := range result.NoBulletFiles {
+		fmt.Printf("   ℹ️ %s has no bullet lines to re-file — left untouched\n", n)
+	}
+	for _, n := range result.OtherOrphans {
+		fmt.Printf("   ⚠️ %s is not a memory file — remove or archive it yourself\n", n)
+	}
+
+	if result.NothingToSweep {
+		if len(result.OtherOrphans) > 0 {
+			fmt.Println("\n✅ No orphan memory files to sweep (non-memory files listed above).")
+		} else {
+			fmt.Println("\n✅ Vault root is clean — no orphan files.")
+		}
+		return nil
+	}
+	fmt.Printf("\n✅ Sweep planned: %d re-file addition(s) across %d file(s), %d cleanup deletion(s), %d bullet(s) unmatched (stay put).\n",
+		pendingWriteCount(result.Writes), len(result.Writes), pendingWriteCount(result.CleanupWrites), result.SkippedCount)
+	fmt.Println("   1. Review with `auxly pending`, apply with `auxly approve --agent organize-sweep`.")
+	fmt.Println("   2. Re-run `auxly organize --sweep` — it queues the orphan cleanup")
+	fmt.Println("      ONLY for bullets whose target copy was actually approved (no fact can be lost).")
+	return nil
+}
+
+// pendingWriteCount sums a PendingWrite list's bullet counts for summary lines.
+func pendingWriteCount(ws []memory.PendingWrite) int {
+	n := 0
+	for _, w := range ws {
+		n += w.Count
+	}
+	return n
 }
 
 // runContradictions finds cross-file fact pairs the embedding index scores as
