@@ -103,4 +103,3 @@ func TestHostBinCandidates(t *testing.T) {
 		t.Fatalf("hostBinCandidates(p2)[0] = %q, want custom HostBin", cands2[0])
 	}
 }
-

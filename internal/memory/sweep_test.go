@@ -43,8 +43,8 @@ func TestOrphanRootFilesWhitelist(t *testing.T) {
 	writeOrphan(t, root, "infrastructure.md", "- stray note\n")
 	writeOrphan(t, root, "notes.txt", "not memory\n")
 	writeOrphan(t, root, "infra.md.bak-123", "old copy\n")
-	writeOrphan(t, root, "audit.db", "sqlite\n")      // auxly-owned index
-	writeOrphan(t, root, "audit.db-wal", "wal\n")     // …and its sidecars
+	writeOrphan(t, root, "audit.db", "sqlite\n")  // auxly-owned index
+	writeOrphan(t, root, "audit.db-wal", "wal\n") // …and its sidecars
 	if err := os.MkdirAll(filepath.Join(root, "projects"), 0o755); err != nil {
 		t.Fatal(err)
 	}
