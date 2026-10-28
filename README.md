@@ -25,11 +25,11 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.5.1
+## 🆕 What's New in Version 1.5.2
 
 - **🪄 Session capture actually captures.** `auxly capture` (the Stop hook behind `auxly hooks install`) asked the local server for a fixed default model (`qwen2.5-coder:7b`). When that model wasn't installed, every run failed with a 404 and queued nothing. Capture and organize now use the requested model when the server has it, and otherwise the first installed chat model, skipping embedding models.
 - **🎛️ `AUXLY_LLM_MODEL`.** Pin the model auxly uses on any endpoint (Ollama, vLLM, OpenAI, Gemini). Use a model with a large context window for capture: it sends the last 60K characters (~15K tokens) of the transcript, and a smaller window silently cuts off the instructions.
-- **🚨 Capture failures are no longer silent.** Hooks discard stderr, so a failing capture used to leave no trace. The last error is now kept in `.capture-last-error` in the vault and shown by `auxly hooks status` and `auxly doctor`. It clears on the next successful run.
+- **🚨 Capture failures are no longer silent.** Hooks discard stderr, so a failing capture used to leave no trace. The last error is now kept in `.capture-last-error` in the vault and shown by `auxly hooks status` and `auxly doctor`. It clears on the next successful run. Control characters are stripped and the message is capped, so a server's error body can't inject terminal escape sequences (1.5.2).
 
 Looking for past release details? See the [CHANGELOG](CHANGELOG.md) for the full history.
 

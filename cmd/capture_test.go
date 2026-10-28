@@ -130,6 +130,19 @@ func TestRecordClearCaptureError(t *testing.T) {
 		t.Fatalf("clearCaptureError must remove the breadcrumb, got stat err %v", err)
 	}
 	clearCaptureError(memPath) // idempotent — removing a missing file is fine
+
+	// A hostile server body must not reach the terminal as escape sequences.
+	recordCaptureError(memPath, fmt.Errorf("status 500: \x1b]0;pwned\x07\x1b[2J%s", strings.Repeat("x", 900)))
+	data, err = os.ReadFile(captureErrorPath(memPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(strings.TrimSuffix(string(data), "\n"), "\x1b\x07\n\r") {
+		t.Fatalf("breadcrumb must not carry control characters, got %q", data)
+	}
+	if n := len([]rune(string(data))); n > 600 {
+		t.Fatalf("breadcrumb must be capped, got %d runes", n)
+	}
 }
 
 // TestReadTranscriptJSONLStripsANSIFromRawFallback locks finding 12: the raw

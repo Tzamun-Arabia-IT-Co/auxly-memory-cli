@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
@@ -67,7 +68,19 @@ func captureErrorPath(memPath string) string {
 // recordCaptureError writes the breadcrumb (best effort — never fail a
 // fire-and-forget capture over a breadcrumb write).
 func recordCaptureError(memPath string, err error) {
-	_ = os.WriteFile(captureErrorPath(memPath), []byte(time.Now().Format(time.RFC3339)+" "+err.Error()+"\n"), 0600)
+	// The error can carry an LLM server's response body, and doctor/hooks
+	// status print this file to a terminal: drop control characters (ESC
+	// included, so escape sequences turn inert) and cap the length.
+	msg := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, err.Error())
+	if r := []rune(msg); len(r) > 500 {
+		msg = string(r[:500]) + "…"
+	}
+	_ = os.WriteFile(captureErrorPath(memPath), []byte(time.Now().Format(time.RFC3339)+" "+msg+"\n"), 0600)
 }
 
 // clearCaptureError removes the breadcrumb once a capture run succeeds.
