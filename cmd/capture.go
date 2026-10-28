@@ -13,8 +13,10 @@ import (
 	"unicode"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +25,8 @@ var (
 	captureStopHook        bool
 	captureProvider        string
 	captureCodexNotifyFlag bool
+	captureConfigAgent     string
+	captureConfigModel     string
 )
 
 var captureCmd = &cobra.Command{
@@ -32,9 +36,24 @@ var captureCmd = &cobra.Command{
 --stop-hook, plain text via stdin), extracts durable facts with the configured
 LLM, dedups them against the vault, and queues them as PENDING changes — it
 never writes memory directly. Designed to run fire-and-forget from an agent
-Stop hook (see 'auxly hooks install').`,
+Stop hook (see 'auxly hooks install').
+
+Extraction backend: the Direct LLM by default, a persisted setting (see 'auxly capture config'),
+or env vars AUXLY_CAPTURE_AGENT / AUXLY_CAPTURE_MODEL.`,
 	SilenceUsage: true,
 	RunE:         runCapture,
+}
+
+var captureConfigCmd = &cobra.Command{
+	Use:   "config",
+	Short: "View or configure the capture backend (agent and model)",
+	Long: `config views or updates the backend used by session capture.
+
+Without flags, prints the effective capture backend and its source (env / settings / default Direct LLM).
+With --agent or --model, updates persisted settings in ~/.auxly/settings.json.
+Pass --agent none to clear the configured agent and revert to the Direct LLM.`,
+	SilenceUsage: true,
+	RunE:         runCaptureConfig,
 }
 
 func init() {
@@ -42,6 +61,9 @@ func init() {
 	captureCmd.Flags().BoolVar(&captureStopHook, "stop-hook", false, "read the Claude Code Stop-hook JSON from stdin (extracts transcript_path itself)")
 	captureCmd.Flags().StringVar(&captureProvider, "provider", "claude-code", "provider attribution for the queued facts")
 	captureCmd.Flags().BoolVar(&captureCodexNotifyFlag, "codex-notify", false, "read a Codex notify-hook JSON payload (arg or stdin) and capture the session (wired by `hooks install --agent codex`)")
+	captureConfigCmd.Flags().StringVar(&captureConfigAgent, "agent", "", "CLI agent to use (claude, codex, gemini, antigravity, cursor, or 'none' to clear)")
+	captureConfigCmd.Flags().StringVar(&captureConfigModel, "model", "", "model for the CLI agent")
+	captureCmd.AddCommand(captureConfigCmd)
 	rootCmd.AddCommand(captureCmd)
 }
 
@@ -97,6 +119,11 @@ func inCaptureCooldown(memPath string) bool {
 }
 
 func runCapture(cmd *cobra.Command, args []string) error {
+	// Fired from inside a capture agent's own run (e.g. its notify hook):
+	// never recurse.
+	if os.Getenv(memory.CaptureChildEnv) != "" {
+		return nil
+	}
 	// codex's notify hook has its own full pipeline (cooldown, transcript
 	// resolution, extraction) — route to it before any other mode, and
 	// before touching memPath/the marker below (runCodexNotify does its own).
@@ -120,9 +147,9 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	}
 	_ = os.WriteFile(captureMarkerPath(memPath), []byte(time.Now().Format(time.RFC3339)), 0600)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	facts, err := memory.ExtractCaptureFacts(ctx, transcript)
+	facts, err := extractCaptureFacts(ctx, transcript)
 	if err != nil {
 		// Fire-and-forget contract: an unreachable model must never fail a
 		// session teardown. Named on stderr, exit 0. Also recorded to the
@@ -164,6 +191,117 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	if queued > 0 {
 		fmt.Printf("🪄 %d fact(s) captured → pending review (`auxly pending`)\n", queued)
 	}
+	return nil
+}
+
+// captureAgentEnv names the CLI-agent backend for capture (e.g. "claude").
+// Empty means the Direct LLM provider.
+const captureAgentEnv = "AUXLY_CAPTURE_AGENT"
+
+// captureModelEnv picks the CLI agent's model (e.g. "haiku", "sonnet"); empty
+// keeps the agent's own default.
+const captureModelEnv = "AUXLY_CAPTURE_MODEL"
+
+// resolveCaptureBackend determines the effective capture agent and model,
+// along with where the agent was configured from ("env", "settings", or "default").
+// Priority: env var > persisted setting > default (empty = Direct LLM).
+func resolveCaptureBackend() (agent, model, source string) {
+	s := config.LoadSettings()
+	envAgent := strings.TrimSpace(os.Getenv(captureAgentEnv))
+	envModel := strings.TrimSpace(os.Getenv(captureModelEnv))
+
+	if envAgent != "" {
+		agent = envAgent
+		source = "env"
+	} else if strings.TrimSpace(s.CaptureAgent) != "" {
+		agent = strings.TrimSpace(s.CaptureAgent)
+		source = "settings"
+	} else {
+		agent = ""
+		source = "default"
+	}
+
+	if envModel != "" {
+		model = envModel
+	} else {
+		model = strings.TrimSpace(s.CaptureModel)
+	}
+	return agent, model, source
+}
+
+// formatCaptureBackendSummary formats the capture backend and its source for display.
+func formatCaptureBackendSummary(agent, model, source string) string {
+	backend := "Direct LLM"
+	if agent != "" {
+		if model != "" {
+			backend = fmt.Sprintf("%s · %s", agent, model)
+		} else {
+			backend = agent
+		}
+	}
+	if agent == "" && source == "default" {
+		return "Direct LLM (default)"
+	}
+	return fmt.Sprintf("%s (%s)", backend, source)
+}
+
+// extractCaptureFacts routes extraction to the CLI-agent backend when
+// configured (via env AUXLY_CAPTURE_AGENT or persisted CaptureAgent setting),
+// and to the Direct LLM otherwise. Both capture entry points (the Claude Code
+// Stop hook and the Codex notify hook) go through it, so the two behave identically.
+func extractCaptureFacts(ctx context.Context, transcript string) ([]memory.CaptureFact, error) {
+	agent, model, _ := resolveCaptureBackend()
+	if agent == "" {
+		return memory.ExtractCaptureFacts(ctx, transcript)
+	}
+	agentName, agentPath, err := resolveHeadlessAgent(agent)
+	if err != nil {
+		return nil, err
+	}
+	return memory.ExtractCaptureFactsWithAgent(ctx, agentName, agentPath, model, transcript)
+}
+
+func runCaptureConfig(cmd *cobra.Command, args []string) error {
+	agentChanged := cmd.Flags().Changed("agent")
+	modelChanged := cmd.Flags().Changed("model")
+
+	if !agentChanged && !modelChanged {
+		agent, model, source := resolveCaptureBackend()
+		cmd.Println(formatCaptureBackendSummary(agent, model, source))
+		return nil
+	}
+
+	settings := config.LoadSettings()
+
+	if agentChanged {
+		rawAgent := strings.TrimSpace(captureConfigAgent)
+		if strings.EqualFold(rawAgent, "none") || rawAgent == "" {
+			settings.CaptureAgent = ""
+			if !modelChanged {
+				settings.CaptureModel = ""
+			}
+		} else {
+			agentName, _, err := resolveHeadlessAgent(rawAgent)
+			if err != nil {
+				return err
+			}
+			key := tui.OrgProviderKey(agentName)
+			if key == "" {
+				key = strings.ToLower(rawAgent)
+			}
+			settings.CaptureAgent = key
+		}
+	}
+
+	if modelChanged {
+		settings.CaptureModel = strings.TrimSpace(captureConfigModel)
+	}
+
+	if err := config.SaveSettings(settings); err != nil {
+		return err
+	}
+
+	cmd.Println(formatCaptureBackendSummary(settings.CaptureAgent, settings.CaptureModel, "settings"))
 	return nil
 }
 

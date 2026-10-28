@@ -31,6 +31,10 @@ type settingsModel struct {
 	// interactive session (never mid-run). Persisted via config.SaveSettings.
 	autoUpdate bool
 
+	// Session capture model preference. Persisted via config.SaveSettings.
+	captureAgent string
+	captureModel string
+
 	// Sub-tab state: 0 = General (trust), 1 = Agents (dashboard show/hide),
 	// 2 = Customizations (Claude Code statusline), 3 = Vault (encryption + index),
 	// 4 = Ops (capture hooks, git sync, doctor report).
@@ -74,6 +78,8 @@ func newSettingsModel(memPath string, logger *audit.Logger) settingsModel {
 		trustLevels:  []string{"auto", "require_approval", "read_only"},
 		liveUsage:    config.LoadSettings().LiveUsage,
 		autoUpdate:   config.LoadSettings().AutoUpdate,
+		captureAgent: config.LoadSettings().CaptureAgent,
+		captureModel: config.LoadSettings().CaptureModel,
 		logger:       logger,
 		hiddenAgents: loadHiddenAgentSet(),
 		vault:        newVaultModel(memPath),
@@ -234,6 +240,8 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		m.trust = msg.trust
 		m.agentBrands = msg.agentBrands
 		m.suggestions = msg.suggestions
+		m.captureAgent = config.LoadSettings().CaptureAgent
+		m.captureModel = config.LoadSettings().CaptureModel
 		if m.suggestCursor >= len(m.suggestions) {
 			m.suggestCursor = 0
 		}
@@ -336,6 +344,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			defaultTrustLineY := -1
 			liveUsageLineY := -1
 			autoUpdateLineY := -1
+			captureModelLineY := -1
 			providerLineYs := make(map[string]int)
 			uniqueAgents := m.getUniqueAgents()
 			for idx, line := range viewLines {
@@ -351,6 +360,9 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 					liveUsageLineY = idx
 				} else if strings.Contains(clean, "Auto-Update") && hasBadge {
 					autoUpdateLineY = idx
+				}
+				if strings.Contains(clean, "Session capture model") {
+					captureModelLineY = idx
 				}
 				for _, a := range uniqueAgents {
 					if strings.Contains(clean, a.Name) && !strings.Contains(clean, "Overrides") && !strings.Contains(clean, "Default Trust") {
@@ -387,6 +399,10 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			if clickedY == autoUpdateLineY && autoUpdateLineY != -1 {
 				m.cursor = len(uniqueAgents) + 2
 				return m, m.toggleAutoUpdate()
+			}
+			if clickedY == captureModelLineY && captureModelLineY != -1 {
+				m.cursor = len(uniqueAgents) + 3
+				return m, m.cycleCaptureModel()
 			}
 		}
 	case tea.KeyMsg:
@@ -479,7 +495,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 
 		switch msg.String() {
 		case "j", "down":
-			max := len(uniqueAgents) + 2 // +1 Live Usage, +2 Auto-Update
+			max := len(uniqueAgents) + 3 // +1 Live Usage, +2 Auto-Update, +3 Session capture model
 			if m.cursor < max {
 				m.cursor++
 			}
@@ -516,10 +532,108 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				return m, m.toggleLiveUsage()
 			} else if m.cursor == len(uniqueAgents)+2 {
 				return m, m.toggleAutoUpdate()
+			} else if m.cursor == len(uniqueAgents)+3 {
+				return m, m.cycleCaptureModel()
 			}
 		}
 	}
 	return m, nil
+}
+
+type captureSettingChoice struct {
+	agent string
+	model string
+	label string
+}
+
+func (m settingsModel) captureChoices() []captureSettingChoice {
+	choices := []captureSettingChoice{
+		{agent: "", model: "", label: "Direct LLM"},
+	}
+	agents := m.agents
+	if len(agents) == 0 {
+		agents = detect.InstalledAgents()
+	}
+	providers, _ := buildOrgProviders(agents)
+	for _, p := range providers {
+		if p.kind != "agent" {
+			continue
+		}
+		key := orgProviderKey(p.id)
+		if key == "" {
+			continue
+		}
+		models := modelsForProvider(p)
+		if len(models) == 0 {
+			choices = append(choices, captureSettingChoice{
+				agent: key,
+				model: "",
+				label: key,
+			})
+			continue
+		}
+		for _, mLabel := range models {
+			val := modelValueForProvider(p, mLabel)
+			display := key
+			if val != "" {
+				display = key + " · " + val
+			}
+			choices = append(choices, captureSettingChoice{
+				agent: key,
+				model: val,
+				label: display,
+			})
+		}
+	}
+	return choices
+}
+
+func (m settingsModel) currentCaptureModelDisplay() string {
+	agent := strings.TrimSpace(m.captureAgent)
+	model := strings.TrimSpace(m.captureModel)
+	if agent == "" {
+		return "Direct LLM"
+	}
+	if model == "" {
+		return agent
+	}
+	return agent + " · " + model
+}
+
+func (m *settingsModel) cycleCaptureModel() tea.Cmd {
+	choices := m.captureChoices()
+	if len(choices) <= 1 {
+		return nil
+	}
+	curAgent := strings.TrimSpace(m.captureAgent)
+	curModel := strings.TrimSpace(m.captureModel)
+
+	currIdx := -1
+	for i, c := range choices {
+		if c.agent == curAgent && c.model == curModel {
+			currIdx = i
+			break
+		}
+	}
+	if currIdx == -1 && curAgent != "" {
+		for i, c := range choices {
+			if c.agent == curAgent {
+				currIdx = i
+				break
+			}
+		}
+	}
+	nextIdx := (currIdx + 1) % len(choices)
+	nextChoice := choices[nextIdx]
+
+	m.captureAgent = nextChoice.agent
+	m.captureModel = nextChoice.model
+
+	next := config.LoadSettings()
+	next.CaptureAgent = m.captureAgent
+	next.CaptureModel = m.captureModel
+	_ = config.SaveSettings(next)
+	return nil
 }
 
 // toggleLiveUsage flips the Live Usage opt-in, persisting it to settings.json.
@@ -878,8 +992,12 @@ func (m settingsModel) View() string {
 
 	// Live Usage and Auto-Update share one section + one toggle row so adding
 	// Auto-Update costs zero extra rows (keeps Settings within the fit guarantee).
-	lines = append(lines, "")
-	lines = append(lines, purple.Render("   Live Usage  ·  Auto-Update"))
+	// Short terminals drop the spacer + section title instead: the toggle and
+	// Session-capture rows label themselves, and this keeps the fit guarantee.
+	if !compact {
+		lines = append(lines, "")
+		lines = append(lines, purple.Render("   Live Usage  ·  Auto-Update  ·  Capture"))
+	}
 	if !compact {
 		lines = append(lines, dim.Render("   Live Usage calls providers for quota; Auto-Update"))
 		lines = append(lines, dim.Render("   self-updates after a session. Both off by default."))
@@ -919,6 +1037,17 @@ func (m settingsModel) View() string {
 		lines = append(lines, fmt.Sprintf("%s%s %s", liveCursor, liveLabel, liveState))
 		lines = append(lines, fmt.Sprintf("%s%s %s", autoCursor, autoLabel, autoState))
 	}
+
+	captureCursor := "  "
+	if m.cursor == len(uniqueAgents)+3 {
+		captureCursor = cyan.Render("▸ ")
+	}
+	captureLabel := fmt.Sprintf("%-22s", "Session capture model")
+	if m.cursor == len(uniqueAgents)+3 {
+		captureLabel = bold.Render(captureLabel)
+	}
+	captureVal := cyan.Render(m.currentCaptureModelDisplay())
+	lines = append(lines, fmt.Sprintf("%s%s %s", captureCursor, captureLabel, captureVal))
 
 	if len(m.suggestions) > 0 {
 		lines = append(lines, dim.Render(fmt.Sprintf("💡 trust: %d suggestion(s) — press ", len(m.suggestions)))+

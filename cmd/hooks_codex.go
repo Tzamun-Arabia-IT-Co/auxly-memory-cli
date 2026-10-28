@@ -295,6 +295,9 @@ func runCaptureTranscript(path, provider string) error {
 }
 
 func runCaptureText(transcript, provider string) error {
+	if os.Getenv(memory.CaptureChildEnv) != "" {
+		return nil // inside a capture agent's own run — never recurse
+	}
 	memPath := getMemoryPath()
 	if inCaptureCooldown(memPath) {
 		return nil
@@ -304,9 +307,9 @@ func runCaptureText(transcript, provider string) error {
 	}
 	_ = os.WriteFile(captureMarkerPath(memPath), []byte(time.Now().Format(time.RFC3339)), 0600)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	facts, err := memory.ExtractCaptureFacts(ctx, transcript)
+	facts, err := extractCaptureFacts(ctx, transcript)
 	if err != nil {
 		// Same breadcrumb contract as runCapture: hooks discard stderr.
 		fmt.Fprintf(os.Stderr, "auxly capture: %v\n", err)

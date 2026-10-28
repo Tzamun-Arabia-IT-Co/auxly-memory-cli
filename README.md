@@ -25,7 +25,13 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.5.2
+## 🆕 What's New in Version 1.5.3
+
+- **🤖 Capture with your own subscription.** Session capture can now run through any installed CLI agent (Claude Code, Codex, Gemini, Antigravity, Cursor), the same providers Memory Organize offers. Choose it under **Settings → Session capture model** in the TUI, or with `auxly capture config --agent claude --model haiku`. `AUXLY_CAPTURE_AGENT` / `AUXLY_CAPTURE_MODEL` override the setting. The agent runs isolated (no tools, no MCP servers, no hooks), so it can't re-trigger capture.
+- **🧩 OpenCode support.** `auxly hooks install --agent opencode` adds a plugin to `~/.config/opencode/plugins/`. When a session goes idle, the plugin sends its text messages (tool output excluded) to capture.
+- **⚡ Capture never blocks your agent.** The Claude Code Stop hook now runs `async`, so extraction happens in the background. Re-running `auxly hooks install` upgrades an existing hook in place.
+
+### Version 1.5.2
 
 - **🪄 Session capture actually captures.** `auxly capture` (the Stop hook behind `auxly hooks install`) asked the local server for a fixed default model (`qwen2.5-coder:7b`). When that model wasn't installed, every run failed with a 404 and queued nothing. Capture and organize now use the requested model when the server has it, and otherwise the first installed chat model, skipping embedding models.
 - **🎛️ `AUXLY_LLM_MODEL`.** Pin the model auxly uses on any endpoint (Ollama, vLLM, OpenAI, Gemini). Use a model with a large context window for capture: it sends the last 60K characters (~15K tokens) of the transcript, and a smaller window silently cuts off the instructions.

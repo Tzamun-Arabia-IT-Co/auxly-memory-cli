@@ -5,6 +5,32 @@ All notable changes to Auxly Memory CLI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-10-28
+
+### Added
+
+- **CLI-agent capture backend.** `memory.ExtractCaptureFactsWithAgent` runs fact extraction through a
+  headless CLI agent (e.g. `claude -p`) with the same isolation as Memory Organize's agent path: no tools,
+  no MCP servers, no settings or hooks (so a child Claude can't re-trigger the capture hook), a scrubbed
+  `AUXLY_*` env, and an empty temp working dir. A reply with no JSON object is recorded as a capture error.
+  The capture timeout is now 4 minutes.
+- **Capture backend setting.** `captureAgent` / `captureModel` in `~/.auxly/settings.json`, set from the TUI
+  (Settings → General → "Session capture model", same providers and models as Memory Organize) or with
+  `auxly capture config [--agent <name|none>] [--model <name>]`. Precedence: `AUXLY_CAPTURE_AGENT` /
+  `AUXLY_CAPTURE_MODEL` env, then settings, then the Direct LLM.
+- **OpenCode capture.** `auxly hooks install|uninstall --agent opencode` manages
+  `~/.config/opencode/plugins/auxly-capture.js`. The plugin reacts to `session.idle` / `session.status`
+  idle events and debounces 60 s per session. It sends only text parts (tool output excluded) of sessions
+  of 8,000+ characters to a detached `auxly capture --provider opencode` through stdin, and never throws
+  into OpenCode. `hooks status` shows its state.
+
+### Changed
+
+- **The Claude Code capture Stop hook is async** (`"async": true`, timeout 300 s), so capture runs in the
+  background. `auxly hooks install` upgrades an existing synchronous entry in place and touches no other hook.
+- On short terminals the TUI Settings screen drops the Live Usage section spacer and title, so the new row
+  still fits without scrolling.
+
 ## [1.5.2] - 2026-10-28
 
 ### Security

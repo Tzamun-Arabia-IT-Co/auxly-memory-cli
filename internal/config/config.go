@@ -91,6 +91,14 @@ type Settings struct {
 	// embeddings host (a public IP/hostname). Env AUXLY_EMBED_ALLOW_CLOUD=1
 	// also enables it. Off by default — local/LAN endpoints never need it.
 	EmbedAllowCloud bool `json:"embedAllowCloud,omitempty"`
+
+	// CaptureAgent persists the CLI-agent backend for session capture (empty =
+	// Direct LLM; otherwise claude, codex, gemini, antigravity, cursor).
+	// Env AUXLY_CAPTURE_AGENT wins.
+	CaptureAgent string `json:"captureAgent,omitempty"`
+
+	// CaptureModel persists the CLI agent's model name. Env AUXLY_CAPTURE_MODEL wins.
+	CaptureModel string `json:"captureModel,omitempty"`
 }
 
 // settingsPath returns ~/.auxly/settings.json.

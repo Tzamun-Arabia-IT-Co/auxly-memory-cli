@@ -52,7 +52,7 @@ func TestLiveUsageAutoUpdateAreSeparateRows(t *testing.T) {
 		t.Fatalf("non-compact: Live Usage and Auto-Update must each be their own row (got live=%d auto=%d)", liveLines, autoLines)
 	}
 
-	// Drive the cursor to the bottom: Default Trust (0) → agents → Live Usage → Auto-Update.
+	// Drive the cursor to the bottom: Default Trust (0) → agents → Live Usage → Auto-Update → Session capture model.
 	for i := 0; i < n+1; i++ {
 		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	}
@@ -63,17 +63,23 @@ func TestLiveUsageAutoUpdateAreSeparateRows(t *testing.T) {
 	if m.cursor != n+2 {
 		t.Fatalf("one more ↓ should reach Auto-Update (%d), got %d", n+2, m.cursor)
 	}
-	// And ↓ at the bottom does not overshoot.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if m.cursor != n+2 {
-		t.Errorf("cursor must clamp at Auto-Update (%d), got %d", n+2, m.cursor)
-	}
 
 	// Enter toggles Auto-Update (the row under the cursor), not Live Usage.
 	before := m.autoUpdate
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if m.autoUpdate == before {
 		t.Error("Enter on the Auto-Update row should toggle Auto-Update")
+	}
+
+	// One more ↓ reaches Session capture model.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.cursor != n+3 {
+		t.Fatalf("one more ↓ should reach Session capture model (%d), got %d", n+3, m.cursor)
+	}
+	// And ↓ at the bottom does not overshoot.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.cursor != n+3 {
+		t.Errorf("cursor must clamp at Session capture model (%d), got %d", n+3, m.cursor)
 	}
 }
 

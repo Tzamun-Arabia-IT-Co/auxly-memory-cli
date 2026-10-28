@@ -23,7 +23,7 @@ var hooksAgent string
 
 // supportedHookAgents lists every agent wireable via `--agent`; keep in sync
 // with the router below and `hooks status`'s row list.
-var supportedHookAgents = []string{"claude", "codex", "gemini", "kimi", "antigravity"}
+var supportedHookAgents = []string{"claude", "codex", "gemini", "kimi", "antigravity", "opencode"}
 
 var hooksInstallCmd = &cobra.Command{
 	Use:          "install",
@@ -68,8 +68,8 @@ var hooksStatusCmd = &cobra.Command{
 }
 
 func init() {
-	hooksInstallCmd.Flags().StringVar(&hooksAgent, "agent", "claude", "agent to wire: claude, codex, gemini, kimi, antigravity")
-	hooksUninstallCmd.Flags().StringVar(&hooksAgent, "agent", "claude", "agent to unwire: claude, codex, gemini, kimi, antigravity")
+	hooksInstallCmd.Flags().StringVar(&hooksAgent, "agent", "claude", "agent to wire: claude, codex, gemini, kimi, antigravity, opencode")
+	hooksUninstallCmd.Flags().StringVar(&hooksAgent, "agent", "claude", "agent to unwire: claude, codex, gemini, kimi, antigravity, opencode")
 	hooksCmd.AddCommand(hooksInstallCmd)
 	hooksCmd.AddCommand(hooksUninstallCmd)
 	hooksCmd.AddCommand(hooksStatusCmd)
@@ -86,14 +86,18 @@ func installHookForAgent(agent string) error {
 		if err != nil {
 			return err
 		}
-		changed, err := installCaptureHook(path)
+		status, err := installCaptureHookStatus(path)
 		if err != nil {
 			return err
 		}
-		if changed {
+		switch status {
+		case captureHookStatusInstalled:
 			fmt.Println("✅ Stop hook installed — facts from each Claude Code session flow into `auxly pending`.")
+			fmt.Println("   It runs in the background (async), so it never blocks the session.")
 			fmt.Println("   Remove any time with `auxly hooks uninstall`.")
-		} else {
+		case captureHookStatusUpgraded:
+			fmt.Println("✅ Stop hook upgraded to async — it now runs in the background, never blocking the session.")
+		default:
 			fmt.Println("✓ Stop hook already installed — nothing to do.")
 		}
 		return nil
@@ -115,6 +119,8 @@ func installHookForAgent(agent string) error {
 			fmt.Println("   Honest caveat: this captures raw terminal output via `script`, not a structured transcript.")
 		}
 		return nil
+	case "opencode":
+		return installOpencodeHook()
 	default:
 		return fmt.Errorf("unsupported --agent %q — supported: %s", agent, strings.Join(supportedHookAgents, ", "))
 	}
@@ -151,6 +157,8 @@ func uninstallHookForAgent(agent string) error {
 			fmt.Printf("✓ No %s capture wrapper found — nothing to remove.\n", agent)
 		}
 		return nil
+	case "opencode":
+		return uninstallOpencodeHook()
 	default:
 		return fmt.Errorf("unsupported --agent %q — supported: %s", agent, strings.Join(supportedHookAgents, ", "))
 	}
@@ -198,6 +206,12 @@ func runHooksStatus() error {
 			status, detail = "WIRED", path
 		}
 		fmt.Printf("   %-8s %-14s %s\n", agent, status, detail)
+	}
+
+	// opencode: ~/.config/opencode/plugins/auxly-capture.js presence.
+	if home, err := os.UserHomeDir(); err == nil {
+		status, detail := opencodeHookStatus(home)
+		fmt.Printf("   %-8s %-14s %s\n", "opencode", status, detail)
 	}
 
 	// Last capture failure is invisible by design (hooks discard stderr), so
@@ -293,6 +307,11 @@ func autoWireCleanHooks(home string) []string {
 			wired = append(wired, "codex")
 		}
 	}
+	if opencodeInstalled(home) && !autoHookOptedOut(home, "opencode") {
+		if changed, err := installOpencodeHookAt(opencodePluginPath(home)); err == nil && changed {
+			wired = append(wired, "opencode")
+		}
+	}
 
 	shellAgentPresent := map[string]bool{
 		"gemini":      geminiInstalled(),
@@ -383,6 +402,11 @@ func writeAutoHookOptOut(home string, set map[string]bool) {
 // own entry — never touch anything else in the user's settings.
 const captureHookCommand = "auxly capture --stop-hook"
 
+// captureHookTimeout is the Stop hook's timeout in seconds — 5 minutes, above
+// the capture run's own 4-minute ceiling, so the process is never killed
+// mid-extraction.
+const captureHookTimeout = 300
+
 // settingsHasCaptureStopHook reports whether an already-parsed settings.json
 // carries our Stop hook entry — the read-only half of install's idempotency
 // check, factored out so `hooks status` can reuse it.
@@ -414,17 +438,47 @@ func captureHookInstalled(path string) (bool, error) {
 	return settingsHasCaptureStopHook(settings), nil
 }
 
+// captureHookInstallStatus says what an install did — the file was written (a
+// fresh install, or an in-place upgrade of an existing sync entry to async) or
+// left untouched (already installed).
+type captureHookInstallStatus int
+
+const (
+	captureHookStatusUnchanged captureHookInstallStatus = iota
+	captureHookStatusInstalled
+	captureHookStatusUpgraded
+)
+
 // installCaptureHook merges a Stop hook into settings.json (read-merge-write,
-// never clobber). Returns false when the hook is already present (idempotent).
+// never clobber). Returns true when the file changed — a fresh install or an
+// in-place upgrade of an existing entry to async.
 func installCaptureHook(path string) (bool, error) {
+	status, err := installCaptureHookStatus(path)
+	return status != captureHookStatusUnchanged, err
+}
+
+// installCaptureHookStatus does the actual read-merge-write and reports what
+// it did, so the caller can tell a fresh install from an async upgrade.
+//
+// New entries are ASYNC with a 5-minute timeout: a synchronous Stop hook
+// blocks the session teardown for the whole extraction (an agent backend makes
+// that even slower). An entry installed before the async switch is upgraded in
+// place — same command, same position, only our own hook object is touched.
+func installCaptureHookStatus(path string) (captureHookInstallStatus, error) {
 	settings := map[string]any{}
 	if data, err := os.ReadFile(path); err == nil {
 		if jerr := json.Unmarshal(data, &settings); jerr != nil {
-			return false, fmt.Errorf("%s is not valid JSON — fix it first, refusing to clobber: %w", path, jerr)
+			return captureHookStatusUnchanged, fmt.Errorf("%s is not valid JSON — fix it first, refusing to clobber: %w", path, jerr)
 		}
 	}
 	if settingsHasCaptureStopHook(settings) {
-		return false, nil
+		if !upgradeCaptureHookAsync(settings) {
+			return captureHookStatusUnchanged, nil
+		}
+		if err := writeCaptureHookSettings(path, settings); err != nil {
+			return captureHookStatusUnchanged, err
+		}
+		return captureHookStatusUpgraded, nil
 	}
 
 	hooks, _ := settings["hooks"].(map[string]any)
@@ -436,20 +490,63 @@ func installCaptureHook(path string) (bool, error) {
 		"hooks": []any{map[string]any{
 			"type":    "command",
 			"command": captureHookCommand,
-			"timeout": 120,
+			"timeout": captureHookTimeout,
+			"async":   true,
 		}},
 	})
 	hooks["Stop"] = stop
 	settings["hooks"] = hooks
 
+	if err := writeCaptureHookSettings(path, settings); err != nil {
+		return captureHookStatusUnchanged, err
+	}
+	return captureHookStatusInstalled, nil
+}
+
+// upgradeCaptureHookAsync flips our Stop-hook entry to async mode in place.
+// Only the hook object carrying our command is touched — every other entry
+// stays byte-for-byte. Returns false when there is nothing to upgrade (no
+// entry, or it is already async).
+func upgradeCaptureHookAsync(settings map[string]any) bool {
+	hooks, _ := settings["hooks"].(map[string]any)
+	stop, _ := hooks["Stop"].([]any)
+	for _, entry := range stop {
+		m, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		inner, _ := m["hooks"].([]any)
+		for _, h := range inner {
+			hm, ok := h.(map[string]any)
+			if !ok {
+				continue
+			}
+			if cmd, _ := hm["command"].(string); !strings.Contains(cmd, captureHookCommand) {
+				continue
+			}
+			if async, _ := hm["async"].(bool); async {
+				return false // already async — nothing to upgrade
+			}
+			hm["async"] = true
+			hm["timeout"] = captureHookTimeout
+			return true
+		}
+	}
+	return false
+}
+
+// writeCaptureHookSettings marshals the merged settings back to disk. The
+// never-clobber rule lives upstream (the JSON parse in installCaptureHookStatus);
+// this only writes.
+func writeCaptureHookSettings(path string, settings map[string]any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return false, err
+		return err
 	}
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
-		return false, err
+		return err
 	}
-	return true, os.WriteFile(path, append(data, '\n'), 0644)
+	return os.WriteFile(path, append(data, '\n'), 0644)
 }
 
 // uninstallCaptureHook removes exactly the entries carrying our command,

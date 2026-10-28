@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -109,6 +111,91 @@ func ExtractCaptureFacts(ctx context.Context, transcript string) ([]CaptureFact,
 		return nil, nil
 	}
 	return ParseCaptureFacts(chat.Choices[0].Message.Content), nil
+}
+
+// ExtractCaptureFactsWithAgent runs a headless CLI agent (e.g. `claude -p`)
+// over the transcript tail instead of the Direct LLM. Same prompt, same
+// trimming, same parsing — only the transport differs — so the agent inherits
+// the organize path's isolation (organize.go): no tools, no MCP servers, a
+// scrubbed env, an empty working dir. Errors are for the CALLER to swallow,
+// exactly like ExtractCaptureFacts.
+func ExtractCaptureFactsWithAgent(ctx context.Context, agentName, agentPath, model, transcript string) ([]CaptureFact, error) {
+	transcript = strings.TrimSpace(transcript)
+	if len(transcript) > captureTailChars {
+		transcript = transcript[len(transcript)-captureTailChars:]
+	}
+	if transcript == "" {
+		return nil, nil
+	}
+
+	sys := fmt.Sprintf(captureSystemPrompt, RenderForPrompt(), captureMaxFacts)
+	prompt := sys + "\n\nTranscript (tail):\n\n" + transcript
+
+	out, err := runCaptureAgent(ctx, agentName, agentPath, model, prompt)
+	if err != nil {
+		return nil, err
+	}
+
+	// A reply with NO JSON object at all is a broken extraction, not "no
+	// facts" — surface it so it lands in the capture breadcrumb. A VALID
+	// object with zero facts is a real answer (nothing durable) and stays a
+	// success.
+	payload := extractJSON(out)
+	facts := ParseCaptureFacts(payload)
+	if len(facts) == 0 && !strings.Contains(payload, "{") {
+		return nil, fmt.Errorf("capture agent %s reply had no JSON object", agentName)
+	}
+	return facts, nil
+}
+
+// CaptureChildEnv is set in a capture agent's environment; `auxly capture`
+// exits immediately when it sees it, so the child can never re-trigger capture.
+const CaptureChildEnv = "AUXLY_CAPTURE_CHILD"
+
+// runCaptureAgent executes the headless agent once and returns its stdout.
+// Mirrors the organize agent branch: empty stdin (no TTY hang), a scrubbed env
+// with no AUXLY_* vars (so the child can't locate the real vault), an empty
+// temp working dir (so a relative file read finds nothing), and the agent's
+// no-tools/no-MCP flags — the prompt embeds user content, so the child stays a
+// pure text→JSON transform.
+func runCaptureAgent(ctx context.Context, agentName, agentPath, model, prompt string) (string, error) {
+	cmd := exec.CommandContext(ctx, agentPath, buildAgentArgs(agentName, model, prompt)...)
+	cmd.Stdin = strings.NewReader("")
+	// CaptureChildEnv marks the child so any capture hook it fires (e.g. a
+	// Codex notify hook) exits at once instead of recursing.
+	cmd.Env = append(scrubbedOrganizeEnv(), CaptureChildEnv+"=1")
+	workDir, err := os.MkdirTemp("", "auxly-capture-")
+	if err != nil {
+		return "", fmt.Errorf("capture agent %s: %w", agentName, err)
+	}
+	defer os.RemoveAll(workDir)
+	cmd.Dir = workDir
+	// Give a killed process a moment to flush before its pipes are closed.
+	cmd.WaitDelay = 5 * time.Second
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		tail := stderrTail(stderr.String())
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("capture agent %s: %w (stderr: %s)", agentName, ctxErr, tail)
+		}
+		return "", fmt.Errorf("capture agent %s failed: %v (stderr: %s)", agentName, err, tail)
+	}
+	return stdout.String(), nil
+}
+
+// stderrTail keeps the last ~300 chars of an agent's stderr — enough to see
+// why it failed, small enough to keep in the capture breadcrumb.
+func stderrTail(s string) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= 300 {
+		return s
+	}
+	return "…" + string(r[len(r)-300:])
 }
 
 // ParseCaptureFacts parses the model's JSON (lenient — fenced/dirty output is

@@ -329,6 +329,11 @@ func orgProviderKey(name string) string {
 	}
 }
 
+// OrgProviderKey maps an agent name to its canonical provider key (e.g. "claude", "codex").
+func OrgProviderKey(name string) string {
+	return orgProviderKey(name)
+}
+
 func modelsForProvider(p orgProvider) []string {
 	if p.kind == "agent" {
 		if models := agentModels[orgProviderKey(p.id)]; len(models) > 0 {

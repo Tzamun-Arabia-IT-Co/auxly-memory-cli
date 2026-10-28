@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 )
 
 // TestCaptureCodexNotifyFlagRoutesToHandler locks finding 1 (CRITICAL):
@@ -165,5 +167,75 @@ func TestReadTranscriptJSONLStripsANSIFromRawFallback(t *testing.T) {
 	}
 	if !strings.Contains(got, "green text") || !strings.Contains(got, "plain text here") {
 		t.Fatalf("plain text content lost while stripping ANSI: %q", got)
+	}
+}
+
+// TestCaptureConfigPriority verifies: env beats settings; settings beat default; --agent none clears.
+func TestCaptureConfigPriority(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv(captureAgentEnv, "")
+	t.Setenv(captureModelEnv, "")
+
+	// 1. Default (no env, no settings)
+	agent, model, source := resolveCaptureBackend()
+	if agent != "" || model != "" || source != "default" {
+		t.Fatalf("expected default Direct LLM, got agent=%q model=%q source=%q", agent, model, source)
+	}
+	if got := formatCaptureBackendSummary(agent, model, source); got != "Direct LLM (default)" {
+		t.Fatalf("expected 'Direct LLM (default)', got %q", got)
+	}
+
+	// 2. Settings beat default
+	s := config.LoadSettings()
+	s.CaptureAgent = "claude"
+	s.CaptureModel = "sonnet"
+	if err := config.SaveSettings(s); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+
+	agent, model, source = resolveCaptureBackend()
+	if agent != "claude" || model != "sonnet" || source != "settings" {
+		t.Fatalf("expected settings claude/sonnet, got agent=%q model=%q source=%q", agent, model, source)
+	}
+	if got := formatCaptureBackendSummary(agent, model, source); got != "claude · sonnet (settings)" {
+		t.Fatalf("expected 'claude · sonnet (settings)', got %q", got)
+	}
+
+	// 3. Env beats settings
+	t.Setenv(captureAgentEnv, "codex")
+	t.Setenv(captureModelEnv, "gpt-5.2")
+
+	agent, model, source = resolveCaptureBackend()
+	if agent != "codex" || model != "gpt-5.2" || source != "env" {
+		t.Fatalf("expected env codex/gpt-5.2, got agent=%q model=%q source=%q", agent, model, source)
+	}
+	if got := formatCaptureBackendSummary(agent, model, source); got != "codex · gpt-5.2 (env)" {
+		t.Fatalf("expected 'codex · gpt-5.2 (env)', got %q", got)
+	}
+
+	// Clear env for the next check
+	t.Setenv(captureAgentEnv, "")
+	t.Setenv(captureModelEnv, "")
+
+	// 4. --agent none clears
+	// Call RunE directly: Execute() on a subcommand runs the ROOT command with
+	// os.Args, which launches the TUI and needs a TTY.
+	if err := captureConfigCmd.Flags().Set("agent", "none"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = captureConfigCmd.Flags().Set("agent", ""); captureConfigAgent = "" })
+	if err := runCaptureConfig(captureConfigCmd, nil); err != nil {
+		t.Fatalf("capture config --agent none: %v", err)
+	}
+
+	saved := config.LoadSettings()
+	if saved.CaptureAgent != "" || saved.CaptureModel != "" {
+		t.Fatalf("expected cleared settings, got agent=%q model=%q", saved.CaptureAgent, saved.CaptureModel)
+	}
+
+	agent, model, source = resolveCaptureBackend()
+	if agent != "" || source != "default" {
+		t.Fatalf("expected Direct LLM default after clearing, got agent=%q source=%q", agent, source)
 	}
 }
