@@ -25,11 +25,11 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.5.0
+## 🆕 What's New in Version 1.5.1
 
-- **🧹 Orphan Sweep (`auxly organize --sweep` + TUI "Sweep orphans" + `auxly doctor`).** Vault roots accumulate stray files no organize mode could ever see — hand-dropped notes, stale exports, loose project files. The sweep detects them, re-files their bullets into the right taxonomy files through the same review-gated pending queue (`auxly approve --agent organize-sweep`), and applies the split-projects two-phase safety contract: additions queue first, and an orphan's deletions are only ever queued for bullets provably present in a target — rejecting an addition can never lose a fact. Drained husk files are cleaned up, encrypted files are never decrypted, and non-memory files (`.bak`, `.txt`) are reported, never touched. `auxly doctor` now flags orphan files and points at the sweep.
-- **🧠 Smarter Headless LLM Resolution.** Organize-family features with no model configured now share one resolver (`detect.ResolveHeadlessLLM`): Direct LLM when reachable, otherwise the first installed CLI agent with a *verified* one-shot invocation — no more dying on an unreachable `localhost:11434`, and no more falling back to agents whose headless flags were never verified.
-- **🚮 Removed the dead `--force` flag on `auxly organize`.** Registered in v1.4.6 but never read — on-demand organize always evaluates every file; the flag lied.
+- **🪄 Session capture actually captures.** `auxly capture` (the Stop hook behind `auxly hooks install`) asked the local server for a fixed default model (`qwen2.5-coder:7b`). When that model wasn't installed, every run failed with a 404 and queued nothing. Capture and organize now use the requested model when the server has it, and otherwise the first installed chat model, skipping embedding models.
+- **🎛️ `AUXLY_LLM_MODEL`.** Pin the model auxly uses on any endpoint (Ollama, vLLM, OpenAI, Gemini). Use a model with a large context window for capture: it sends the last 60K characters (~15K tokens) of the transcript, and a smaller window silently cuts off the instructions.
+- **🚨 Capture failures are no longer silent.** Hooks discard stderr, so a failing capture used to leave no trace. The last error is now kept in `.capture-last-error` in the vault and shown by `auxly hooks status` and `auxly doctor`. It clears on the next successful run.
 
 Looking for past release details? See the [CHANGELOG](CHANGELOG.md) for the full history.
 

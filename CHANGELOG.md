@@ -5,6 +5,26 @@ All notable changes to Auxly Memory CLI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-10-28
+
+### Fixed
+
+- **Session capture never queued anything when the default model was missing.** `memory.ExtractCaptureFacts`
+  sent the resolved default model (`qwen2.5-coder:7b`) unchanged. On a server without that model every
+  capture returned HTTP 404 "model not found", and the Stop hook discarded the error. Capture now picks
+  its model with `llm.PickChatModel`: the requested model when the endpoint serves it, otherwise the
+  first served model that isn't an embedding model. On any probe error it keeps the requested model.
+- **Organize could pick an embedding model.** `runOrganizeModel` used `SelfHealModel`, which returned
+  the first served model even when that was an embedder such as `nomic-embed-text`. It now uses
+  `PickChatModel` too.
+
+### Added
+
+- **`AUXLY_LLM_MODEL`.** Overrides the chat model on every endpoint branch of `llm.ResolveEndpoint`.
+- **Visible capture failures.** A failed extraction writes `.capture-last-error` (timestamp + error,
+  mode 0600) in the vault. `auxly hooks status` and `auxly doctor` show it, and a successful run clears
+  it. This covers the Claude Code Stop-hook path and the Codex notify path.
+
 ## [1.5.0] - 2026-09-17
 
 ### Added

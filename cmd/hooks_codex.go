@@ -308,9 +308,12 @@ func runCaptureText(transcript, provider string) error {
 	defer cancel()
 	facts, err := memory.ExtractCaptureFacts(ctx, transcript)
 	if err != nil {
+		// Same breadcrumb contract as runCapture: hooks discard stderr.
 		fmt.Fprintf(os.Stderr, "auxly capture: %v\n", err)
+		recordCaptureError(memPath, err)
 		return nil
 	}
+	clearCaptureError(memPath)
 	store := memory.NewStore(memPath)
 	facts = store.DedupCaptureFacts(facts)
 	if len(facts) == 0 {

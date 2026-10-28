@@ -82,7 +82,7 @@ func TestResolveEndpoint(t *testing.T) {
 	}
 
 	// All env vars the resolver reads — clear them so cases stay isolated.
-	allKeys := []string{"OPENAI_API_KEY", "GEMINI_API_KEY", "OLLAMA_HOST", "AUXLY_LLM_BASE"}
+	allKeys := []string{"OPENAI_API_KEY", "GEMINI_API_KEY", "OLLAMA_HOST", "AUXLY_LLM_BASE", "AUXLY_LLM_MODEL"}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -166,6 +166,106 @@ func TestEndpointURLs(t *testing.T) {
 	}
 	if got := gemini.ModelsURL(); got != "https://generativelanguage.googleapis.com/v1beta/openai/models" {
 		t.Errorf("gemini ModelsURL = %q", got)
+	}
+}
+
+func TestPickChatModel(t *testing.T) {
+	t.Run("preferred served wins over first non-embed", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"data":[{"id":"nomic-embed-text"},{"id":"llama3:8b"},{"id":"qwen2.5-coder:7b"}]}`))
+		}))
+		defer srv.Close()
+
+		if got := PickChatModel(srv.URL, "qwen2.5-coder:7b"); got != "qwen2.5-coder:7b" {
+			t.Errorf("PickChatModel = %q, want qwen2.5-coder:7b", got)
+		}
+	})
+
+	t.Run("preferred missing returns first non-embed", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"data":[{"id":"nomic-embed-text"},{"id":"llama3:8b"}]}`))
+		}))
+		defer srv.Close()
+
+		if got := PickChatModel(srv.URL, "qwen2.5-coder:7b"); got != "llama3:8b" {
+			t.Errorf("PickChatModel = %q, want llama3:8b", got)
+		}
+	})
+
+	t.Run("embed-only list returns preferred", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"data":[{"id":"nomic-embed-text"}]}`))
+		}))
+		defer srv.Close()
+
+		if got := PickChatModel(srv.URL, "qwen2.5-coder:7b"); got != "qwen2.5-coder:7b" {
+			t.Errorf("PickChatModel = %q, want preferred fallback", got)
+		}
+	})
+
+	t.Run("empty ids are skipped", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"data":[{"id":""},{},{"id":"llama3:8b"}]}`))
+		}))
+		defer srv.Close()
+
+		if got := PickChatModel(srv.URL, "qwen2.5-coder:7b"); got != "llama3:8b" {
+			t.Errorf("PickChatModel = %q, want llama3:8b", got)
+		}
+	})
+
+	t.Run("non-200 returns preferred", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"data":[{"id":"llama3:8b"}]}`))
+		}))
+		defer srv.Close()
+
+		if got := PickChatModel(srv.URL, "qwen2.5-coder:7b"); got != "qwen2.5-coder:7b" {
+			t.Errorf("PickChatModel = %q, want preferred fallback", got)
+		}
+	})
+
+	t.Run("server error returns preferred", func(t *testing.T) {
+		// Closed server → connection refused.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		url := srv.URL
+		srv.Close()
+
+		if got := PickChatModel(url, "qwen2.5-coder:7b"); got != "qwen2.5-coder:7b" {
+			t.Errorf("PickChatModel = %q, want preferred fallback", got)
+		}
+	})
+}
+
+func TestResolveEndpointModelOverride(t *testing.T) {
+	// AUXLY_LLM_MODEL must override the resolved default on every branch.
+	for _, env := range []map[string]string{
+		{"OPENAI_API_KEY": "sk-openai"},
+		{"GEMINI_API_KEY": "g-key"},
+		{"OLLAMA_HOST": "http://example:11434"},
+		{"AUXLY_LLM_BASE": "http://gw.local:9000"},
+	} {
+		for _, k := range []string{"OPENAI_API_KEY", "GEMINI_API_KEY", "OLLAMA_HOST", "AUXLY_LLM_BASE"} {
+			t.Setenv(k, "")
+		}
+		for k, v := range env {
+			t.Setenv(k, v)
+		}
+		t.Setenv("AUXLY_LLM_MODEL", "my-model")
+
+		if got := ResolveEndpoint(); got.Model != "my-model" {
+			t.Errorf("env %v: Model = %q, want override my-model", env, got.Model)
+		}
+	}
+
+	// Empty override leaves the defaults alone.
+	for _, k := range []string{"OPENAI_API_KEY", "GEMINI_API_KEY", "OLLAMA_HOST", "AUXLY_LLM_BASE"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("AUXLY_LLM_MODEL", "")
+	if got := ResolveEndpoint(); got.Model != "qwen2.5-coder:7b" {
+		t.Errorf("empty AUXLY_LLM_MODEL: Model = %q, want qwen2.5-coder:7b", got.Model)
 	}
 }
 

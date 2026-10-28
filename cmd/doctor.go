@@ -162,6 +162,13 @@ func doctorReport(memPath string, probeLinks bool) string {
 		}
 	}
 
+	// 4f. Last capture failure: hooks discard stderr, so a failed extraction
+	// leaves only this breadcrumb. Point at the model knobs — the usual cause
+	// is a resolved default model that isn't installed on the server.
+	if data, rerr := os.ReadFile(captureErrorPath(memPath)); rerr == nil {
+		line("⚠", "last capture failed: "+strings.TrimSpace(string(data)), "check the capture model: set AUXLY_LLM_MODEL or OLLAMA_HOST")
+	}
+
 	// 5. Agents + MCP wiring
 	home, _ := os.UserHomeDir()
 	agents := detect.InstalledAgents()

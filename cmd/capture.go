@@ -57,6 +57,24 @@ func captureMarkerPath(memPath string) string {
 	return filepath.Join(memPath, ".capture-last")
 }
 
+// captureErrorPath is the last-capture-error breadcrumb for a given vault.
+// Hooks discard stderr, so this file is the only durable trace of a failed
+// extraction — surfaced by `auxly hooks status` and `auxly doctor`.
+func captureErrorPath(memPath string) string {
+	return filepath.Join(memPath, ".capture-last-error")
+}
+
+// recordCaptureError writes the breadcrumb (best effort — never fail a
+// fire-and-forget capture over a breadcrumb write).
+func recordCaptureError(memPath string, err error) {
+	_ = os.WriteFile(captureErrorPath(memPath), []byte(time.Now().Format(time.RFC3339)+" "+err.Error()+"\n"), 0600)
+}
+
+// clearCaptureError removes the breadcrumb once a capture run succeeds.
+func clearCaptureError(memPath string) {
+	_ = os.Remove(captureErrorPath(memPath))
+}
+
 // inCaptureCooldown reports whether memPath's throttle marker is still fresh.
 // Every capture entry point checks this FIRST, before doing any real work —
 // walking a session tree, reading a transcript, calling an LLM.
@@ -94,10 +112,13 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	facts, err := memory.ExtractCaptureFacts(ctx, transcript)
 	if err != nil {
 		// Fire-and-forget contract: an unreachable model must never fail a
-		// session teardown. Named on stderr, exit 0.
+		// session teardown. Named on stderr, exit 0. Also recorded to the
+		// breadcrumb — hooks discard stderr, so this is the visible trace.
 		fmt.Fprintf(os.Stderr, "auxly capture: %v\n", err)
+		recordCaptureError(memPath, err)
 		return nil
 	}
+	clearCaptureError(memPath)
 	store := memory.NewStore(memPath)
 	facts = store.DedupCaptureFacts(facts)
 	if len(facts) == 0 {

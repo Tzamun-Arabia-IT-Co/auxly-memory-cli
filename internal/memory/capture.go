@@ -57,8 +57,16 @@ func ExtractCaptureFacts(ctx context.Context, transcript string) ([]CaptureFact,
 	ep := llm.ResolveEndpoint()
 	sys := fmt.Sprintf(captureSystemPrompt, RenderForPrompt(), captureMaxFacts)
 
+	// Pick a model the endpoint actually serves and that can chat — the
+	// resolved default may be missing (404) and the first-served id may be an
+	// embedder. Cloud endpoints keep their model: the probe is unauthenticated.
+	model := ep.Model
+	if !ep.IsCloud {
+		model = llm.PickChatModel(ep.ModelsURL(), ep.Model)
+	}
+
 	payload := map[string]any{
-		"model": ep.Model,
+		"model": model,
 		"messages": []map[string]string{
 			{"role": "system", "content": sys},
 			{"role": "user", "content": "Transcript (tail):\n\n" + transcript},

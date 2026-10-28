@@ -855,7 +855,10 @@ func (s *Store) runOrganizeModel(ctx context.Context, agentName string, agentPat
 		apiKey := endpoint.APIKey
 
 		// Dynamic self-healing model selector: query installed models on Ollama/vLLM to prevent 404s!
-		model := llm.SelfHealModel(endpoint.ModelsURL(), endpoint.Model)
+		model := endpoint.Model
+		if !endpoint.IsCloud {
+			model = llm.PickChatModel(endpoint.ModelsURL(), endpoint.Model)
+		}
 
 		type msg struct {
 			Role    string `json:"role"`

@@ -199,6 +199,12 @@ func runHooksStatus() error {
 		}
 		fmt.Printf("   %-8s %-14s %s\n", agent, status, detail)
 	}
+
+	// Last capture failure is invisible by design (hooks discard stderr), so
+	// surface the breadcrumb here — the only place a broken capture shows.
+	if data, err := os.ReadFile(captureErrorPath(getMemoryPath())); err == nil {
+		fmt.Printf("   ⚠️  last capture failed: %s\n", strings.TrimSpace(string(data)))
+	}
 	return nil
 }
 

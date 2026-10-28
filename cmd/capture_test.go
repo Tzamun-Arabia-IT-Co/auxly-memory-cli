@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -101,6 +102,34 @@ func TestReadTranscriptJSONLFallsBackWhenExtractionEmpty(t *testing.T) {
 	if got != body {
 		t.Fatalf("a lone embedded {} line must not veto the raw fallback:\ngot:  %q\nwant: %q", got, body)
 	}
+}
+
+// TestRecordClearCaptureError locks the breadcrumb contract: a failed capture
+// (hooks discard stderr) writes .capture-last-error, and the next successful
+// run clears it.
+func TestRecordClearCaptureError(t *testing.T) {
+	memPath := t.TempDir()
+	if _, err := os.Stat(captureErrorPath(memPath)); !os.IsNotExist(err) {
+		t.Fatalf("no run yet — breadcrumb must not exist, got stat err %v", err)
+	}
+
+	recordCaptureError(memPath, fmt.Errorf("capture LLM status 404: model not found"))
+	data, err := os.ReadFile(captureErrorPath(memPath))
+	if err != nil {
+		t.Fatalf("recordCaptureError must write the breadcrumb: %v", err)
+	}
+	if !strings.Contains(string(data), "capture LLM status 404: model not found") {
+		t.Fatalf("breadcrumb must carry the error text, got %q", data)
+	}
+	if _, err := time.Parse(time.RFC3339, strings.Fields(string(data))[0]); err != nil {
+		t.Fatalf("breadcrumb must start with an RFC3339 stamp, got %q", data)
+	}
+
+	clearCaptureError(memPath)
+	if _, err := os.Stat(captureErrorPath(memPath)); !os.IsNotExist(err) {
+		t.Fatalf("clearCaptureError must remove the breadcrumb, got stat err %v", err)
+	}
+	clearCaptureError(memPath) // idempotent — removing a missing file is fine
 }
 
 // TestReadTranscriptJSONLStripsANSIFromRawFallback locks finding 12: the raw

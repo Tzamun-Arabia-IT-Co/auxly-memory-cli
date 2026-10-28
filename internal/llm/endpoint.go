@@ -43,7 +43,18 @@ func (e Endpoint) ModelsURL() string { return e.APIBase + "/models" }
 //  4. AUXLY_LLM_BASE  -> $AUXLY_LLM_BASE/v1 (trailing slash trimmed, local)
 //  5. probe http://localhost:8000/v1/models (loopback, 800ms) -> :8000 (local)
 //  6. default Ollama  -> http://localhost:11434/v1 (local)
+//
+// AUXLY_LLM_MODEL (optional, all branches) overrides the resolved default
+// chat model — use it when the default isn't installed on the target server.
 func ResolveEndpoint() Endpoint {
+	ep := resolveEndpoint()
+	if m := os.Getenv("AUXLY_LLM_MODEL"); m != "" {
+		ep.Model = m
+	}
+	return ep
+}
+
+func resolveEndpoint() Endpoint {
 	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
 		return Endpoint{
 			APIBase: "https://api.openai.com/v1",
@@ -121,6 +132,45 @@ func ConfiguredOrReachable() bool {
 		return true
 	}
 	return false
+}
+
+// PickChatModel queries modelsURL (800ms) and picks a chat-capable model:
+// the preferred id when the endpoint serves it, otherwise the first served id
+// that is not an embedding model (embedders can list first but cannot chat).
+// On any error, non-200 status, or empty list it returns preferred unchanged.
+// The probe is unauthenticated, so callers skip it for cloud endpoints.
+func PickChatModel(modelsURL, preferred string) string {
+	client := &http.Client{Timeout: probeTimeout}
+	resp, err := client.Get(modelsURL)
+	if err != nil {
+		return preferred
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return preferred
+	}
+
+	type modelInfo struct {
+		ID string `json:"id"`
+	}
+	type modelsResp struct {
+		Data []modelInfo `json:"data"`
+	}
+	var mr modelsResp
+	if err := json.NewDecoder(resp.Body).Decode(&mr); err != nil || len(mr.Data) == 0 {
+		return preferred
+	}
+	for _, m := range mr.Data {
+		if m.ID == preferred {
+			return preferred
+		}
+	}
+	for _, m := range mr.Data {
+		if m.ID != "" && !strings.Contains(strings.ToLower(m.ID), "embed") {
+			return m.ID
+		}
+	}
+	return preferred
 }
 
 // SelfHealModel queries modelsURL (800ms) and returns the first served model id
