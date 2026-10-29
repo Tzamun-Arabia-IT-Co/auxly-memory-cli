@@ -703,3 +703,19 @@ func TestOpsConfirmPrePush_NoPendingSetupDoesNotSilentlyReturn(t *testing.T) {
 		t.Fatalf("pressing 'y' with empty pending should set error status, got: status=%q statusErr=%v", m.status, m.statusErr)
 	}
 }
+
+func TestOpsConfirmPrePush_GHExistingPublicRepoStops(t *testing.T) {
+	m := newOpsModel(t.TempDir())
+	m.loaded = true
+	m.mode = "confirmPrePush"
+	m.pendingGHRepo = "my-vault"
+	m.pendingReport = git.Report{Visibility: git.VisibilityPublic}
+
+	m, cmd := m.handleKey(keyRunes("y"))
+	if cmd != nil || m.busy {
+		t.Fatal("[y] must not rerun create when the existing repo is public")
+	}
+	if !m.statusErr || !strings.Contains(m.status, "public") {
+		t.Fatalf("expected a public-repo error status, got %q", m.status)
+	}
+}

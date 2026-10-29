@@ -483,6 +483,11 @@ func (m opsModel) handleKey(msg tea.KeyMsg) (opsModel, tea.Cmd) {
 			m.pendingGHRepo = ""
 			m.pendingReport = git.Report{}
 			if ghRepo != "" {
+				if allowPublic {
+					// The name already exists as a PUBLIC repo; rerunning would only block again.
+					m.status, m.statusErr = "✗ "+ghRepo+" already exists and is public — make it private or set up by URL", true
+					return m, nil
+				}
 				m.status = ""
 				m.busy, m.busyLabel, m.spin = true, "Creating private GitHub repo "+ghRepo, 0
 				// The confirmation covered the local findings only: the repo didn't exist
