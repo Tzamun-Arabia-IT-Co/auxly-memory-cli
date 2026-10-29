@@ -1105,3 +1105,327 @@ func TestCreateGitHubAndSetup_ReusesExistingRepo(t *testing.T) {
 
 // fakeGitHubToken is built at runtime so secret scanners skip the fixture.
 var fakeGitHubToken = "gh" + "p_" + strings.Repeat("a1", 18)
+
+func TestCreateGitHubAndSetup_ExistingPublicRepoBlocks(t *testing.T) {
+	vaultDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(vaultDir, "identity.md"), []byte("- clean fact\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origRunGH, origAvail := runGH, ghAvailable
+	defer func() { runGH, ghAvailable = origRunGH, origAvail }()
+	ghAvailable = func() bool { return true }
+	runGH = func(ctx context.Context, timeout time.Duration, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "repo" && args[1] == "create" {
+			return []byte("GraphQL: Name already exists on this account (createRepository)\n"), errors.New("exit status 1")
+		}
+		if len(args) >= 2 && args[0] == "repo" && args[1] == "view" {
+			for i, a := range args {
+				if a == "--json" && i+1 < len(args) && strings.Contains(args[i+1], "isPrivate") {
+					return []byte(`{"isPrivate": false}`), nil
+				}
+				if a == "--json" && i+1 < len(args) && strings.Contains(args[i+1], "sshUrl") {
+					return []byte(`{"sshUrl": "git@github.com:someone/existing-vault.git", "url": "https://github.com/someone/existing-vault"}`), nil
+				}
+			}
+		}
+		return nil, errors.New("unexpected gh call")
+	}
+
+	// Confirmed covers the local findings only; an existing public repo must still block.
+	res, err := CreateGitHubAndSetup(context.Background(), vaultDir, "existing-vault", SetupOptions{Confirmed: true})
+	if err == nil || !res.Blocked || !res.Report.IsPublic() {
+		t.Fatalf("expected public-repo block, got res=%+v err=%v", res, err)
+	}
+	if isGitRepo(vaultDir) {
+		out, _ := exec.Command("git", "-C", vaultDir, "log", "--oneline").CombinedOutput()
+		t.Fatalf("blocked setup must not create commits: %s", out)
+	}
+}
+
+func TestGHCreatePrivate_OtherErrorsDoNotReuse(t *testing.T) {
+	origRunGH := runGH
+	defer func() { runGH = origRunGH }()
+	viewed := false
+	runGH = func(ctx context.Context, timeout time.Duration, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[1] == "create" {
+			return []byte("HTTP 403: Resource not accessible by integration\n"), errors.New("exit status 1")
+		}
+		viewed = true
+		return []byte(`{"sshUrl": "git@github.com:o/r.git", "url": "https://github.com/o/r"}`), nil
+	}
+	if _, err := ghCreatePrivate(context.Background(), "r"); err == nil || viewed {
+		t.Fatalf("a non-'already exists' create error must fail without reusing (err=%v viewed=%v)", err, viewed)
+	}
+}
+
+func TestScanSensitiveFiles_ReportAndIgnoreRules(t *testing.T) {
+	vaultDir := t.TempDir()
+
+	// 1. Secret in notes.txt -> reported
+	if err := os.WriteFile(filepath.Join(vaultDir, "notes.txt"), []byte("api_key = \"sk-123456789012345678901234567890\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Secret in config.json -> reported
+	if err := os.WriteFile(filepath.Join(vaultDir, "config.json"), []byte("{\"token\": \"ghp_123456789012345678901234567890\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Secret in .env dotfile at root -> reported
+	if err := os.WriteFile(filepath.Join(vaultDir, ".env"), []byte("SECRET=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature12345\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. Secret inside .pending/ -> NOT reported
+	if err := os.MkdirAll(filepath.Join(vaultDir, ".pending"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vaultDir, ".pending", "change.diff"), []byte("api_key = \"sk-123456789012345678901234567890\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Secret inside .index/ -> NOT reported
+	if err := os.MkdirAll(filepath.Join(vaultDir, ".index"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vaultDir, ".index", "cached.txt"), []byte("api_key = \"sk-123456789012345678901234567890\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 6. Secret inside audit.db -> NOT reported
+	if err := os.WriteFile(filepath.Join(vaultDir, "audit.db"), []byte("api_key = \"sk-123456789012345678901234567890\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 7. Encrypted file containing a secret -> NOT reported
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encData, err := vaultcrypt.Encrypt([]byte("api_key = \"sk-123456789012345678901234567890\"\n"), id.Recipient())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vaultDir, "personal.md"), encData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 8. Binary file with NUL byte in first 8 KiB -> NOT reported
+	binData := append([]byte("header\x00data\n"), []byte("api_key = \"sk-123456789012345678901234567890\"\n")...)
+	if err := os.WriteFile(filepath.Join(vaultDir, "image.png"), binData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 9. File larger than 2 MiB -> still reported (git add -A stages it)
+	largeData := make([]byte, 2*1024*1024+10)
+	for i := range largeData {
+		largeData[i] = 'a'
+	}
+	copy(largeData[len(largeData)-40:], []byte("api_key = \"sk-123456789012345678901234567890\"\n"))
+	if err := os.WriteFile(filepath.Join(vaultDir, "large.txt"), largeData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	found := scanSensitiveFiles(vaultDir)
+	if len(found) != 4 {
+		t.Fatalf("scanSensitiveFiles returned %d files, want exactly 4: %+v", len(found), found)
+	}
+
+	wantFiles := []string{".env", "config.json", "large.txt", "notes.txt"}
+	for i, want := range wantFiles {
+		if found[i].File != want {
+			t.Errorf("found[%d].File = %q, want %q", i, found[i].File, want)
+		}
+		if found[i].Count != 1 {
+			t.Errorf("found[%d].Count = %d, want 1", i, found[i].Count)
+		}
+	}
+}
+
+func TestTempDecryptRace_Setup_SentinelBetweenAddAndCommit(t *testing.T) {
+	vaultDir := t.TempDir()
+	bareDir := initBareRepo(t)
+	if err := os.WriteFile(filepath.Join(vaultDir, "identity.md"), []byte("- clean fact\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origRunGit := runGit
+	defer func() { runGit = origRunGit }()
+	sentinelCreated := false
+	runGit = func(ctx context.Context, dir string, timeout time.Duration, args ...string) ([]byte, error) {
+		out, err := origRunGit(ctx, dir, timeout, args...)
+		if len(args) >= 2 && args[0] == "add" && args[1] == "-A" {
+			// Create sentinel right after add -A, before commit runs.
+			if serr := os.MkdirAll(filepath.Join(dir, ".index"), 0o755); serr != nil {
+				t.Fatalf("mkdir .index: %v", serr)
+			}
+			if serr := os.WriteFile(filepath.Join(dir, ".index", "reencrypt-pending.json"), []byte(`{"files":["personal.md"]}`), 0o600); serr != nil {
+				t.Fatalf("write sentinel: %v", serr)
+			}
+			sentinelCreated = true
+		}
+		return out, err
+	}
+
+	res, err := Setup(context.Background(), vaultDir, bareDir, SetupOptions{})
+	if err == nil || !strings.Contains(err.Error(), "temporary decrypt") {
+		t.Fatalf("expected temporary decrypt error, got res=%+v err=%v", res, err)
+	}
+	if !sentinelCreated {
+		t.Fatal("sentinel was never created during the test run")
+	}
+
+	// Verify no commit was made: repo has no HEAD commit.
+	if isGitRepo(vaultDir) {
+		checkCmd := exec.Command("git", "-C", vaultDir, "rev-parse", "--verify", "HEAD")
+		if out, err := checkCmd.CombinedOutput(); err == nil {
+			t.Fatalf("expected no commit to be created, but HEAD exists: %s", out)
+		}
+	}
+
+	// Verify nothing is staged: git diff --staged is empty.
+	diffStaged, err := exec.Command("git", "-C", vaultDir, "diff", "--staged").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git diff --staged failed: %v\n%s", err, diffStaged)
+	}
+	if strings.TrimSpace(string(diffStaged)) != "" {
+		t.Fatalf("expected nothing staged after git reset -q, got:\n%s", diffStaged)
+	}
+}
+
+func TestTempDecryptRace_Sync_SentinelBetweenAddAndCommit(t *testing.T) {
+	vaultDir := t.TempDir()
+	bareDir := initBareRepo(t)
+	if err := os.WriteFile(filepath.Join(vaultDir, "identity.md"), []byte("- clean initial fact\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Initial setup cleanly commits and pushes.
+	if _, err := Setup(context.Background(), vaultDir, bareDir, SetupOptions{}); err != nil {
+		t.Fatalf("initial Setup failed: %v", err)
+	}
+
+	// Make a change in the vault.
+	if err := os.WriteFile(filepath.Join(vaultDir, "identity.md"), []byte("- clean initial fact\n- new fact\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	headBefore, err := exec.Command("git", "-C", vaultDir, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD before: %v\n%s", err, headBefore)
+	}
+
+	origRunGit := runGit
+	defer func() { runGit = origRunGit }()
+	sentinelCreated := false
+	runGit = func(ctx context.Context, dir string, timeout time.Duration, args ...string) ([]byte, error) {
+		out, err := origRunGit(ctx, dir, timeout, args...)
+		if len(args) >= 2 && args[0] == "add" && args[1] == "-A" {
+			// Create sentinel right after add -A, before commit runs.
+			if serr := os.MkdirAll(filepath.Join(dir, ".index"), 0o755); serr != nil {
+				t.Fatalf("mkdir .index: %v", serr)
+			}
+			if serr := os.WriteFile(filepath.Join(dir, ".index", "reencrypt-pending.json"), []byte(`{"files":["personal.md"]}`), 0o600); serr != nil {
+				t.Fatalf("write sentinel: %v", serr)
+			}
+			sentinelCreated = true
+		}
+		return out, err
+	}
+
+	res, err := SyncStatus(vaultDir)
+	if err == nil || !strings.Contains(err.Error(), "temporary decrypt") {
+		t.Fatalf("expected temporary decrypt error, got res=%+v err=%v", res, err)
+	}
+	if !sentinelCreated {
+		t.Fatal("sentinel was never created during the test run")
+	}
+
+	// Verify no new commit was made: HEAD is unchanged.
+	headAfter, err := exec.Command("git", "-C", vaultDir, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD after: %v\n%s", err, headAfter)
+	}
+	if string(headAfter) != string(headBefore) {
+		t.Fatalf("HEAD changed from %s to %s; no commit should be created", headBefore, headAfter)
+	}
+
+	// Verify nothing is staged: git diff --staged is empty.
+	diffStaged, err := exec.Command("git", "-C", vaultDir, "diff", "--staged").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git diff --staged failed: %v\n%s", err, diffStaged)
+	}
+	if strings.TrimSpace(string(diffStaged)) != "" {
+		t.Fatalf("expected nothing staged after git reset -q, got:\n%s", diffStaged)
+	}
+
+	// Verify working tree modification was NOT destroyed.
+	content, err := os.ReadFile(filepath.Join(vaultDir, "identity.md"))
+	if err != nil || !strings.Contains(string(content), "- new fact") {
+		t.Fatalf("working tree modification should remain intact, got: %s", content)
+	}
+}
+
+func TestTempDecryptRace_Push_SentinelBeforePush(t *testing.T) {
+	vaultDir := t.TempDir()
+	bareDir := initBareRepo(t)
+	if err := os.WriteFile(filepath.Join(vaultDir, "identity.md"), []byte("- clean initial fact\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Setup(context.Background(), vaultDir, bareDir, SetupOptions{}); err != nil {
+		t.Fatalf("initial Setup failed: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(vaultDir, "identity.md"), []byte("- clean initial fact\n- new fact\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origRunGit := runGit
+	defer func() { runGit = origRunGit }()
+	sentinelCreated := false
+	runGit = func(ctx context.Context, dir string, timeout time.Duration, args ...string) ([]byte, error) {
+		out, err := origRunGit(ctx, dir, timeout, args...)
+		if len(args) >= 1 && args[0] == "commit" {
+			// Create sentinel right after commit finishes, before push runs.
+			if serr := os.MkdirAll(filepath.Join(dir, ".index"), 0o755); serr != nil {
+				t.Fatalf("mkdir .index: %v", serr)
+			}
+			if serr := os.WriteFile(filepath.Join(dir, ".index", "reencrypt-pending.json"), []byte(`{"files":["personal.md"]}`), 0o600); serr != nil {
+				t.Fatalf("write sentinel: %v", serr)
+			}
+			sentinelCreated = true
+		}
+		return out, err
+	}
+
+	res, err := SyncStatus(vaultDir)
+	if err == nil || !strings.Contains(err.Error(), "temporary decrypt") {
+		t.Fatalf("expected temporary decrypt error, got res=%+v err=%v", res, err)
+	}
+	if !sentinelCreated {
+		t.Fatal("sentinel was never created during the test run")
+	}
+
+	// Verify nothing was pushed to bareDir on this run: refs/heads/main on bare remote should only have 1 commit.
+	logCmd := exec.Command("git", "-C", bareDir, "log", "--oneline", "refs/heads/main")
+	logOut, err := logCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log bare remote failed: %v\n%s", err, logOut)
+	}
+	lines := strings.Split(strings.TrimSpace(string(logOut)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected bare remote to have 1 commit, got %d:\n%s", len(lines), logOut)
+	}
+}
+
+func TestScanSensitiveFiles_LargeFileScanned(t *testing.T) {
+	vaultDir := t.TempDir()
+	big := strings.Repeat("- plain fact line\n", 200000) + "token " + fakeGitHubToken + "\n"
+	if err := os.WriteFile(filepath.Join(vaultDir, "big.md"), []byte(big), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	found := scanSensitiveFiles(vaultDir)
+	if len(found) != 1 || found[0].File != "big.md" {
+		t.Fatalf("expected big.md (>2 MiB) to be scanned, got %+v", found)
+	}
+}

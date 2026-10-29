@@ -1,6 +1,8 @@
 package git
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -227,6 +229,32 @@ var defaultGitignoreEntries = []string{
 	".DS_Store",
 	"*.bak-*",
 	"*.damaged-*",
+	".lock",
+}
+
+func isIgnoredByDefault(name string, isDir bool) bool {
+	for _, entry := range defaultGitignoreEntries {
+		entryIsDir := strings.HasSuffix(entry, "/")
+		base := strings.TrimSuffix(entry, "/")
+		if entryIsDir {
+			if isDir {
+				if name == base {
+					return true
+				}
+				if matched, _ := filepath.Match(base, name); matched {
+					return true
+				}
+			}
+		} else {
+			if name == entry {
+				return true
+			}
+			if matched, _ := filepath.Match(entry, name); matched {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func gitignoreCoversEntry(existingLines []string, entry string) bool {
@@ -644,10 +672,13 @@ var (
 
 		out, err := runGH(ctx, 30*time.Second, "repo", "create", repoName, "--private")
 		if err != nil {
-			// When the repo already exists on a retry (`gh repo view <name>` succeeds),
-			// reuse it instead of failing on "Name already exists".
-			if viewURL, viewErr := ghRepoViewURL(ctx, repoName); viewErr == nil {
-				return viewURL, nil
+			// Only a retry of our own create ("Name already exists") reuses the repo.
+			// The caller's Setup still runs the visibility check, so an existing
+			// PUBLIC repo with that name is blocked rather than pushed to.
+			if strings.Contains(strings.ToLower(string(out)), "already exists") {
+				if viewURL, viewErr := ghRepoViewURL(ctx, repoName); viewErr == nil {
+					return viewURL, nil
+				}
 			}
 			return "", fmt.Errorf("gh repo create failed: %s", strings.TrimSpace(string(out)))
 		}
@@ -772,26 +803,44 @@ func scanSensitiveFiles(memoryRoot string) []SensitiveFile {
 			if path == memoryRoot {
 				return nil
 			}
-			switch d.Name() {
-			case ".git", ".index", ".pending", ".backup", ".archive":
+			if d.Name() == ".git" {
 				return filepath.SkipDir
 			}
-			if strings.HasPrefix(d.Name(), ".") {
+			if isIgnoredByDefault(d.Name(), true) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !strings.HasSuffix(strings.ToLower(d.Name()), ".md") {
+		if isIgnoredByDefault(d.Name(), false) {
 			return nil
 		}
-		data, err := os.ReadFile(path)
-		if err != nil || vaultcrypt.IsEncrypted(data) {
+		info, err := d.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		if info.Size() == 0 {
+			return nil
+		}
+		// Stream the file: git add -A stages files of any size, so none may be
+		// skipped for being large.
+		f, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		r := bufio.NewReaderSize(f, 8*1024)
+		head, _ := r.Peek(8 * 1024)
+		if vaultcrypt.IsEncrypted(head) || bytes.IndexByte(head, 0) != -1 {
 			return nil
 		}
 		count := 0
-		for _, line := range strings.Split(string(data), "\n") {
+		for {
+			line, rerr := r.ReadString('\n')
 			if memory.LooksLikeSecret(line) {
 				count++
+			}
+			if rerr != nil {
+				break
 			}
 		}
 		if count > 0 {
@@ -988,8 +1037,30 @@ func Setup(ctx context.Context, memoryRoot, remoteURL string, opts SetupOptions)
 		}
 	}
 
+	// Hold the vault lock across add+commit to serialize against TempDecryptForOrganize.
+	// This prevents an organize run from decrypting files or writing its sentinel while
+	// we stage and commit. We release the lock before network push so slow network
+	// operations never starve other local vault writers.
+	vaultUnlocked := false
+	unlockVault, err := memory.LockVault(memoryRoot)
+	if err != nil {
+		return SetupResult{RemoteURL: displayURL, Branch: branch, Report: report}, fmt.Errorf("lock vault: %w", err)
+	}
+	defer func() {
+		if !vaultUnlocked {
+			unlockVault()
+		}
+	}()
+
 	if out, err := runGit(ctx, memoryRoot, gitDefaultTimeout, "add", "-A"); err != nil {
 		return SetupResult{RemoteURL: displayURL, Branch: branch, Report: report}, fmt.Errorf("git add failed: %s", strings.TrimSpace(string(out)))
+	}
+
+	// Re-check right after git add and before committing: if temp-decrypt started,
+	// unstage via `git reset -q` (never touch working tree) and fail before committing.
+	if tempDecryptInFlight(memoryRoot) {
+		_, _ = runGit(ctx, memoryRoot, gitDefaultTimeout, "reset", "-q")
+		return SetupResult{RemoteURL: displayURL, Branch: branch, Report: report}, fmt.Errorf("skipped setup: a temporary decrypt is in progress — retry once the organize run finishes")
 	}
 
 	msg := fmt.Sprintf("%s initial backup", prefix)
@@ -999,9 +1070,23 @@ func Setup(ctx context.Context, memoryRoot, remoteURL string, opts SetupOptions)
 	// If HEAD is still unborn (e.g. .gitignore was already committed? impossible
 	// if unborn, unless repo was completely empty), ensure a commit exists to push.
 	if _, herr := runGit(ctx, memoryRoot, gitDefaultTimeout, "rev-parse", "--verify", "HEAD"); herr != nil {
+		if tempDecryptInFlight(memoryRoot) {
+			_, _ = runGit(ctx, memoryRoot, gitDefaultTimeout, "reset", "-q")
+			return SetupResult{RemoteURL: displayURL, Branch: branch, Report: report}, fmt.Errorf("skipped setup: a temporary decrypt is in progress — retry once the organize run finishes")
+		}
 		if out, err := gitCommit(ctx, memoryRoot, "-m", msg, "--allow-empty"); err != nil {
 			return SetupResult{RemoteURL: displayURL, Branch: branch, Report: report}, fmt.Errorf("git commit failed: %s", strings.TrimSpace(string(out)))
 		}
+	}
+
+	vaultUnlocked = true
+	unlockVault()
+
+	// Re-check right before push: if temp-decrypt started after commit, unstage any pending changes
+	// and abort the push.
+	if tempDecryptInFlight(memoryRoot) {
+		_, _ = runGit(ctx, memoryRoot, gitDefaultTimeout, "reset", "-q")
+		return SetupResult{RemoteURL: displayURL, Branch: branch, Report: report}, fmt.Errorf("skipped setup: a temporary decrypt is in progress — retry once the organize run finishes")
 	}
 
 	attemptAt := nowFunc()
@@ -1159,8 +1244,30 @@ func syncWithContext(ctx context.Context, memoryRoot string) (SyncResult, error)
 		return SyncResult{}, err
 	}
 
+	// Hold the vault lock across add+commit to serialize against TempDecryptForOrganize.
+	// This prevents an organize run from decrypting files or writing its sentinel while
+	// we stage and commit. We release the lock before network push so slow network
+	// operations never starve other local vault writers.
+	vaultUnlocked := false
+	unlockVault, err := memory.LockVault(memoryRoot)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("lock vault: %w", err)
+	}
+	defer func() {
+		if !vaultUnlocked {
+			unlockVault()
+		}
+	}()
+
 	if out, err := runGit(ctx, memoryRoot, gitDefaultTimeout, "add", "-A"); err != nil {
 		return SyncResult{}, fmt.Errorf("git add failed: %s", out)
+	}
+
+	// Re-check right after git add and before committing: if temp-decrypt started,
+	// unstage via `git reset -q` (never touch working tree) and fail before committing.
+	if tempDecryptInFlight(memoryRoot) {
+		_, _ = runGit(ctx, memoryRoot, gitDefaultTimeout, "reset", "-q")
+		return SyncResult{}, fmt.Errorf("skipped sync: a temporary decrypt is in progress — retry once the organize run finishes (or run `auxly doctor` if it looks stuck)")
 	}
 
 	// git commit. No --allow-empty: an empty commit here would advance HEAD
@@ -1171,6 +1278,16 @@ func syncWithContext(ctx context.Context, memoryRoot string) (SyncResult, error)
 	msg := fmt.Sprintf("%s sync", cfg.CommitMessagePrefix)
 	if out, cerr := gitCommit(ctx, memoryRoot, "-m", msg); cerr != nil && !isNothingToCommit(out) {
 		return SyncResult{}, fmt.Errorf("git commit failed: %s", strings.TrimSpace(string(out)))
+	}
+
+	vaultUnlocked = true
+	unlockVault()
+
+	// Re-check right before push: if temp-decrypt started after commit, unstage any pending changes
+	// and abort the push.
+	if tempDecryptInFlight(memoryRoot) {
+		_, _ = runGit(ctx, memoryRoot, gitDefaultTimeout, "reset", "-q")
+		return SyncResult{}, fmt.Errorf("skipped sync: a temporary decrypt is in progress — retry once the organize run finishes (or run `auxly doctor` if it looks stuck)")
 	}
 
 	branch := cfg.Branch

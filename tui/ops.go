@@ -477,6 +477,7 @@ func (m opsModel) handleKey(msg tea.KeyMsg) (opsModel, tea.Cmd) {
 		case "y", "Y":
 			remote := m.pendingRemoteURL
 			ghRepo := m.pendingGHRepo
+			allowPublic := m.pendingReport.IsPublic()
 			m.mode = ""
 			m.pendingRemoteURL = ""
 			m.pendingGHRepo = ""
@@ -484,9 +485,10 @@ func (m opsModel) handleKey(msg tea.KeyMsg) (opsModel, tea.Cmd) {
 			if ghRepo != "" {
 				m.status = ""
 				m.busy, m.busyLabel, m.spin = true, "Creating private GitHub repo "+ghRepo, 0
+				// The confirmation covered the local findings only: the repo didn't exist
+				// yet, so its visibility was never shown. Keep the public-repo check on.
 				return m, tea.Batch(opsBackupCreateGHCmd(m.memoryPath, ghRepo, git.SetupOptions{
-					Confirmed:   true,
-					AllowPublic: true,
+					Confirmed: true,
 				}), opsSpinTick())
 			}
 			if remote != "" {
@@ -494,7 +496,7 @@ func (m opsModel) handleKey(msg tea.KeyMsg) (opsModel, tea.Cmd) {
 				m.busy, m.busyLabel, m.spin = true, "Pushing initial backup", 0
 				return m, tea.Batch(opsBackupSetupURLCmd(m.memoryPath, remote, git.SetupOptions{
 					Confirmed:   true,
-					AllowPublic: true,
+					AllowPublic: allowPublic,
 				}), opsSpinTick())
 			}
 			m.status, m.statusErr = "⚠ backup setup cancelled", true

@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Backup setup on a folder that already has git history asks for confirmation (older commits aren't scanned), and
   files the backup `.gitignore` excludes but git already tracked (audit log, audit database, …) are untracked
   before pushing.
+- The pre-push secret scan covers every file the backup would upload (any size, any text type, dotfiles), not only
+  memory `.md` files.
+- Remote host or path values starting with `-` are refused, so an SSH remote can't inject ssh options.
+- `--create-github` reuses an existing repo only when GitHub reports the name already exists, and a public repo
+  with that name still blocks; the TUI confirm keeps the public-repo check unless the screen showed the repo is
+  public.
+- A backup holds the vault lock while it stages and commits and re-checks for an organize run's temporary
+  decrypt, so plaintext of encrypted files is never committed.
 
 ## [1.5.5] - 2026-10-29
 

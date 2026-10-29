@@ -461,8 +461,77 @@ func TestOpsPrePushFindingsConfirmAndCancelInPage(t *testing.T) {
 		t.Fatal("[y] on confirmPrePush should dispatch confirmed setup")
 	}
 	m, _ = m.Update(resolveSetupMsg(t, cmd))
+	if len(seenOpts) < 2 || !seenOpts[1].Confirmed || seenOpts[1].AllowPublic {
+		t.Fatalf("expected Confirmed=true and AllowPublic=false when report was private, got: %+v", seenOpts[1])
+	}
 	if !m.backup.Configured {
 		t.Fatal("expected backup to be configured after confirming pre-push findings")
+	}
+}
+
+func TestOpsPrePushFindingsConfirmPublicRepo_PassesAllowPublic(t *testing.T) {
+	origSetup := opsBackupSetup
+	origStatus := opsBackupStatus
+	defer func() {
+		opsBackupSetup = origSetup
+		opsBackupStatus = origStatus
+	}()
+
+	var seenOpts []git.SetupOptions
+	opsBackupSetup = func(memPath, remoteURL string, opts git.SetupOptions) (git.SetupResult, error) {
+		seenOpts = append(seenOpts, opts)
+		rep := git.Report{
+			Visibility: git.VisibilityPublic,
+		}
+		if !opts.AllowPublic {
+			return git.SetupResult{
+				RemoteURL: remoteURL,
+				Branch:    "main",
+				Blocked:   true,
+				Report:    rep,
+			}, fmt.Errorf("%w: public remote repository", git.ErrPrePushBlocked)
+		}
+		return git.SetupResult{
+			RemoteURL: remoteURL,
+			Branch:    "main",
+			Pushed:    true,
+			Report:    rep,
+		}, nil
+	}
+	opsBackupStatus = func(memPath string) git.Status {
+		if len(seenOpts) > 0 && seenOpts[len(seenOpts)-1].AllowPublic {
+			return git.Status{Configured: true, RemoteURL: "/tmp/bare.git", Branch: "main"}
+		}
+		return git.Status{}
+	}
+
+	m := newOpsModel(t.TempDir())
+	m.loaded = true
+	m.width, m.height = 120, 40
+
+	m, _ = m.handleKey(keyRunes("u"))
+	m.urlInput.SetValue("https://github.com/someone/public-vault.git")
+	m, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.busy || cmd == nil {
+		t.Fatal("Enter in inputURL should enter busy state and dispatch setup tea.Cmd")
+	}
+
+	m, _ = m.Update(resolveSetupMsg(t, cmd))
+	if m.mode != "confirmPrePush" {
+		t.Fatalf("mode = %q, want confirmPrePush", m.mode)
+	}
+
+	// Confirm with 'y': dispatches Setup with Confirmed=true AND AllowPublic=true because report was public.
+	m, cmd = m.handleKey(keyRunes("y"))
+	if !m.busy || cmd == nil {
+		t.Fatal("[y] on confirmPrePush should dispatch confirmed setup")
+	}
+	m, _ = m.Update(resolveSetupMsg(t, cmd))
+	if len(seenOpts) < 2 || !seenOpts[1].Confirmed || !seenOpts[1].AllowPublic {
+		t.Fatalf("expected Confirmed=true and AllowPublic=true when report was public, got: %+v", seenOpts[1])
+	}
+	if !m.backup.Configured {
+		t.Fatal("expected backup to be configured after confirming public repo pre-push findings")
 	}
 }
 
