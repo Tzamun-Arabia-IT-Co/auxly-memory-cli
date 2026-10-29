@@ -25,17 +25,19 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.5.3
+## 🆕 What's New in Version 1.5.4
+
+- **🧠 Smart capture: no more approving every fact.** Facts captured from providers you trust as `auto` in `trust.yaml` are now saved straight to memory. Only the risky ones wait in `auxly pending`: facts from providers that aren't `auto`, personal, identity, inbox and task facts, anything that looks like a secret (API keys, tokens, private keys, passwords), and facts whose duplicate check couldn't run. Each saved or held fact is in the audit log with its reason.
+- **♻️ Reworded duplicates are dropped.** Capture used to save the same fact again whenever the wording changed. It now finds similar existing lines (in the vault and in the pending queue) and makes one extra call to your own capture model to drop facts that are already known. If that check fails, the affected facts are held for review instead of saved.
+- **🛡️ Safe by construction.** A captured fact is always one clean line (line breaks and control characters removed), and only a single added line is ever auto-applied, so a captured fact can never delete or rewrite existing memory.
+- **🔗 Codex + Computer Use.** When Codex Computer Use wraps the `notify` hook and chains Auxly behind it, `auxly hooks status` and the TUI now show it as wired instead of "manual", and install/uninstall leave that line alone.
+- **🆕 Current models everywhere.** Memory Organize and the capture model picker list Claude Sonnet 5.5, Haiku 5.5, Opus 5.5 and Fable 5.1, read Codex's own model list and `agy models` live, and offer **custom…** to type any model id. The OpenAI default is now `gpt-6-luna`, and Gemini uses `gemini-flash-latest` (Gemini 1.5 was shut down).
+
+### Version 1.5.3
 
 - **🤖 Capture with your own subscription.** Session capture can now run through any installed CLI agent (Claude Code, Codex, Gemini, Antigravity, Cursor), the same providers Memory Organize offers. Choose it under **Settings → Session capture model** in the TUI, or with `auxly capture config --agent claude --model haiku`. `AUXLY_CAPTURE_AGENT` / `AUXLY_CAPTURE_MODEL` override the setting. The agent runs isolated (no tools, no MCP servers, no hooks), so it can't re-trigger capture.
 - **🧩 OpenCode support.** `auxly hooks install --agent opencode` adds a plugin to `~/.config/opencode/plugins/`. When a session goes idle, the plugin sends its text messages (tool output excluded) to capture.
 - **⚡ Capture never blocks your agent.** The Claude Code Stop hook now runs `async`, so extraction happens in the background. Re-running `auxly hooks install` upgrades an existing hook in place.
-
-### Version 1.5.2
-
-- **🪄 Session capture actually captures.** `auxly capture` (the Stop hook behind `auxly hooks install`) asked the local server for a fixed default model (`qwen2.5-coder:7b`). When that model wasn't installed, every run failed with a 404 and queued nothing. Capture and organize now use the requested model when the server has it, and otherwise the first installed chat model, skipping embedding models.
-- **🎛️ `AUXLY_LLM_MODEL`.** Pin the model auxly uses on any endpoint (Ollama, vLLM, OpenAI, Gemini). Use a model with a large context window for capture: it sends the last 60K characters (~15K tokens) of the transcript, and a smaller window silently cuts off the instructions.
-- **🚨 Capture failures are no longer silent.** Hooks discard stderr, so a failing capture used to leave no trace. The last error is now kept in `.capture-last-error` in the vault and shown by `auxly hooks status` and `auxly doctor`. It clears on the next successful run. Control characters are stripped and the message is capped, so a server's error body can't inject terminal escape sequences (1.5.2).
 
 Looking for past release details? See the [CHANGELOG](CHANGELOG.md) for the full history.
 

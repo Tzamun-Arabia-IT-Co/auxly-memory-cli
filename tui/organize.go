@@ -92,17 +92,17 @@ var apiOrgProviders = []orgProvider{
 
 var apiDefaultModels = map[string]string{
 	"ollama": "qwen2.5-coder:7b",
-	"openai": "gpt-4o-mini",
-	"gemini": "gemini-1.5-flash",
+	"openai": "gpt-6-luna",
+	"gemini": "gemini-flash-latest",
 	"custom": "qwen2.5-coder:7b",
 }
 
 var agentModels = map[string][]string{
-	"claude":      []string{"sonnet (recommended)", "haiku (fast)", "opus"},
-	"codex":       []string{"(default)", "gpt-5.2-codex", "gpt-5.2"},
-	"antigravity": []string{"(uses its configured model)"},
-	"gemini":      []string{"(default)", "gemini-2.5-flash", "gemini-2.5-pro"},
-	"cursor":      []string{"(default)", "sonnet-4", "gpt-5"},
+	"claude":      {"claude-sonnet-5-5 (recommended)", "claude-haiku-5-5 (fast)", "claude-opus-5-5", "claude-fable-5-1"},
+	"codex":       {"(default)", "gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"},
+	"antigravity": {"(default)", "gemini-3.8-flash-high", "gemini-4-argon-high", "claude-sonnet-5-5-high"},
+	"gemini":      {"(default)", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview", "gemini-flash-latest"},
+	"cursor":      {"(default)"},
 }
 
 var (
@@ -141,13 +141,14 @@ type organizeModel struct {
 	customURL   string
 	customInput textinput.Model
 
-	models     []string
-	modelIdx   int
-	fetching   bool
-	fetchErr   string
-	picked     string
-	urlEditing bool
-	confirming bool // [y]/[n] confirmation popup is up before a run
+	models       []string
+	modelIdx     int
+	fetching     bool
+	fetchErr     string
+	picked       string
+	urlEditing   bool
+	modelEditing bool
+	confirming   bool // [y]/[n] confirmation popup is up before a run
 
 	// Encrypted-file choice: shown instead of starting a CLI-agent run when
 	// the vault has encrypted organizable files (a CLI agent's subprocess
@@ -207,9 +208,10 @@ type organizeStats struct {
 }
 
 type orgModelsFetchedMsg struct {
-	success bool
-	models  []string
-	err     string
+	provider string
+	success  bool
+	models   []string
+	err      string
 }
 
 func orgSpinTick() tea.Cmd {
@@ -336,10 +338,17 @@ func OrgProviderKey(name string) string {
 
 func modelsForProvider(p orgProvider) []string {
 	if p.kind == "agent" {
-		if models := agentModels[orgProviderKey(p.id)]; len(models) > 0 {
-			return append([]string(nil), models...)
+		key := orgProviderKey(p.id)
+		if cached, ok := getCachedAgentModels(key); ok {
+			return cached
 		}
-		return []string{"(default)"}
+		var list []string
+		if models := agentModels[key]; len(models) > 0 {
+			list = append([]string(nil), models...)
+		} else {
+			list = []string{"(default)"}
+		}
+		return ensureCustomEntry(list)
 	}
 	if p.kind == "api" {
 		return nil
@@ -367,10 +376,17 @@ func modelValueForProvider(p orgProvider, label string) string {
 	if strings.HasPrefix(label, "(") {
 		return ""
 	}
-	if label == "haiku (fast)" {
-		return "haiku"
+	if strings.HasPrefix(label, "custom: ") {
+		return strings.TrimSpace(strings.TrimPrefix(label, "custom: "))
 	}
-	return strings.Fields(label)[0]
+	if label == "custom…" {
+		return ""
+	}
+	fields := strings.Fields(label)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 func (m organizeModel) Refresh() tea.Cmd { return nil }
@@ -380,7 +396,7 @@ func (m organizeModel) capturesInput() bool {
 	// quitting the app or switching tabs; the screen is focus-locked until the run
 	// finishes or the user cancels. restoring (MAJOR 5) keeps that lock held past the
 	// mode transition back to orgIdle/orgReview while the async re-encrypt is in flight.
-	return m.mode == orgEditing || m.urlEditing || m.confirming || m.encChoice || m.mode == orgRunning || m.restoring
+	return m.mode == orgEditing || m.urlEditing || m.modelEditing || m.confirming || m.encChoice || m.mode == orgRunning || m.restoring
 }
 
 func readOrganizeStats(memoryPath string) (lastRun string, tokens, filesChanged int) {
@@ -397,7 +413,7 @@ func (m organizeModel) fetchModelsCmd(provider, customURL string) tea.Cmd {
 	return func() tea.Msg {
 		baseURL, apiKey, errMsg, ok := resolveOrgModelsProvider(provider, customURL)
 		if !ok {
-			return orgModelsFetchedMsg{success: false, err: errMsg}
+			return orgModelsFetchedMsg{provider: provider, success: false, err: errMsg}
 		}
 		endpoint := strings.TrimRight(baseURL, "/") + "/v1/models"
 		client := &http.Client{Timeout: 3 * time.Second}
@@ -407,12 +423,12 @@ func (m organizeModel) fetchModelsCmd(provider, customURL string) tea.Cmd {
 			resp, err = getOrgModels(client, endpoint, apiKey)
 		}
 		if err != nil {
-			return orgModelsFetchedMsg{success: false, err: "Endpoint is unreachable: " + err.Error()}
+			return orgModelsFetchedMsg{provider: provider, success: false, err: "Endpoint is unreachable: " + err.Error()}
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return orgModelsFetchedMsg{success: false, err: fmt.Sprintf("HTTP status %d", resp.StatusCode)}
+			return orgModelsFetchedMsg{provider: provider, success: false, err: fmt.Sprintf("HTTP status %d", resp.StatusCode)}
 		}
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
@@ -437,7 +453,7 @@ func (m organizeModel) fetchModelsCmd(provider, customURL string) tea.Cmd {
 			for _, item := range mResp.Data {
 				list = append(list, item.ID)
 			}
-			return orgModelsFetchedMsg{success: true, models: list}
+			return orgModelsFetchedMsg{provider: provider, success: true, models: list}
 		}
 
 		var oResp ollamaModelsResp
@@ -446,10 +462,10 @@ func (m organizeModel) fetchModelsCmd(provider, customURL string) tea.Cmd {
 			for _, item := range oResp.Models {
 				list = append(list, item.Name)
 			}
-			return orgModelsFetchedMsg{success: true, models: list}
+			return orgModelsFetchedMsg{provider: provider, success: true, models: list}
 		}
 
-		return orgModelsFetchedMsg{success: false, err: "Failed to parse model list from endpoint response"}
+		return orgModelsFetchedMsg{provider: provider, success: false, err: "Failed to parse model list from endpoint response"}
 	}
 }
 
@@ -668,6 +684,9 @@ func (m organizeModel) Update(msg tea.Msg) (organizeModel, tea.Cmd) {
 		}
 		return m, nil
 	case orgModelsFetchedMsg:
+		if msg.provider != "" && msg.provider != m.currentProvider().id {
+			return m, nil
+		}
 		m.fetching = false
 		if msg.success {
 			m.models = msg.models
@@ -1000,6 +1019,30 @@ func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.modelEditing {
+		switch msg.String() {
+		case "enter":
+			val := strings.TrimSpace(m.customInput.Value())
+			m.modelEditing = false
+			m.customInput.Blur()
+			if val == "" {
+				// empty input = cancel
+				return m, nil
+			}
+			m.picked = val
+			if m.modelIdx >= 0 && m.modelIdx < len(m.models) {
+				m.models[m.modelIdx] = "custom: " + val
+			}
+			return m, nil
+		case "esc":
+			m.modelEditing = false
+			m.customInput.Blur()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.customInput, cmd = m.customInput.Update(msg)
+		return m, cmd
+	}
 	if m.urlEditing {
 		switch msg.String() {
 		case "enter":
@@ -1084,6 +1127,11 @@ func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 				m.fetchErr = ""
 				return m, m.fetchModelsCmd(m.currentProvider().id, m.customURL)
 			}
+			if m.currentProvider().kind == "agent" && !m.fetching && needsAgentDiscovery(m.currentProvider()) {
+				m.fetching = true
+				m.fetchErr = ""
+				return m, m.fetchAgentModelsCmd(m.currentProvider())
+			}
 		} else {
 			m.focus = focusProvider
 		}
@@ -1093,6 +1141,15 @@ func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 			m.customInput.Focus()
 			m.urlEditing = true
 			m.resizeCustomInput()
+		} else if m.focus == focusModel && len(m.models) > 0 && m.modelIdx < len(m.models) && (m.models[m.modelIdx] == "custom…" || strings.HasPrefix(m.models[m.modelIdx], "custom:")) {
+			initialVal := ""
+			if strings.HasPrefix(m.models[m.modelIdx], "custom:") {
+				initialVal = strings.TrimSpace(strings.TrimPrefix(m.models[m.modelIdx], "custom:"))
+			}
+			m.customInput.SetValue(initialVal)
+			m.customInput.Focus()
+			m.modelEditing = true
+			m.resizeCustomInput()
 		}
 	case "f":
 		if m.currentProvider().kind == "api" && !m.fetching {
@@ -1100,6 +1157,15 @@ func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 			m.fetching = true
 			m.fetchErr = ""
 			return m, m.fetchModelsCmd(m.currentProvider().id, m.customURL)
+		}
+		if m.currentProvider().kind == "agent" && !m.fetching {
+			key := orgProviderKey(m.currentProvider().id)
+			if key == "codex" || key == "antigravity" {
+				clearAgentModelCache(key)
+				m.fetching = true
+				m.fetchErr = ""
+				return m, m.fetchAgentModelsCmd(m.currentProvider())
+			}
 		}
 	case "F":
 		// Force a full re-organize even when the dirty-file ledger says nothing
@@ -1135,9 +1201,24 @@ func (m organizeModel) updateIdle(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 				m.fetchErr = ""
 				return m, m.fetchModelsCmd(m.currentProvider().id, m.customURL)
 			}
+			if m.currentProvider().kind == "agent" && !m.fetching && needsAgentDiscovery(m.currentProvider()) {
+				m.fetching = true
+				m.fetchErr = ""
+				return m, m.fetchAgentModelsCmd(m.currentProvider())
+			}
 			return m, nil
 		}
-		// Model block: lock in the chosen model and ask for confirmation.
+		// Model block:
+		if len(m.models) > 0 && m.modelIdx < len(m.models) {
+			if m.models[m.modelIdx] == "custom…" {
+				m.customInput.SetValue("")
+				m.customInput.Focus()
+				m.modelEditing = true
+				m.resizeCustomInput()
+				return m, nil
+			}
+		}
+		// lock in the chosen model and ask for confirmation.
 		if len(m.models) > 0 {
 			m.picked = modelValueForProvider(m.currentProvider(), m.models[m.modelIdx])
 		} else {
@@ -1470,6 +1551,8 @@ func (m *organizeModel) resetProviderModels() {
 	m.modelIdx = 0
 	m.fetchErr = ""
 	m.fetching = false
+	m.modelEditing = false
+	m.customInput.Blur()
 	m.picked = modelValueForProvider(m.currentProvider(), firstModelLabel(m.currentProvider(), m.models))
 }
 
@@ -2120,6 +2203,12 @@ func (m organizeModel) idleView() string {
 		} else {
 			b.WriteString("  " + orgDimStyle.Render(m.customURL) + "   " + StyleFooter.Render("(e edit · Enter saves & fetches models)") + "\n")
 		}
+	}
+
+	// Custom model ID field.
+	if m.modelEditing {
+		b.WriteString("\n" + orgBoldStyle.Render("Custom Model ID") + "\n")
+		b.WriteString("  " + m.customInput.View() + "   " + StyleFooter.Render("(Enter accepts · Esc cancels)") + "\n")
 	}
 
 	// Provider hint (what it needs).

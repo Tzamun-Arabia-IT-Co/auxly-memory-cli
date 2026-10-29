@@ -359,3 +359,78 @@ func TestRunCodexNotifyRespectsCooldown(t *testing.T) {
 		t.Fatalf("cooldown should short-circuit silently, got %v", err)
 	}
 }
+
+func TestCodexChainedNotify(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	path := filepath.Join(home, "config.toml")
+	chained := codexHookHeader + "\n" +
+		`notify = ["/Applications/SkyComputerUse.app/Contents/MacOS/SkyComputerUseClient", "turn-ended", "--previous-notify", "[\"auxly\",\"capture\",\"--codex-notify\"]"]` + "\n"
+	if err := os.WriteFile(path, []byte(chained), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	state, detail := codexHookStatus()
+	if state != codexHookWired || detail != "Codex notify hook is chained through another notify program" {
+		t.Fatalf("chained status: got state=%v detail=%q", state, detail)
+	}
+
+	changed, err := installCodexHookQuiet()
+	if err != nil || changed {
+		t.Fatalf("installCodexHookQuiet on chained: got changed=%v err=%v, want (false, nil)", changed, err)
+	}
+	afterInstall, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterInstall) != chained {
+		t.Fatalf("install modified chained config.toml:\nwant:\n%s\ngot:\n%s", chained, afterInstall)
+	}
+
+	out := captureStdout(t, func() {
+		if uerr := uninstallCodexHook(); uerr != nil {
+			t.Fatalf("uninstallCodexHook on chained failed: %v", uerr)
+		}
+	})
+	wantMsg := "Auxly is chained inside another notify program in " + path + " — remove its --previous-notify argument there to stop Codex capture."
+	if !strings.Contains(out, wantMsg) {
+		t.Fatalf("uninstall message mismatch:\nwant substring: %q\ngot: %q", wantMsg, out)
+	}
+	afterUninstall, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterUninstall) != chained {
+		t.Fatalf("uninstall modified chained config.toml:\nwant:\n%s\ngot:\n%s", chained, afterUninstall)
+	}
+}
+
+func TestCodexChainedNotifyTrailingComment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	path := filepath.Join(home, "config.toml")
+
+	commentedLine := `notify = ["/bin/other"] # old: auxly capture --codex-notify`
+	if isCodexNotifyChained(commentedLine) {
+		t.Fatalf("commented line must not be chained: %q", commentedLine)
+	}
+	if err := os.WriteFile(path, []byte(commentedLine+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	state, detail := codexHookStatus()
+	if state != codexHookForeign {
+		t.Fatalf("commented line should be codexHookForeign, got state=%v detail=%q", state, detail)
+	}
+
+	realChainedLine := `notify = ["/x/SkyComputerUseClient", "turn-ended", "--previous-notify", "[\"auxly\",\"capture\",\"--codex-notify\"]"]`
+	if !isCodexNotifyChained(realChainedLine) {
+		t.Fatalf("real Computer Use line must be chained: %q", realChainedLine)
+	}
+	if err := os.WriteFile(path, []byte(realChainedLine+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	state, detail = codexHookStatus()
+	if state != codexHookWired {
+		t.Fatalf("real chained line should be codexHookWired, got state=%v detail=%q", state, detail)
+	}
+}

@@ -114,8 +114,8 @@ func TestOrganizeAgentProviderRuns(t *testing.T) {
 	// sonnet became the recommended default), Enter — verifies a picked
 	// non-default model flows through to planTarget.
 	provider, command, model := m.planTarget()
-	if provider != "Claude Code / CLI" || command != "/bin/echo" || model != "haiku" {
-		t.Fatalf("agent plan target = (%q, %q, %q), want Claude /bin/echo haiku", provider, command, model)
+	if provider != "Claude Code / CLI" || command != "/bin/echo" || model != "claude-haiku-5-5" {
+		t.Fatalf("agent plan target = (%q, %q, %q), want Claude /bin/echo claude-haiku-5-5", provider, command, model)
 	}
 }
 

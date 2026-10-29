@@ -5,6 +5,46 @@ All notable changes to Auxly Memory CLI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] - 2026-10-29
+
+### Changed
+
+- **Smart capture routing.** `auxly capture` (every entry point: Claude Code Stop hook, Codex notify,
+  shell wrappers, OpenCode plugin) now runs one shared pipeline (`storeCaptureFacts`). Facts are saved
+  directly (pending write + `Approve`, so locking, encryption, path safety and conflict detection are
+  reused) when the provider's `trust.yaml` level is `auto`. They are held in the pending queue when the
+  trust level is not `auto` (or `trust.yaml` can't be read), the category is personal-tier, operational
+  (`inbox`, `tasks`) or `identity`, `LooksLikeSecret` matches, the duplicate judge failed, or the diff is
+  not exactly one added line. `claude-code` maps to the `claude` trust entry. Every fact is audited with
+  its trust level and reason.
+- **Model lists.** Organize and capture pickers list `claude-sonnet-5-5`, `claude-haiku-5-5`,
+  `claude-opus-5-5`, `claude-fable-5-1`; Codex models come from `$CODEX_HOME/models_cache.json` and
+  Antigravity models from `agy models` (static lists are the fallback); every agent list ends with
+  **custom…** for any model id. `buildAgentArgs` passes `--model` to `agy`. API defaults: OpenAI
+  `gpt-6-luna`, Gemini `gemini-flash-latest` (`gemini-1.5-flash` was shut down on 2025-09-29).
+
+### Added
+
+- **Reworded-duplicate detection.** `memory.CaptureNeighbors` (word-set Jaccard, k=5, min 0.2) finds
+  similar lines in the target file and the pending queue; facts with neighbours go to one judge call per
+  run (`JudgeCaptureDuplicates` / `...WithAgent`, same backend and isolation as extraction). Known facts
+  are dropped; a judge failure holds them for review. Facts identical to an already-pending entry are
+  dropped.
+- **`memory.LooksLikeSecret`.** Provider key/token shapes (`sk-`, GitHub, AWS, Google, Slack), private-key
+  headers, JWTs and `password=`-style assignments.
+
+### Fixed
+
+- **Codex chained notify.** A `notify` line from another program that chains `auxly capture
+  --codex-notify` (e.g. Codex Computer Use's `--previous-notify`) is reported as wired; install treats it
+  as installed and uninstall explains where to remove it instead of failing or editing it.
+
+### Security
+
+- Captured facts are reduced to one clean line (control characters and Unicode line separators removed)
+  before any diff is built, and the auto-save path refuses anything but a single `+ - ` line, so
+  transcript content can never turn a captured fact into a deletion of existing memory.
+
 ## [1.5.3] - 2026-10-28
 
 ### Added

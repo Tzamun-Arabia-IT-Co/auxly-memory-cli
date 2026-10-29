@@ -61,7 +61,7 @@ func resolveEndpoint() Endpoint {
 			APIKey:  key,
 			IsCloud: true,
 			Source:  "openai",
-			Model:   "gpt-4o-mini",
+			Model:   "gpt-6-luna",
 		}
 	}
 
@@ -71,7 +71,7 @@ func resolveEndpoint() Endpoint {
 			APIKey:  key,
 			IsCloud: true,
 			Source:  "gemini",
-			Model:   "gemini-1.5-flash",
+			Model:   "gemini-flash-latest",
 		}
 	}
 

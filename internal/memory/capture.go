@@ -16,8 +16,9 @@ import (
 )
 
 // CaptureFact is one durable fact extracted from a session transcript, routed
-// to a taxonomy category. Facts NEVER write the vault directly — the caller
-// queues them as pending changes for human review.
+// to a taxonomy category. After duplicate filtering, the caller auto-saves
+// normal facts from auto-trusted providers and holds untrusted, personal/identity,
+// secret-like, or uncertain facts in the pending queue for human review.
 type CaptureFact struct {
 	Category string `json:"category"`
 	Fact     string `json:"fact"`
@@ -56,8 +57,21 @@ func ExtractCaptureFacts(ctx context.Context, transcript string) ([]CaptureFact,
 		return nil, nil
 	}
 
-	ep := llm.ResolveEndpoint()
 	sys := fmt.Sprintf(captureSystemPrompt, RenderForPrompt(), captureMaxFacts)
+	content, err := captureChat(ctx, sys, "Transcript (tail):\n\n"+transcript)
+	if err != nil {
+		return nil, err
+	}
+	if content == "" {
+		return nil, nil
+	}
+	return ParseCaptureFacts(content), nil
+}
+
+// captureChat sends one JSON-mode system+user chat completion to the resolved
+// Direct LLM endpoint and returns the first choice's content ("" if none).
+func captureChat(ctx context.Context, sys, user string) (string, error) {
+	ep := llm.ResolveEndpoint()
 
 	// Pick a model the endpoint actually serves and that can chat — the
 	// resolved default may be missing (404) and the first-served id may be an
@@ -71,17 +85,17 @@ func ExtractCaptureFacts(ctx context.Context, transcript string) ([]CaptureFact,
 		"model": model,
 		"messages": []map[string]string{
 			{"role": "system", "content": sys},
-			{"role": "user", "content": "Transcript (tail):\n\n" + transcript},
+			{"role": "user", "content": user},
 		},
 		"response_format": map[string]string{"type": "json_object"},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, "POST", ep.ChatURL(), bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if ep.APIKey != "" {
@@ -89,12 +103,12 @@ func ExtractCaptureFacts(ctx context.Context, transcript string) ([]CaptureFact,
 	}
 	resp, err := (&http.Client{Timeout: 90 * time.Second}).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("capture LLM unreachable at %s: %w", ep.ChatURL(), err)
+		return "", fmt.Errorf("capture LLM unreachable at %s: %w", ep.ChatURL(), err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return nil, fmt.Errorf("capture LLM status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return "", fmt.Errorf("capture LLM status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 
 	var chat struct {
@@ -105,12 +119,12 @@ func ExtractCaptureFacts(ctx context.Context, transcript string) ([]CaptureFact,
 		} `json:"choices"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&chat); err != nil {
-		return nil, err
+		return "", err
 	}
 	if len(chat.Choices) == 0 {
-		return nil, nil
+		return "", nil
 	}
-	return ParseCaptureFacts(chat.Choices[0].Message.Content), nil
+	return chat.Choices[0].Message.Content, nil
 }
 
 // ExtractCaptureFactsWithAgent runs a headless CLI agent (e.g. `claude -p`)
@@ -230,10 +244,10 @@ func ParseCaptureFacts(raw string) []CaptureFact {
 	return kept
 }
 
-// DedupCaptureFacts drops facts the vault already knows. Vault bullets carry
-// "[YYYY-MM-DD]" stamps that the freshly-extracted fact doesn't — both sides
-// are compared with the stamp stripped, so a re-learned fact never re-queues
-// just because it was learned on a different day.
+// DedupCaptureFacts runs the exact-match pass against existing vault bullets,
+// comparing with "[YYYY-MM-DD]" stamps stripped so a re-learned fact is dropped
+// even on a different day. Remaining facts then pass through pending-queue and
+// reworded duplicate checks before being auto-saved or held for review.
 func (s *Store) DedupCaptureFacts(facts []CaptureFact) []CaptureFact {
 	cache := map[string]map[string]bool{}
 	kept := make([]CaptureFact, 0, len(facts))

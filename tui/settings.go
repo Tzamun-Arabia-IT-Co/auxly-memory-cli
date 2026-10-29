@@ -573,6 +573,9 @@ func (m settingsModel) captureChoices() []captureSettingChoice {
 			continue
 		}
 		for _, mLabel := range models {
+			if mLabel == "custom…" || strings.HasPrefix(mLabel, "custom:") {
+				continue
+			}
 			val := modelValueForProvider(p, mLabel)
 			display := key
 			if val != "" {

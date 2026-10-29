@@ -11,9 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
-	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 )
 
 const (
@@ -87,6 +85,9 @@ func installCodexHookQuiet() (changed bool, err error) {
 			return false, nil
 		}
 		if isCodexNotifyAssignment(l.trimmed) {
+			if isCodexNotifyChained(l.trimmed) {
+				return false, nil
+			}
 			return false, fmt.Errorf("Codex already has a notify program (%q) — Codex supports only one; remove it or chain manually", l.trimmed)
 		}
 	}
@@ -126,6 +127,7 @@ func uninstallCodexHook() error {
 	scanned := scanCodexLines(lines)
 	keep := make([]string, 0, len(lines))
 	removed := false
+	chained := false
 	for i := 0; i < len(lines); i++ {
 		if scanned[i].topLevel && strings.HasPrefix(normalizeCodexSpacing(scanned[i].trimmed), codexNotifyOursPrefix) {
 			removed = true
@@ -133,6 +135,9 @@ func uninstallCodexHook() error {
 				keep = keep[:len(keep)-1]
 			}
 			continue
+		}
+		if scanned[i].topLevel && isCodexNotifyChained(scanned[i].trimmed) {
+			chained = true
 		}
 		if scanned[i].trimmed == codexHookHeader {
 			nextIsOurs := i+1 < len(lines) && scanned[i+1].topLevel &&
@@ -144,6 +149,10 @@ func uninstallCodexHook() error {
 		keep = append(keep, lines[i])
 	}
 	if !removed {
+		if chained {
+			fmt.Printf("Auxly is chained inside another notify program in %s — remove its --previous-notify argument there to stop Codex capture.\n", path)
+			return nil
+		}
 		fmt.Println("✓ No Codex notify hook found — nothing to remove.")
 		return nil
 	}
@@ -182,6 +191,9 @@ func codexHookStatus() (codexHookState, string) {
 			return codexHookWired, "Codex notify hook is installed"
 		}
 		if isCodexNotifyAssignment(l.trimmed) {
+			if isCodexNotifyChained(l.trimmed) {
+				return codexHookWired, "Codex notify hook is chained through another notify program"
+			}
 			return codexHookForeign, fmt.Sprintf("Codex has a different notify program: %s", l.trimmed)
 		}
 	}
@@ -307,7 +319,7 @@ func runCaptureText(transcript, provider string) error {
 	}
 	_ = os.WriteFile(captureMarkerPath(memPath), []byte(time.Now().Format(time.RFC3339)), 0600)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
 	defer cancel()
 	facts, err := extractCaptureFacts(ctx, transcript)
 	if err != nil {
@@ -317,38 +329,7 @@ func runCaptureText(transcript, provider string) error {
 		return nil
 	}
 	clearCaptureError(memPath)
-	store := memory.NewStore(memPath)
-	facts = store.DedupCaptureFacts(facts)
-	if len(facts) == 0 {
-		return nil
-	}
-
-	mgr := pending.NewManager(memPath)
-	logger, lerr := audit.NewLogger(memPath)
-	if lerr == nil {
-		defer logger.Close()
-	}
-	date := time.Now().Format("2006-01-02")
-	queued := 0
-	for _, f := range facts {
-		file := memory.FileForCategory(f.Category)
-		if f.Category == "projects" {
-			file = memory.ProjectFile(store.WorkspaceRoot)
-		}
-		diff := fmt.Sprintf("+ - [%s] %s\n", date, f.Fact)
-		name, werr := mgr.WriteFrom(file, diff, "capture:"+provider)
-		if werr != nil {
-			continue
-		}
-		queued++
-		if lerr == nil {
-			logger.Log("capture", provider, "write", file, diff, "auto-captured from session transcript", "require_approval")
-		}
-		_ = name
-	}
-	if queued > 0 {
-		fmt.Printf("🪄 %d fact(s) captured → pending review (`auxly pending`)\n", queued)
-	}
+	storeCaptureFacts(memPath, facts, provider)
 	return nil
 }
 
@@ -473,6 +454,22 @@ func findJSONLPath(v any) string {
 func isCodexNotifyAssignment(trimmed string) bool {
 	before, _, ok := strings.Cut(trimmed, "=")
 	return ok && strings.TrimSpace(before) == "notify"
+}
+
+// isCodexNotifyChained reports whether a top-level notify assignment belongs to
+// another notify wrapper (e.g. Codex Computer Use) that chains Auxly's capture
+// hook via --previous-notify.
+func isCodexNotifyChained(trimmed string) bool {
+	if !isCodexNotifyAssignment(trimmed) {
+		return false
+	}
+	if strings.HasPrefix(normalizeCodexSpacing(trimmed), codexNotifyOursPrefix) {
+		return false
+	}
+	if idx := strings.LastIndex(trimmed, "]"); idx >= 0 {
+		trimmed = trimmed[:idx+1]
+	}
+	return strings.Contains(trimmed, "auxly") && strings.Contains(trimmed, "--codex-notify")
 }
 
 // codexNotifyOursPrefix identifies a "notify = [...]" line as ours — spacing

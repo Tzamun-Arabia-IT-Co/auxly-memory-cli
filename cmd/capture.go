@@ -16,6 +16,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/tui"
 	"github.com/spf13/cobra"
 )
@@ -34,9 +35,11 @@ var captureCmd = &cobra.Command{
 	Short: "Extract durable facts from a session transcript into the pending queue",
 	Long: `capture reads a session transcript (Claude Code JSONL via --transcript or
 --stop-hook, plain text via stdin), extracts durable facts with the configured
-LLM, dedups them against the vault, and queues them as PENDING changes — it
-never writes memory directly. Designed to run fire-and-forget from an agent
-Stop hook (see 'auxly hooks install').
+LLM, and drops exact, pending, and reworded duplicates. Normal facts from
+auto-trusted providers are saved directly to memory, while untrusted providers,
+personal/identity facts, possible secrets, or uncertain duplicate checks are
+held in the pending queue for human review. Designed to run fire-and-forget
+from an agent Stop hook (see 'auxly hooks install').
 
 Extraction backend: the Direct LLM by default, a persisted setting (see 'auxly capture config'),
 or env vars AUXLY_CAPTURE_AGENT / AUXLY_CAPTURE_MODEL.`,
@@ -118,6 +121,9 @@ func inCaptureCooldown(memPath string) bool {
 	return err == nil && time.Since(st.ModTime()) < captureCooldown
 }
 
+// captureTimeout bounds a single capture LLM/agent call (extraction or judge).
+const captureTimeout = 4 * time.Minute
+
 func runCapture(cmd *cobra.Command, args []string) error {
 	// Fired from inside a capture agent's own run (e.g. its notify hook):
 	// never recurse.
@@ -147,7 +153,7 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	}
 	_ = os.WriteFile(captureMarkerPath(memPath), []byte(time.Now().Format(time.RFC3339)), 0600)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
 	defer cancel()
 	facts, err := extractCaptureFacts(ctx, transcript)
 	if err != nil {
@@ -159,39 +165,284 @@ func runCapture(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	clearCaptureError(memPath)
-	store := memory.NewStore(memPath)
-	facts = store.DedupCaptureFacts(facts)
-	if len(facts) == 0 {
-		return nil
+	storeCaptureFacts(memPath, facts, captureProvider)
+	return nil
+}
+
+// storeCaptureFacts is the single post-extraction pipeline shared by every
+// capture entry point: exact + pending + reworded dedup, trust/risk routing,
+// pending write (+ immediate Approve for auto-saved facts), and audit logging.
+func storeCaptureFacts(memPath string, facts []memory.CaptureFact, provider string) {
+	cleaned := make([]memory.CaptureFact, 0, len(facts))
+	for _, f := range facts {
+		f.Fact = cleanCaptureFact(f.Fact)
+		if f.Fact == "" {
+			continue
+		}
+		if _, ok := memory.CategoryBySlug(f.Category); !ok {
+			f.Category = memory.RouteCategory(f.Fact)
+		}
+		cleaned = append(cleaned, f)
+	}
+	if len(cleaned) == 0 {
+		return
 	}
 
+	// 2a. Exact vault dedup (date-stamp-stripped).
+	store := memory.NewStore(memPath)
+	facts = store.DedupCaptureFacts(cleaned)
+	if len(facts) == 0 {
+		return
+	}
+
+	// 2b. Pending-queue exact dedup.
 	mgr := pending.NewManager(memPath)
+	pendingLines := pendingAdditionsByTarget(mgr)
+	pendingNorm := make(map[string]map[string]bool, len(pendingLines))
+	for target, lines := range pendingLines {
+		set := make(map[string]bool, len(lines))
+		for _, l := range lines {
+			set[memory.NormalizeCaptureFact(l)] = true
+		}
+		pendingNorm[target] = set
+	}
+
+	afterPending := make([]memory.CaptureFact, 0, len(facts))
+	for _, f := range facts {
+		file := captureTargetFile(store, f.Category)
+		if pendingNorm[file][memory.NormalizeCaptureFact(f.Fact)] {
+			continue
+		}
+		afterPending = append(afterPending, f)
+	}
+	facts = afterPending
+	if len(facts) == 0 {
+		return
+	}
+
+	// 2c. Reworded-duplicate neighbor retrieval (vault bullets + pending lines).
+	knownByFile := make(map[string][]string)
+	knownLinesFor := func(file string) []string {
+		if lines, ok := knownByFile[file]; ok {
+			return lines
+		}
+		vaultLines := store.FileBulletLines(file)
+		pend := pendingLines[file]
+		combined := make([]string, 0, len(vaultLines)+len(pend))
+		combined = append(combined, vaultLines...)
+		combined = append(combined, pend...)
+		knownByFile[file] = combined
+		return combined
+	}
+
+	var (
+		judgeCands     []memory.CaptureFact
+		judgeNeighbors [][]string
+		judgeOrigIdx   []int
+	)
+	for i, f := range facts {
+		file := captureTargetFile(store, f.Category)
+		nb := memory.CaptureNeighbors(f.Fact, knownLinesFor(file), memory.CaptureNeighborK, memory.CaptureNeighborMinScore)
+		if len(nb) > 0 {
+			judgeCands = append(judgeCands, f)
+			judgeNeighbors = append(judgeNeighbors, nb)
+			judgeOrigIdx = append(judgeOrigIdx, i)
+		}
+	}
+
+	// 2d. Single batch judge call for all candidates that had neighbors.
+	dropped := make(map[int]bool)
+	uncertain := make(map[int]bool)
+	if len(judgeCands) > 0 {
+		jctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
+		knownIdx, jerr := captureJudge(jctx, judgeCands, judgeNeighbors)
+		cancel()
+		if jerr != nil {
+			for _, orig := range judgeOrigIdx {
+				uncertain[orig] = true
+			}
+		} else {
+			for pos, orig := range judgeOrigIdx {
+				if knownIdx[pos] {
+					dropped[orig] = true
+				}
+			}
+		}
+	}
+
+	// 3. Trust + sensitivity routing (fail closed if trust.yaml cannot load).
+	trustLevel := trust.LevelRequireApproval
+	if trustCfg, terr := trust.Load(memPath); terr == nil {
+		if lvl := trustCfg.GetTrustLevel(captureTrustProvider(provider)); lvl != "" {
+			trustLevel = lvl
+		}
+	}
+
+	// 4. Apply via pending.Manager (WriteFrom, then Approve for auto-save) + audit.
 	logger, lerr := audit.NewLogger(memPath)
 	if lerr == nil {
 		defer logger.Close()
 	}
 	date := time.Now().Format("2006-01-02")
-	queued := 0
-	for _, f := range facts {
-		file := memory.FileForCategory(f.Category)
-		if f.Category == "projects" {
-			file = memory.ProjectFile(store.WorkspaceRoot)
+	agentAttr := "capture:" + strings.TrimPrefix(provider, "capture:")
+	saved, held := 0, 0
+	for i, f := range facts {
+		if dropped[i] {
+			continue
 		}
+		holdReason := ""
+		switch {
+		case trustLevel != trust.LevelAuto:
+			holdReason = "held: provider trust is " + trustLevel
+		case captureNeedsReviewCategory(f.Category):
+			holdReason = "held: personal/operational category"
+		case memory.LooksLikeSecret(f.Fact):
+			holdReason = "held: possible secret"
+		case uncertain[i]:
+			holdReason = "held: duplicate check unavailable"
+		}
+
+		file := captureTargetFile(store, f.Category)
 		diff := fmt.Sprintf("+ - [%s] %s\n", date, f.Fact)
-		name, werr := mgr.WriteFrom(file, diff, "capture:"+captureProvider)
+		name, werr := mgr.WriteFrom(file, diff, agentAttr)
 		if werr != nil {
 			continue
 		}
-		queued++
-		if lerr == nil {
-			logger.Log("capture", captureProvider, "write", file, diff, "auto-captured from session transcript", "require_approval")
+
+		if holdReason == "" {
+			if !isSingleAddLineDiff(diff) {
+				holdReason = "held: unexpected diff shape"
+			} else if aerr := mgr.Approve(name); aerr == nil {
+				saved++
+				if lerr == nil {
+					logger.Log("capture", provider, "write", file, diff, "auto-captured (trusted provider)", trust.LevelAuto)
+				}
+				continue
+			} else {
+				holdReason = "held: apply conflict"
+			}
 		}
-		_ = name
+
+		held++
+		if lerr == nil {
+			logger.Log("capture", provider, "write", file, diff, holdReason, trust.LevelRequireApproval)
+		}
 	}
-	if queued > 0 {
-		fmt.Printf("🪄 %d fact(s) captured → pending review (`auxly pending`)\n", queued)
+
+	var parts []string
+	if saved > 0 {
+		parts = append(parts, fmt.Sprintf("%d saved to memory", saved))
 	}
-	return nil
+	if held > 0 {
+		parts = append(parts, fmt.Sprintf("%d held for review (`auxly pending`)", held))
+	}
+	if len(parts) > 0 {
+		fmt.Printf("🪄 capture: %s\n", strings.Join(parts, ", "))
+	}
+}
+
+func isSingleAddLineDiff(diff string) bool {
+	return strings.HasPrefix(diff, "+ - ") && strings.HasSuffix(diff, "\n") && strings.Count(diff, "\n") == 1
+}
+
+func cleanCaptureFact(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\u2028' || r == '\u2029' || r == '\u0085' || unicode.IsSpace(r) {
+			b.WriteRune(' ')
+		} else if unicode.IsControl(r) {
+			continue
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+func captureNeedsReviewCategory(slug string) bool {
+	cat, ok := memory.CategoryBySlug(slug)
+	if !ok {
+		return true
+	}
+	if cat.Tier == memory.TierPersonal || cat.Operational || slug == "identity" {
+		return true
+	}
+	return false
+}
+
+func captureTargetFile(store *memory.Store, category string) string {
+	if category == "projects" {
+		return memory.ProjectFile(store.WorkspaceRoot)
+	}
+	return memory.FileForCategory(category)
+}
+
+// captureTrustProvider maps a capture provider flag/attribution string onto the
+// canonical provider key used in trust.yaml.
+func captureTrustProvider(provider string) string {
+	p := strings.TrimSpace(provider)
+	p = strings.TrimPrefix(p, "capture:")
+	if p == "claude-code" {
+		return "claude"
+	}
+	return p
+}
+
+// pendingAdditionsByTarget walks .pending/ via mgr.List() and collects the
+// "+ - ..." addition lines grouped by target file.
+func pendingAdditionsByTarget(mgr *pending.Manager) map[string][]string {
+	files, err := mgr.List()
+	if err != nil {
+		return nil
+	}
+	out := make(map[string][]string)
+	for _, pf := range files {
+		raw, rerr := os.ReadFile(pf.Path)
+		if rerr != nil {
+			continue
+		}
+		target, bullets := parsePendingAdditions(string(raw))
+		if target == "" || len(bullets) == 0 {
+			continue
+		}
+		out[target] = append(out[target], bullets...)
+	}
+	return out
+}
+
+func parsePendingAdditions(raw string) (target string, bullets []string) {
+	lines := strings.Split(raw, "\n")
+	dashes := 0
+	bodyStart := 0
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "---" {
+			dashes++
+			if dashes == 2 {
+				bodyStart = i + 1
+				break
+			}
+			continue
+		}
+		if dashes == 1 && strings.HasPrefix(line, "target: ") {
+			target = strings.ReplaceAll(strings.TrimSpace(strings.TrimPrefix(line, "target: ")), "\\", "/")
+		}
+	}
+	if dashes < 2 || target == "" {
+		return "", nil
+	}
+	for _, dl := range lines[bodyStart:] {
+		if strings.HasPrefix(dl, "+++") {
+			continue
+		}
+		if !strings.HasPrefix(dl, "+") {
+			continue
+		}
+		added := strings.TrimSpace(strings.TrimPrefix(dl, "+"))
+		if strings.HasPrefix(added, "- ") || strings.HasPrefix(added, "* ") {
+			bullets = append(bullets, added)
+		}
+	}
+	return target, bullets
 }
 
 // captureAgentEnv names the CLI-agent backend for capture (e.g. "claude").
@@ -259,6 +510,22 @@ func extractCaptureFacts(ctx context.Context, transcript string) ([]memory.Captu
 		return nil, err
 	}
 	return memory.ExtractCaptureFactsWithAgent(ctx, agentName, agentPath, model, transcript)
+}
+
+// captureJudge runs the reworded-duplicate judge over candidates with neighbors;
+// package-level var so tests can stub it without hitting an LLM or agent CLI.
+var captureJudge = judgeCaptureDuplicates
+
+func judgeCaptureDuplicates(ctx context.Context, cands []memory.CaptureFact, neighbors [][]string) (map[int]bool, error) {
+	agent, model, _ := resolveCaptureBackend()
+	if agent == "" {
+		return memory.JudgeCaptureDuplicates(ctx, cands, neighbors)
+	}
+	agentName, agentPath, err := resolveHeadlessAgent(agent)
+	if err != nil {
+		return nil, err
+	}
+	return memory.JudgeCaptureDuplicatesWithAgent(ctx, agentName, agentPath, model, cands, neighbors)
 }
 
 func runCaptureConfig(cmd *cobra.Command, args []string) error {

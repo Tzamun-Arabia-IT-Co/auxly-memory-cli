@@ -23,7 +23,7 @@ func TestResolveEndpoint(t *testing.T) {
 			wantKey:    "sk-openai",
 			wantCloud:  true,
 			wantSource: "openai",
-			wantModel:  "gpt-4o-mini",
+			wantModel:  "gpt-6-luna",
 		},
 		{
 			name:       "gemini",
@@ -32,7 +32,7 @@ func TestResolveEndpoint(t *testing.T) {
 			wantKey:    "g-key",
 			wantCloud:  true,
 			wantSource: "gemini",
-			wantModel:  "gemini-1.5-flash",
+			wantModel:  "gemini-flash-latest",
 		},
 		{
 			name:       "ollama_host",
@@ -68,7 +68,7 @@ func TestResolveEndpoint(t *testing.T) {
 			wantKey:    "sk-openai",
 			wantCloud:  true,
 			wantSource: "openai",
-			wantModel:  "gpt-4o-mini",
+			wantModel:  "gpt-6-luna",
 		},
 		{
 			name:       "ollama_host_wins_over_auxly_llm_base",

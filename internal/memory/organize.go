@@ -163,6 +163,9 @@ func buildAgentArgs(agentName, model, prompt string) []string {
 	case strings.Contains(p, "antigravity") || strings.Contains(p, "agy"):
 		// `agy --print` runs a single prompt non-interactively (verified it exits on
 		// EOF stdin); a bare prompt opens interactive mode and hangs.
+		if model != "" {
+			return []string{"--model", model, "--print", prompt}
+		}
 		return []string{"--print", prompt}
 	case strings.Contains(p, "gemini"):
 		args := []string{"-p"}
