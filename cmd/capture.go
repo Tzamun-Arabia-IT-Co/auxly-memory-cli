@@ -28,6 +28,7 @@ var (
 	captureCodexNotifyFlag bool
 	captureConfigAgent     string
 	captureConfigModel     string
+	captureConfigAutoSave  string
 )
 
 var captureCmd = &cobra.Command{
@@ -35,11 +36,12 @@ var captureCmd = &cobra.Command{
 	Short: "Extract durable facts from a session transcript into the pending queue",
 	Long: `capture reads a session transcript (Claude Code JSONL via --transcript or
 --stop-hook, plain text via stdin), extracts durable facts with the configured
-LLM, and drops exact, pending, and reworded duplicates. Normal facts from
-auto-trusted providers are saved directly to memory, while untrusted providers,
-personal/identity facts, possible secrets, or uncertain duplicate checks are
-held in the pending queue for human review. Designed to run fire-and-forget
-from an agent Stop hook (see 'auxly hooks install').
+LLM, and drops exact, pending, and reworded duplicates. All extracted facts are
+held in the pending queue by default. When auto-save is enabled (see 'auxly capture config --auto-save on'),
+normal facts from providers with trust level auto are saved directly, while risky
+facts (untrusted providers, personal/identity categories, possible secrets, or uncertain
+duplicate checks) are still held. Designed to run fire-and-forget from an agent Stop
+hook (see 'auxly hooks install').
 
 Extraction backend: the Direct LLM by default, a persisted setting (see 'auxly capture config'),
 or env vars AUXLY_CAPTURE_AGENT / AUXLY_CAPTURE_MODEL.`,
@@ -50,11 +52,14 @@ or env vars AUXLY_CAPTURE_AGENT / AUXLY_CAPTURE_MODEL.`,
 var captureConfigCmd = &cobra.Command{
 	Use:   "config",
 	Short: "View or configure the capture backend (agent and model)",
-	Long: `config views or updates the backend used by session capture.
+	Long: `config views or updates the backend and options used by session capture.
 
-Without flags, prints the effective capture backend and its source (env / settings / default Direct LLM).
+Without flags, prints the effective capture backend and auto-save status.
 With --agent or --model, updates persisted settings in ~/.auxly/settings.json.
-Pass --agent none to clear the configured agent and revert to the Direct LLM.`,
+Pass --agent none to clear the configured agent and revert to the Direct LLM.
+Use --auto-save on|off to toggle direct auto-saving of captured facts (default off;
+when on, facts from providers with trust level auto are saved directly; risky facts
+are still held).`,
 	SilenceUsage: true,
 	RunE:         runCaptureConfig,
 }
@@ -66,6 +71,7 @@ func init() {
 	captureCmd.Flags().BoolVar(&captureCodexNotifyFlag, "codex-notify", false, "read a Codex notify-hook JSON payload (arg or stdin) and capture the session (wired by `hooks install --agent codex`)")
 	captureConfigCmd.Flags().StringVar(&captureConfigAgent, "agent", "", "CLI agent to use (claude, codex, gemini, antigravity, cursor, or 'none' to clear)")
 	captureConfigCmd.Flags().StringVar(&captureConfigModel, "model", "", "model for the CLI agent")
+	captureConfigCmd.Flags().StringVar(&captureConfigAutoSave, "auto-save", "", "auto-save facts from trusted providers directly (on|off)")
 	captureCmd.AddCommand(captureConfigCmd)
 	rootCmd.AddCommand(captureCmd)
 }
@@ -169,10 +175,15 @@ func runCapture(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// captureAutoSaveEnabled controls whether captured facts from auto-trusted
+// providers are saved directly to memory vs held in the pending queue.
+var captureAutoSaveEnabled = func() bool { return config.LoadSettings().CaptureAutoSave }
+
 // storeCaptureFacts is the single post-extraction pipeline shared by every
 // capture entry point: exact + pending + reworded dedup, trust/risk routing,
 // pending write (+ immediate Approve for auto-saved facts), and audit logging.
 func storeCaptureFacts(memPath string, facts []memory.CaptureFact, provider string) {
+	autoSaveEnabled := captureAutoSaveEnabled()
 	cleaned := make([]memory.CaptureFact, 0, len(facts))
 	for _, f := range facts {
 		f.Fact = cleanCaptureFact(f.Fact)
@@ -286,12 +297,15 @@ func storeCaptureFacts(memPath string, facts []memory.CaptureFact, provider stri
 	date := time.Now().Format("2006-01-02")
 	agentAttr := "capture:" + strings.TrimPrefix(provider, "capture:")
 	saved, held := 0, 0
+	heldForAutoSaveOff := false
 	for i, f := range facts {
 		if dropped[i] {
 			continue
 		}
 		holdReason := ""
 		switch {
+		case !autoSaveEnabled:
+			holdReason = "held: capture auto-save is off"
 		case trustLevel != trust.LevelAuto:
 			holdReason = "held: provider trust is " + trustLevel
 		case captureNeedsReviewCategory(f.Category):
@@ -323,6 +337,9 @@ func storeCaptureFacts(memPath string, facts []memory.CaptureFact, provider stri
 			}
 		}
 
+		if holdReason == "held: capture auto-save is off" {
+			heldForAutoSaveOff = true
+		}
 		held++
 		if lerr == nil {
 			logger.Log("capture", provider, "write", file, diff, holdReason, trust.LevelRequireApproval)
@@ -337,7 +354,11 @@ func storeCaptureFacts(memPath string, facts []memory.CaptureFact, provider stri
 		parts = append(parts, fmt.Sprintf("%d held for review (`auxly pending`)", held))
 	}
 	if len(parts) > 0 {
-		fmt.Printf("🪄 capture: %s\n", strings.Join(parts, ", "))
+		summary := fmt.Sprintf("🪄 capture: %s", strings.Join(parts, ", "))
+		if heldForAutoSaveOff {
+			summary += "  — turn on auto-save: auxly capture config --auto-save on"
+		}
+		fmt.Println(summary)
 	}
 }
 
@@ -531,14 +552,26 @@ func judgeCaptureDuplicates(ctx context.Context, cands []memory.CaptureFact, nei
 func runCaptureConfig(cmd *cobra.Command, args []string) error {
 	agentChanged := cmd.Flags().Changed("agent")
 	modelChanged := cmd.Flags().Changed("model")
+	autoSaveChanged := cmd.Flags().Changed("auto-save")
 
-	if !agentChanged && !modelChanged {
-		agent, model, source := resolveCaptureBackend()
-		cmd.Println(formatCaptureBackendSummary(agent, model, source))
+	if !agentChanged && !modelChanged && !autoSaveChanged {
+		printCaptureConfigSummary(cmd)
 		return nil
 	}
 
 	settings := config.LoadSettings()
+
+	if autoSaveChanged {
+		v := strings.ToLower(strings.TrimSpace(captureConfigAutoSave))
+		switch v {
+		case "on", "true", "yes":
+			settings.CaptureAutoSave = true
+		case "off", "false", "no":
+			settings.CaptureAutoSave = false
+		default:
+			return fmt.Errorf("invalid value %q for --auto-save: valid values are on, off, true, false, yes, no", captureConfigAutoSave)
+		}
+	}
 
 	if agentChanged {
 		rawAgent := strings.TrimSpace(captureConfigAgent)
@@ -568,8 +601,18 @@ func runCaptureConfig(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	cmd.Println(formatCaptureBackendSummary(settings.CaptureAgent, settings.CaptureModel, "settings"))
+	printCaptureConfigSummary(cmd)
 	return nil
+}
+
+func printCaptureConfigSummary(cmd *cobra.Command) {
+	agent, model, source := resolveCaptureBackend()
+	cmd.Println(formatCaptureBackendSummary(agent, model, source))
+	if config.LoadSettings().CaptureAutoSave {
+		cmd.Println("auto-save: on")
+	} else {
+		cmd.Println("auto-save: off")
+	}
 }
 
 // captureInput assembles the transcript text from whichever source was given.

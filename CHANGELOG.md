@@ -5,6 +5,24 @@ All notable changes to Auxly Memory CLI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.5] - 2026-10-29
+
+### Security
+
+- **Capture auto-save is opt-in.** 1.5.4 auto-saved captured facts whenever the provider's `trust.yaml`
+  level was `auto` (the shipped default), so transcript content (web pages, files, tool output) could be
+  prompt-injected into persistent memory without the user choosing that. A new `captureAutoSave` setting
+  (default off) now gates auto-save: `auxly capture config --auto-save on|off` or TUI Settings →
+  "Auto-save captures". With it off, every captured fact is held (`held: capture auto-save is off`) and the
+  capture summary line says how to turn it on. With it on, the 1.5.4 trust, category, secret, duplicate and
+  diff-shape gates still apply.
+
+### Fixed
+
+- **Dashboard loads in about a second instead of ~20 s.** The active-providers query used a per-row
+  correlated `MAX(id)` subquery that took ~20 s on a 157k-row audit table and held up every dashboard
+  refresh; it is now a single `GROUP BY` pass (same result).
+
 ## [1.5.4] - 2026-10-29
 
 ### Changed

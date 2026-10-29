@@ -227,3 +227,29 @@ func newTestActivityLogger(t *testing.T) *Logger {
 	})
 	return l
 }
+
+func TestActiveProvidersLatestActionWins(t *testing.T) {
+	l := newTestActivityLogger(t)
+
+	for _, e := range [][2]string{
+		{"codex", "write"},
+		{"claude", "write"}, {"claude", "disconnect"},
+		{"gemini", "disconnect"}, {"gemini", "initialize"},
+	} {
+		if _, err := l.Log("agent", e[0], e[1], "x.md", "", "", "trusted"); err != nil {
+			t.Fatalf("Log failed: %v", err)
+		}
+	}
+
+	got, err := l.ActiveProviders(5 * time.Minute)
+	if err != nil {
+		t.Fatalf("ActiveProviders failed: %v", err)
+	}
+	active := map[string]bool{}
+	for _, p := range got {
+		active[p] = true
+	}
+	if len(got) != 2 || !active["codex"] || !active["gemini"] {
+		t.Fatalf("ActiveProviders = %v, want [codex gemini]", got)
+	}
+}

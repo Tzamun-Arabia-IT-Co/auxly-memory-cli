@@ -25,19 +25,18 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.5.4
+## 🆕 What's New in Version 1.5.5
+
+- **🔒 Capture auto-save is now opt-in.** In 1.5.4, captured facts were saved straight to memory whenever the provider's `trust.yaml` level was `auto`, which is the shipped default. Captured facts come from whatever your agent read in a session (web pages, files, tool output), so planted text could end up in permanent memory. Auto-save is now a separate setting that is **off by default**: every captured fact waits in `auxly pending` until you turn it on with `auxly capture config --auto-save on` or **Settings → Auto-save captures** in the TUI. When it's on, the 1.5.4 rules still apply: only facts from providers trusted as `auto` are saved, and personal, identity, inbox and task facts, possible secrets and unverified duplicates are always held.
+- **⚡ Faster dashboard.** The dashboard now fills in about a second instead of ~20 seconds on large audit logs.
+
+### Version 1.5.4
 
 - **🧠 Smart capture: no more approving every fact.** Facts captured from providers you trust as `auto` in `trust.yaml` are now saved straight to memory. Only the risky ones wait in `auxly pending`: facts from providers that aren't `auto`, personal, identity, inbox and task facts, anything that looks like a secret (API keys, tokens, private keys, passwords), and facts whose duplicate check couldn't run. Each saved or held fact is in the audit log with its reason.
 - **♻️ Reworded duplicates are dropped.** Capture used to save the same fact again whenever the wording changed. It now finds similar existing lines (in the vault and in the pending queue) and makes one extra call to your own capture model to drop facts that are already known. If that check fails, the affected facts are held for review instead of saved.
 - **🛡️ Safe by construction.** A captured fact is always one clean line (line breaks and control characters removed), and only a single added line is ever auto-applied, so a captured fact can never delete or rewrite existing memory.
 - **🔗 Codex + Computer Use.** When Codex Computer Use wraps the `notify` hook and chains Auxly behind it, `auxly hooks status` and the TUI now show it as wired instead of "manual", and install/uninstall leave that line alone.
 - **🆕 Current models everywhere.** Memory Organize and the capture model picker list Claude Sonnet 5.5, Haiku 5.5, Opus 5.5 and Fable 5.1, read Codex's own model list and `agy models` live, and offer **custom…** to type any model id. The OpenAI default is now `gpt-6-luna`, and Gemini uses `gemini-flash-latest` (Gemini 1.5 was shut down).
-
-### Version 1.5.3
-
-- **🤖 Capture with your own subscription.** Session capture can now run through any installed CLI agent (Claude Code, Codex, Gemini, Antigravity, Cursor), the same providers Memory Organize offers. Choose it under **Settings → Session capture model** in the TUI, or with `auxly capture config --agent claude --model haiku`. `AUXLY_CAPTURE_AGENT` / `AUXLY_CAPTURE_MODEL` override the setting. The agent runs isolated (no tools, no MCP servers, no hooks), so it can't re-trigger capture.
-- **🧩 OpenCode support.** `auxly hooks install --agent opencode` adds a plugin to `~/.config/opencode/plugins/`. When a session goes idle, the plugin sends its text messages (tool output excluded) to capture.
-- **⚡ Capture never blocks your agent.** The Claude Code Stop hook now runs `async`, so extraction happens in the background. Re-running `auxly hooks install` upgrades an existing hook in place.
 
 Looking for past release details? See the [CHANGELOG](CHANGELOG.md) for the full history.
 

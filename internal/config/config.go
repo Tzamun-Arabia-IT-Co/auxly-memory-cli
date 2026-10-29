@@ -99,6 +99,11 @@ type Settings struct {
 
 	// CaptureModel persists the CLI agent's model name. Env AUXLY_CAPTURE_MODEL wins.
 	CaptureModel string `json:"captureModel,omitempty"`
+
+	// CaptureAutoSave: when true, captured facts from providers whose
+	// trust.yaml level is auto are saved directly; default false keeps every
+	// captured fact in the pending queue.
+	CaptureAutoSave bool `json:"captureAutoSave,omitempty"`
 }
 
 // settingsPath returns ~/.auxly/settings.json.

@@ -35,6 +35,10 @@ type settingsModel struct {
 	captureAgent string
 	captureModel string
 
+	// Auto-save captures opt-in: save normal facts from trusted providers
+	// directly instead of keeping them in pending. Persisted via config.SaveSettings.
+	captureAutoSave bool
+
 	// Sub-tab state: 0 = General (trust), 1 = Agents (dashboard show/hide),
 	// 2 = Customizations (Claude Code statusline), 3 = Vault (encryption + index),
 	// 4 = Ops (capture hooks, git sync, doctor report).
@@ -74,16 +78,17 @@ type settingsRefreshMsg struct {
 
 func newSettingsModel(memPath string, logger *audit.Logger) settingsModel {
 	return settingsModel{
-		memoryPath:   memPath,
-		trustLevels:  []string{"auto", "require_approval", "read_only"},
-		liveUsage:    config.LoadSettings().LiveUsage,
-		autoUpdate:   config.LoadSettings().AutoUpdate,
-		captureAgent: config.LoadSettings().CaptureAgent,
-		captureModel: config.LoadSettings().CaptureModel,
-		logger:       logger,
-		hiddenAgents: loadHiddenAgentSet(),
-		vault:        newVaultModel(memPath),
-		ops:          newOpsModel(memPath),
+		memoryPath:      memPath,
+		trustLevels:     []string{"auto", "require_approval", "read_only"},
+		liveUsage:       config.LoadSettings().LiveUsage,
+		autoUpdate:      config.LoadSettings().AutoUpdate,
+		captureAgent:    config.LoadSettings().CaptureAgent,
+		captureModel:    config.LoadSettings().CaptureModel,
+		captureAutoSave: config.LoadSettings().CaptureAutoSave,
+		logger:          logger,
+		hiddenAgents:    loadHiddenAgentSet(),
+		vault:           newVaultModel(memPath),
+		ops:             newOpsModel(memPath),
 	}
 }
 
@@ -242,6 +247,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		m.suggestions = msg.suggestions
 		m.captureAgent = config.LoadSettings().CaptureAgent
 		m.captureModel = config.LoadSettings().CaptureModel
+		m.captureAutoSave = config.LoadSettings().CaptureAutoSave
 		if m.suggestCursor >= len(m.suggestions) {
 			m.suggestCursor = 0
 		}
@@ -345,6 +351,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			liveUsageLineY := -1
 			autoUpdateLineY := -1
 			captureModelLineY := -1
+			captureAutoSaveLineY := -1
 			providerLineYs := make(map[string]int)
 			uniqueAgents := m.getUniqueAgents()
 			for idx, line := range viewLines {
@@ -363,6 +370,9 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				}
 				if strings.Contains(clean, "Session capture model") {
 					captureModelLineY = idx
+				}
+				if strings.Contains(clean, "Auto-save captures") {
+					captureAutoSaveLineY = idx
 				}
 				for _, a := range uniqueAgents {
 					if strings.Contains(clean, a.Name) && !strings.Contains(clean, "Overrides") && !strings.Contains(clean, "Default Trust") {
@@ -403,6 +413,10 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			if clickedY == captureModelLineY && captureModelLineY != -1 {
 				m.cursor = len(uniqueAgents) + 3
 				return m, m.cycleCaptureModel()
+			}
+			if clickedY == captureAutoSaveLineY && captureAutoSaveLineY != -1 {
+				m.cursor = len(uniqueAgents) + 4
+				return m, m.toggleCaptureAutoSave()
 			}
 		}
 	case tea.KeyMsg:
@@ -495,7 +509,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 
 		switch msg.String() {
 		case "j", "down":
-			max := len(uniqueAgents) + 3 // +1 Live Usage, +2 Auto-Update, +3 Session capture model
+			max := len(uniqueAgents) + 4 // +1 Live Usage, +2 Auto-Update, +3 Session capture model, +4 Auto-save captures
 			if m.cursor < max {
 				m.cursor++
 			}
@@ -534,6 +548,8 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 				return m, m.toggleAutoUpdate()
 			} else if m.cursor == len(uniqueAgents)+3 {
 				return m, m.cycleCaptureModel()
+			} else if m.cursor == len(uniqueAgents)+4 {
+				return m, m.toggleCaptureAutoSave()
 			}
 		}
 	}
@@ -653,6 +669,15 @@ func (m *settingsModel) toggleAutoUpdate() tea.Cmd {
 	m.autoUpdate = !m.autoUpdate
 	next := config.LoadSettings()
 	next.AutoUpdate = m.autoUpdate
+	_ = config.SaveSettings(next)
+	return nil
+}
+
+// toggleCaptureAutoSave flips the capture auto-save opt-in, persisting it to settings.json.
+func (m *settingsModel) toggleCaptureAutoSave() tea.Cmd {
+	m.captureAutoSave = !m.captureAutoSave
+	next := config.LoadSettings()
+	next.CaptureAutoSave = m.captureAutoSave
 	_ = config.SaveSettings(next)
 	return nil
 }
@@ -1051,6 +1076,20 @@ func (m settingsModel) View() string {
 	}
 	captureVal := cyan.Render(m.currentCaptureModelDisplay())
 	lines = append(lines, fmt.Sprintf("%s%s %s", captureCursor, captureLabel, captureVal))
+
+	autoSaveCursor := "  "
+	if m.cursor == len(uniqueAgents)+4 {
+		autoSaveCursor = cyan.Render("▸ ")
+	}
+	autoSaveLabel := fmt.Sprintf("%-22s", "Auto-save captures")
+	if m.cursor == len(uniqueAgents)+4 {
+		autoSaveLabel = bold.Render(autoSaveLabel)
+	}
+	autoSaveState := red.Render("[OFF]")
+	if m.captureAutoSave {
+		autoSaveState = green.Render("[ON]")
+	}
+	lines = append(lines, fmt.Sprintf("%s%s %s", autoSaveCursor, autoSaveLabel, autoSaveState))
 
 	if len(m.suggestions) > 0 {
 		lines = append(lines, dim.Render(fmt.Sprintf("💡 trust: %d suggestion(s) — press ", len(m.suggestions)))+

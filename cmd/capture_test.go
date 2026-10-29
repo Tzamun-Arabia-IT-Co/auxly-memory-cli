@@ -251,6 +251,13 @@ func stubCaptureJudge(t *testing.T, fn func(context.Context, []memory.CaptureFac
 	t.Cleanup(func() { captureJudge = old })
 }
 
+func stubCaptureAutoSave(t *testing.T, enabled bool) {
+	t.Helper()
+	old := captureAutoSaveEnabled
+	captureAutoSaveEnabled = func() bool { return enabled }
+	t.Cleanup(func() { captureAutoSaveEnabled = old })
+}
+
 func writeTrustConfig(t *testing.T, memPath, provider, level string) {
 	t.Helper()
 	cfg := &trust.Config{
@@ -281,6 +288,7 @@ func TestCaptureTrustProvider(t *testing.T) {
 
 func TestStoreCaptureFacts_TrustAutoSavesDirectly(t *testing.T) {
 	memPath := t.TempDir()
+	stubCaptureAutoSave(t, true)
 	writeTrustConfig(t, memPath, "claude", trust.LevelAuto)
 	stubCaptureJudge(t, func(context.Context, []memory.CaptureFact, [][]string) (map[int]bool, error) {
 		t.Fatal("judge must not be called when there are no neighbors")
@@ -318,6 +326,7 @@ func TestStoreCaptureFacts_TrustAutoSavesDirectly(t *testing.T) {
 
 func TestStoreCaptureFacts_TrustRequireApprovalHoldsPending(t *testing.T) {
 	memPath := t.TempDir()
+	stubCaptureAutoSave(t, true)
 	writeTrustConfig(t, memPath, "claude", trust.LevelRequireApproval)
 	stubCaptureJudge(t, func(context.Context, []memory.CaptureFact, [][]string) (map[int]bool, error) {
 		t.Fatal("judge must not be called when there are no neighbors")
@@ -351,6 +360,7 @@ func TestStoreCaptureFacts_TrustRequireApprovalHoldsPending(t *testing.T) {
 
 func TestStoreCaptureFacts_PersonalAndSecretHeldEvenWhenAuto(t *testing.T) {
 	memPath := t.TempDir()
+	stubCaptureAutoSave(t, true)
 	writeTrustConfig(t, memPath, "claude", trust.LevelAuto)
 	stubCaptureJudge(t, func(context.Context, []memory.CaptureFact, [][]string) (map[int]bool, error) {
 		return map[int]bool{}, nil
@@ -426,6 +436,7 @@ func TestStoreCaptureFacts_JudgeKnownDropped(t *testing.T) {
 
 func TestStoreCaptureFacts_JudgeErrorHoldsUncertainSavesNeighborless(t *testing.T) {
 	memPath := t.TempDir()
+	stubCaptureAutoSave(t, true)
 	writeTrustConfig(t, memPath, "claude", trust.LevelAuto)
 	initialInfra := "# Infra\n- [2026-10-01] production postgres database runs on port 5432\n"
 	if err := os.WriteFile(filepath.Join(memPath, "infra.md"), []byte(initialInfra), 0644); err != nil {
@@ -521,6 +532,7 @@ func TestStoreCaptureFacts_DropsAlreadyPendingExactDuplicate(t *testing.T) {
 // embedded diff deletion attacks.
 func TestStoreCaptureFacts_MultilineFactSanitizedSingleLine(t *testing.T) {
 	memPath := t.TempDir()
+	stubCaptureAutoSave(t, true)
 	writeTrustConfig(t, memPath, "claude", trust.LevelAuto)
 	stubCaptureJudge(t, func(context.Context, []memory.CaptureFact, [][]string) (map[int]bool, error) {
 		return nil, nil
@@ -572,6 +584,7 @@ func TestStoreCaptureFacts_MultilineFactSanitizedSingleLine(t *testing.T) {
 // trust auto never deletes the existing vault line and is saved as a single clean line.
 func TestStoreCaptureFacts_ControlAndLineSeparatorSanitizedSingleLine(t *testing.T) {
 	memPath := t.TempDir()
+	stubCaptureAutoSave(t, true)
 	writeTrustConfig(t, memPath, "claude", trust.LevelAuto)
 	stubCaptureJudge(t, func(context.Context, []memory.CaptureFact, [][]string) (map[int]bool, error) {
 		return nil, nil
@@ -684,6 +697,7 @@ func TestCaptureNeedsReviewCategory(t *testing.T) {
 // are all held; "infra" is auto-saved.
 func TestStoreCaptureFacts_CategorySensitivityGate(t *testing.T) {
 	memPath := t.TempDir()
+	stubCaptureAutoSave(t, true)
 	writeTrustConfig(t, memPath, "claude", trust.LevelAuto)
 	stubCaptureJudge(t, func(context.Context, []memory.CaptureFact, [][]string) (map[int]bool, error) {
 		return map[int]bool{}, nil
@@ -725,5 +739,204 @@ func TestStoreCaptureFacts_CategorySensitivityGate(t *testing.T) {
 	auditLog, _ := os.ReadFile(filepath.Join(memPath, ".audit.log"))
 	if !strings.Contains(string(auditLog), "held: personal/operational category") {
 		t.Fatalf("missing personal/operational audit reason: %q", auditLog)
+	}
+}
+
+func TestStoreCaptureFacts_AutoSaveOffHoldsPending(t *testing.T) {
+	memPath := t.TempDir()
+	stubCaptureAutoSave(t, false)
+	writeTrustConfig(t, memPath, "claude", trust.LevelAuto)
+	stubCaptureJudge(t, func(context.Context, []memory.CaptureFact, [][]string) (map[int]bool, error) {
+		t.Fatal("judge must not be called when there are no neighbors")
+		return nil, nil
+	})
+
+	out := captureStdout(t, func() {
+		storeCaptureFacts(memPath, []memory.CaptureFact{
+			{Category: "infra", Fact: "prod server is 192.0.2.24"},
+		}, "claude-code")
+	})
+
+	if _, err := os.Stat(filepath.Join(memPath, "infra.md")); !os.IsNotExist(err) {
+		t.Fatalf("infra.md must stay untouched when auto-save is off, stat err=%v", err)
+	}
+	items, err := pending.NewManager(memPath).List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 entry in .pending, got %+v", items)
+	}
+	auditLog, _ := os.ReadFile(filepath.Join(memPath, ".audit.log"))
+	if !strings.Contains(string(auditLog), "held: capture auto-save is off") {
+		t.Fatalf("expected auto-save off audit reason, got %q", auditLog)
+	}
+	expectedHint := "🪄 capture: 1 held for review (`auxly pending`)  — turn on auto-save: auxly capture config --auto-save on"
+	if !strings.Contains(out, expectedHint) {
+		t.Fatalf("expected summary hint %q, got %q", expectedHint, out)
+	}
+}
+
+func TestStoreCaptureFacts_AutoSaveOnRequireApprovalHoldsPending(t *testing.T) {
+	memPath := t.TempDir()
+	stubCaptureAutoSave(t, true)
+	writeTrustConfig(t, memPath, "claude", trust.LevelRequireApproval)
+	stubCaptureJudge(t, func(context.Context, []memory.CaptureFact, [][]string) (map[int]bool, error) {
+		t.Fatal("judge must not be called when there are no neighbors")
+		return nil, nil
+	})
+
+	out := captureStdout(t, func() {
+		storeCaptureFacts(memPath, []memory.CaptureFact{
+			{Category: "infra", Fact: "prod server is 192.0.2.24"},
+		}, "claude-code")
+	})
+
+	if _, err := os.Stat(filepath.Join(memPath, "infra.md")); !os.IsNotExist(err) {
+		t.Fatalf("infra.md must stay untouched under require_approval, stat err=%v", err)
+	}
+	items, err := pending.NewManager(memPath).List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 entry in .pending, got %+v", items)
+	}
+	auditLog, _ := os.ReadFile(filepath.Join(memPath, ".audit.log"))
+	if !strings.Contains(string(auditLog), "held: provider trust is require_approval") {
+		t.Fatalf("expected trust hold audit reason, got %q", auditLog)
+	}
+	if strings.Contains(out, "turn on auto-save") {
+		t.Fatalf("unexpected auto-save hint when hold was not due to auto-save off: %q", out)
+	}
+}
+
+func TestStoreCaptureFacts_AutoSaveOnAutoSavesDirectly(t *testing.T) {
+	memPath := t.TempDir()
+	stubCaptureAutoSave(t, true)
+	writeTrustConfig(t, memPath, "claude", trust.LevelAuto)
+	stubCaptureJudge(t, func(context.Context, []memory.CaptureFact, [][]string) (map[int]bool, error) {
+		t.Fatal("judge must not be called when there are no neighbors")
+		return nil, nil
+	})
+
+	out := captureStdout(t, func() {
+		storeCaptureFacts(memPath, []memory.CaptureFact{
+			{Category: "infra", Fact: "prod server is 192.0.2.24"},
+		}, "claude-code")
+	})
+
+	data, err := os.ReadFile(filepath.Join(memPath, "infra.md"))
+	if err != nil {
+		t.Fatalf("expected infra.md to be written: %v", err)
+	}
+	if !strings.Contains(string(data), "prod server is 192.0.2.24") {
+		t.Fatalf("fact missing from infra.md: %q", data)
+	}
+	items, err := pending.NewManager(memPath).List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected 0 entries in .pending after auto-save, got %+v", items)
+	}
+	auditLog, _ := os.ReadFile(filepath.Join(memPath, ".audit.log"))
+	if !strings.Contains(string(auditLog), "auto-captured (trusted provider)") {
+		t.Fatalf("expected auto audit reason, got %q", auditLog)
+	}
+	if strings.Contains(out, "turn on auto-save") {
+		t.Fatalf("unexpected auto-save hint when fact was saved: %q", out)
+	}
+}
+
+func TestCaptureConfigAutoSave(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Default is false
+	if config.LoadSettings().CaptureAutoSave {
+		t.Fatal("expected CaptureAutoSave to default to false")
+	}
+
+	execConfig := func() string {
+		var buf strings.Builder
+		captureConfigCmd.SetOut(&buf)
+		defer captureConfigCmd.SetOut(nil)
+		if err := runCaptureConfig(captureConfigCmd, nil); err != nil {
+			t.Fatalf("runCaptureConfig: %v", err)
+		}
+		return buf.String()
+	}
+
+	// Verify bare `capture config` output shows auto-save: off
+	outBare := execConfig()
+	if !strings.Contains(outBare, "auto-save: off") {
+		t.Fatalf("expected 'auto-save: off' in bare output, got %q", outBare)
+	}
+
+	// Turn on
+	if err := captureConfigCmd.Flags().Set("auto-save", "on"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = captureConfigCmd.Flags().Set("auto-save", "")
+		captureConfigAutoSave = ""
+		if f := captureConfigCmd.Flags().Lookup("auto-save"); f != nil {
+			f.Changed = false
+		}
+	})
+
+	outOn := execConfig()
+	if !config.LoadSettings().CaptureAutoSave {
+		t.Fatal("expected CaptureAutoSave to be true after --auto-save on")
+	}
+	if !strings.Contains(outOn, "auto-save: on") {
+		t.Fatalf("expected 'auto-save: on' in output, got %q", outOn)
+	}
+
+	// Turn off
+	if err := captureConfigCmd.Flags().Set("auto-save", "off"); err != nil {
+		t.Fatal(err)
+	}
+	outOff := execConfig()
+	if config.LoadSettings().CaptureAutoSave {
+		t.Fatal("expected CaptureAutoSave to be false after --auto-save off")
+	}
+	if !strings.Contains(outOff, "auto-save: off") {
+		t.Fatalf("expected 'auto-save: off' in output, got %q", outOff)
+	}
+
+	// Case-insensitive variants (true, yes, false, no)
+	for _, truthy := range []string{"TRUE", "yes", "True", "YES"} {
+		if err := captureConfigCmd.Flags().Set("auto-save", truthy); err != nil {
+			t.Fatal(err)
+		}
+		execConfig()
+		if !config.LoadSettings().CaptureAutoSave {
+			t.Fatalf("expected CaptureAutoSave true for %s", truthy)
+		}
+	}
+	for _, falsy := range []string{"FALSE", "no", "False", "NO"} {
+		if err := captureConfigCmd.Flags().Set("auto-save", falsy); err != nil {
+			t.Fatal(err)
+		}
+		execConfig()
+		if config.LoadSettings().CaptureAutoSave {
+			t.Fatalf("expected CaptureAutoSave false for %s", falsy)
+		}
+	}
+
+	// Invalid value returns an error naming valid values
+	if err := captureConfigCmd.Flags().Set("auto-save", "invalid-value"); err != nil {
+		t.Fatal(err)
+	}
+	err := runCaptureConfig(captureConfigCmd, nil)
+	if err == nil {
+		t.Fatal("expected error for invalid --auto-save value, got nil")
+	}
+	errStr := err.Error()
+	for _, valid := range []string{"on", "off", "true", "false", "yes", "no"} {
+		if !strings.Contains(errStr, valid) {
+			t.Errorf("error %q should name valid value %q", errStr, valid)
+		}
 	}
 }

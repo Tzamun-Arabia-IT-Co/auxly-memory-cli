@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
 	trustcfg "github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
 )
@@ -76,10 +77,92 @@ func TestLiveUsageAutoUpdateAreSeparateRows(t *testing.T) {
 	if m.cursor != n+3 {
 		t.Fatalf("one more ↓ should reach Session capture model (%d), got %d", n+3, m.cursor)
 	}
+	// One more ↓ reaches Auto-save captures.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if m.cursor != n+4 {
+		t.Fatalf("one more ↓ should reach Auto-save captures (%d), got %d", n+4, m.cursor)
+	}
 	// And ↓ at the bottom does not overshoot.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if m.cursor != n+3 {
-		t.Errorf("cursor must clamp at Session capture model (%d), got %d", n+3, m.cursor)
+	if m.cursor != n+4 {
+		t.Errorf("cursor must clamp at Auto-save captures (%d), got %d", n+4, m.cursor)
+	}
+}
+
+func TestAutoSaveCapturesToggle(t *testing.T) {
+	m := settingsModelFor(t, 120, 50)
+	n := len(m.getUniqueAgents())
+
+	// Default setting is false
+	if config.LoadSettings().CaptureAutoSave {
+		t.Fatal("expected CaptureAutoSave to default to false")
+	}
+	if m.captureAutoSave {
+		t.Fatal("expected model captureAutoSave to start false")
+	}
+
+	// Drive cursor down to Auto-save captures (row n+4)
+	for i := 0; i < n+4; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if m.cursor != n+4 {
+		t.Fatalf("cursor should reach Auto-save captures (%d), got %d", n+4, m.cursor)
+	}
+
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "Auto-save captures") || !strings.Contains(view, "[OFF]") {
+		t.Fatalf("expected Auto-save captures [OFF] in view:\n%s", view)
+	}
+
+	// Enter flips m.captureAutoSave and persists to settings.json
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.captureAutoSave {
+		t.Error("Enter on Auto-save captures row should toggle captureAutoSave to true")
+	}
+	if !config.LoadSettings().CaptureAutoSave {
+		t.Error("Enter should persist CaptureAutoSave=true to settings.json")
+	}
+	viewOn := stripANSI(m.View())
+	if !strings.Contains(viewOn, "[ON]") {
+		t.Fatalf("view should show [ON] after toggle:\n%s", viewOn)
+	}
+
+	// Space flips it back
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	if m.captureAutoSave {
+		t.Error("Space on Auto-save captures row should toggle captureAutoSave back to false")
+	}
+	if config.LoadSettings().CaptureAutoSave {
+		t.Error("Space should persist CaptureAutoSave=false to settings.json")
+	}
+
+	// Mouse click on the row toggles it and sets cursor
+	autoSaveY := -1
+	for idx, line := range strings.Split(stripANSI(m.View()), "\n") {
+		if strings.Contains(line, "Auto-save captures") {
+			autoSaveY = idx
+			break
+		}
+	}
+	if autoSaveY == -1 {
+		t.Fatal("could not find Auto-save captures line in view")
+	}
+
+	contentOffsetY := strings.Count(renderBanner(m.width), "\n") + 4
+	m.cursor = 0
+	m, _ = m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      autoSaveY + contentOffsetY,
+	})
+	if !m.captureAutoSave {
+		t.Error("mouse click should toggle captureAutoSave to true")
+	}
+	if !config.LoadSettings().CaptureAutoSave {
+		t.Error("mouse click should persist CaptureAutoSave=true")
+	}
+	if m.cursor != n+4 {
+		t.Errorf("mouse click should set cursor to %d, got %d", n+4, m.cursor)
 	}
 }
 

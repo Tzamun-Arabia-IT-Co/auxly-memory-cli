@@ -396,10 +396,12 @@ func (l *Logger) ActiveProviders(duration time.Duration) ([]string, error) {
 	if l.db == nil {
 		return nil, nil
 	}
-	// Return active providers whose absolute latest log entry is NOT a 'disconnect' action
+	// Return active providers whose absolute latest log entry is NOT a 'disconnect' action.
+	// One GROUP BY pass; the old per-row correlated MAX(id) subquery took ~20 s on a
+	// 157k-row audit table and held up every dashboard refresh.
 	rows, err := l.db.Query(`
-		SELECT DISTINCT provider FROM audit_entries a 
-		WHERE id = (SELECT MAX(id) FROM audit_entries b WHERE b.provider = a.provider) 
+		SELECT provider FROM audit_entries
+		WHERE id IN (SELECT MAX(id) FROM audit_entries GROUP BY provider)
 		AND action != 'disconnect'
 	`)
 	if err != nil {
