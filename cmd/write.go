@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,6 +63,10 @@ func runWrite(cmd *cobra.Command, args []string) error {
 	if level == trust.LevelReadOnly {
 		fmt.Printf("❌ Provider '%s' is read_only. Write rejected.\n", writeProvider)
 		return nil
+	}
+
+	if err := pending.ValidTargetFile(writeFile); err != nil {
+		return err
 	}
 
 	// Initialize audit logger
@@ -144,13 +149,24 @@ func runWrite(cmd *cobra.Command, args []string) error {
 	// Log audit entry
 	logger.Log(writeAgent, writeProvider, "write", writeFile, writeDiff, writeReason, level)
 
-	// Auto-commit if configured
+	// Auto-commit / auto-backup if configured
 	gitCfg, _ := git.LoadConfig(memPath)
-	if gitCfg != nil && gitCfg.AutoCommit {
+	if gitCfg != nil && (gitCfg.AutoCommit || gitCfg.AutoPush) {
 		// git stages the whole vault dir — refresh the lazily-compiled rollup
 		// first so the commit never snapshots a stale unified_memory.md.
 		memory.NewStore(memPath).EnsureUnified()
-		git.AutoCommit(memPath, writeFile, writeReason)
+	}
+	if gitCfg != nil && gitCfg.AutoCommit {
+		if err := git.AutoCommit(memPath, writeFile, writeReason); err != nil && !strings.Contains(err.Error(), "temporary decrypt") {
+			fmt.Fprintf(os.Stderr, "⚠ auxly: auto-commit failed: %s\n", oneLineGitErr(err))
+		}
+	}
+	if gitCfg != nil && gitCfg.AutoPush {
+		bctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		if _, berr := git.BackupNow(bctx, memPath); berr != nil {
+			fmt.Fprintf(os.Stderr, "⚠ auxly: auto-backup failed: %s\n", oneLineGitErr(berr))
+		}
+		cancel()
 	}
 
 	fmt.Printf("✅ Written to %s\n", writeFile)

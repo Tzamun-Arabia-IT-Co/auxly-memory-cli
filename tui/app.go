@@ -130,7 +130,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewer = m.viewer.load(msg.Filename, msg.Content, msg.Editable)
 		m.screen = screenViewer
 		return m, nil
-	case vaultActionMsg, trustSuggestAppliedMsg, opsRefreshMsg, opsActionMsg, opsSyncMsg, opsSpinTickMsg:
+	case vaultActionMsg, trustSuggestAppliedMsg, opsRefreshMsg, opsActionMsg, opsSyncMsg, opsBackupSetupMsg, opsAutoBackupMsg, opsSpinTickMsg:
 		// A vault op (init/encrypt/decrypt/rebuild), a trust-suggestion apply, or
 		// an Ops action (hooks install/uninstall, sync, doctor) completes
 		// asynchronously. Route its result to settingsModel regardless of the
@@ -190,6 +190,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == screenMemory && (m.memBrowser.capturesInput() || msg.String() == "tab") {
 			var cmd tea.Cmd
 			m.memBrowser, cmd = m.memBrowser.Update(msg)
+			if m.vpReady {
+				m.syncViewport()
+			}
+			return m, cmd
+		}
+
+		if m.screen == screenReview && m.review.capturesInput() {
+			var cmd tea.Cmd
+			m.review, cmd = m.review.Update(msg)
 			if m.vpReady {
 				m.syncViewport()
 			}
@@ -417,7 +426,7 @@ func (m model) usesViewport() bool {
 func (m model) inModalSubmode() bool {
 	switch m.screen {
 	case screenSettings:
-		return false
+		return m.settings.capturesInput()
 	case screenSSH:
 		return m.ssh.editingHost
 	case screenActivity:
@@ -678,7 +687,12 @@ func (m model) renderFooter() string {
 			footerText = "j/k: Navigate logs • Enter: View details • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 		}
 	case screenReview:
-		footerText = "j/k/↑/↓: Navigate • K keep (re-stamp) · a archive · r rescan · e edit hint • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		switch {
+		case m.review.capturesInput():
+			footerText = "y: Confirm • any other key: Cancel"
+		default:
+			footerText = "j/k/↑/↓: Navigate • K keep (re-stamp) · a archive · S keep all · A archive all · r rescan · e edit hint • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		}
 	case screenMemory:
 		switch {
 		case m.memBrowser.playground:

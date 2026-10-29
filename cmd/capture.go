@@ -14,6 +14,7 @@ import (
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/git"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/trust"
@@ -359,6 +360,22 @@ func storeCaptureFacts(memPath string, facts []memory.CaptureFact, provider stri
 			summary += "  — turn on auto-save: auxly capture config --auto-save on"
 		}
 		fmt.Println(summary)
+	}
+
+	// Hook processes exit right after storeCaptureFacts returns, so run
+	// BackupNow synchronously (30 s timeout) instead of MaybeAutoBackup's
+	// detached goroutine whenever auto-backup is enabled on a configured repo.
+	if saved > 0 {
+		if gitCfg, _ := git.LoadConfig(memPath); gitCfg != nil && gitCfg.AutoPush {
+			if st := git.BackupStatus(memPath); st.Configured {
+				store.EnsureUnified()
+				bctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if _, berr := git.BackupNow(bctx, memPath); berr != nil {
+					fmt.Fprintf(os.Stderr, "⚠ auxly: auto-backup failed: %s\n", oneLineGitErr(berr))
+				}
+				cancel()
+			}
+		}
 	}
 }
 

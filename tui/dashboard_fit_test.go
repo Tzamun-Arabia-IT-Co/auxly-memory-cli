@@ -267,6 +267,24 @@ func TestConnectionsSummaryDedupsSameServer(t *testing.T) {
 	}
 }
 
+// TestConnectionsSummaryGroupsByHost_MultipleProviders verifies that two remote
+// sessions from the same host with different providers render as one row listing
+// both sorted unique providers joined with ", ".
+func TestConnectionsSummaryGroupsByHost_MultipleProviders(t *testing.T) {
+	m := *NewApp(t.TempDir())
+	m.dashboard.sessions = []agentSession{
+		{Provider: "claude-code", Remote: true, Host: "devbox.local", IP: "10.0.0.9", OS: "linux", PID: 1},
+		{Provider: "claude", Remote: true, Host: "devbox.local", IP: "10.0.0.9", OS: "linux", PID: 2},
+	}
+	out := stripANSI(m.dashboard.renderConnectionsSummary(false))
+	if c := strings.Count(out, "devbox.local"); c != 1 {
+		t.Fatalf("devbox.local should appear once (one row for the box), got %d:\n%s", c, out)
+	}
+	if !strings.Contains(out, "claude, claude-code") {
+		t.Fatalf("expected sorted unique providers 'claude, claude-code' in:\n%s", out)
+	}
+}
+
 // TestSSHWizardRepaintsInViewport is the urgent regression: a sub-mode (the SSH
 // connect wizard, editingHost=true) early-returns in the parent Update, so it must
 // still refresh the content viewport — otherwise selecting a method advances the

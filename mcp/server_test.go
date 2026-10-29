@@ -130,3 +130,79 @@ func TestToolSkillSync_RoutesPersonal(t *testing.T) {
 		t.Errorf("personal.md should contain the routed family fact, got: %q", string(data))
 	}
 }
+
+// Explicit reads count as use: auxly_memory_read drops that file's facts out of
+// StaleFacts, while internal and session-primer reads do not.
+func TestExplicitReadCountsAsUse_StaleFacts(t *testing.T) {
+	t.Setenv("AUXLY_REVIEW_AGE_DAYS", "1")
+	dir := t.TempDir()
+	s := NewServer(dir)
+
+	// Write old dated facts into daily.md and preferences.md
+	if err := s.store.Write("daily.md", "# Daily\n- Old journal bullet [2020-01-01]\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.Write("preferences.md", "# Preferences\n- Old pref bullet [2020-01-01]\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Initial stale scan: both files should have stale facts
+	facts, err := s.store.StaleFacts(s.logger.LastRecallByLine, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("expected 2 stale facts initially, got %d", len(facts))
+	}
+
+	// Internal read via store.View does NOT record recall
+	if _, err := s.store.View("daily.md"); err != nil {
+		t.Fatal(err)
+	}
+	factsAfterInternal, err := s.store.StaleFacts(s.logger.LastRecallByLine, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(factsAfterInternal) != 2 {
+		t.Fatalf("internal read must not record recall; expected 2 stale facts, got %d", len(factsAfterInternal))
+	}
+
+	// Session primer read does NOT record recall
+	_ = s.sessionPrimer()
+	factsAfterPrimer, err := s.store.StaleFacts(s.logger.LastRecallByLine, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(factsAfterPrimer) != 2 {
+		t.Fatalf("session primer must not record recall; expected 2 stale facts, got %d", len(factsAfterPrimer))
+	}
+
+	// Explicit read via toolRead (auxly_memory_read) MUST record recall for all bullet lines of daily.md
+	res := s.toolRead("daily.md")
+	if res.IsError {
+		t.Fatalf("toolRead error: %v", res.Content)
+	}
+
+	// Stale scan: daily.md facts must now drop out of StaleFacts, leaving only preferences.md
+	factsAfterToolRead, err := s.store.StaleFacts(s.logger.LastRecallByLine, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(factsAfterToolRead) != 1 {
+		t.Fatalf("expected 1 stale fact after auxly_memory_read, got %d", len(factsAfterToolRead))
+	}
+	if factsAfterToolRead[0].File != "preferences.md" {
+		t.Fatalf("expected remaining stale fact to be preferences.md, got %s", factsAfterToolRead[0].File)
+	}
+
+	// Reading unified_memory.md must not record, regardless of casing or path
+	if err := s.store.Write("unified_memory.md", "- Unified fact [2020-01-01]\n"); err == nil {
+		_ = s.toolRead("unified_memory.md")
+		_ = s.toolRead("UNIFIED_MEMORY.MD")
+		_ = s.toolRead("Unified_Memory.md")
+		_ = s.toolRead("./unified_memory.md")
+	}
+	if recalls, err := s.logger.LastRecallByLine("unified_memory.md"); err != nil || len(recalls) > 0 {
+		t.Fatalf("reading unified_memory.md recorded recall events: %v (count=%d)", err, len(recalls))
+	}
+}

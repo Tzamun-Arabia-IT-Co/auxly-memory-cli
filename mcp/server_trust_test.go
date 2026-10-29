@@ -138,3 +138,65 @@ func TestSkillForget_GatedByServerProvider(t *testing.T) {
 		t.Fatal("read_only provider pruned content via skill_forget — trust gate failed")
 	}
 }
+
+func TestWrite_RefusesNonMemoryTargets(t *testing.T) {
+	for _, level := range []string{trust.LevelRequireApproval, trust.LevelAuto} {
+		t.Run(level, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := &trust.Config{
+				Default: level,
+				Providers: map[string]trust.ProviderConfig{
+					"testprov": {TrustLevel: level},
+				},
+			}
+			if err := cfg.Save(dir); err != nil {
+				t.Fatal(err)
+			}
+			origTrust, err := os.ReadFile(filepath.Join(dir, "trust.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("AUXLY_PROVIDER", "testprov")
+
+			s := NewServer(dir)
+			for _, bad := range []string{"trust.yaml", "git.yaml", ".gitignore", ".git/config", "../x.md", "unified_memory.md"} {
+				var buf bytes.Buffer
+				s.outWriter = &buf
+				reqArgs, _ := json.Marshal(map[string]interface{}{
+					"name": "auxly_memory_write",
+					"arguments": map[string]interface{}{
+						"file":   bad,
+						"diff":   "+default: auto",
+						"reason": "test",
+					},
+				})
+				s.handleToolCall(&jsonRPCRequest{ID: 1, Params: reqArgs})
+
+				var resp struct {
+					Result toolResult `json:"result"`
+				}
+				if err := json.Unmarshal(buf.Bytes(), &resp); err != nil {
+					t.Fatalf("unmarshal response for %q: %v (%s)", bad, err, buf.String())
+				}
+				if !resp.Result.IsError {
+					t.Fatalf("auxly_memory_write(%q) should return IsError=true; got: %s", bad, resultText(resp.Result))
+				}
+				if txt := resultText(resp.Result); !strings.Contains(txt, bad) && !strings.Contains(strings.ToLower(txt), "invalid target") {
+					t.Fatalf("auxly_memory_write(%q) error text = %q, want error describing invalid target", bad, txt)
+				}
+			}
+
+			// Verify trust.yaml was untouched and nothing was queued in .pending/.
+			afterTrust, err := os.ReadFile(filepath.Join(dir, "trust.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(afterTrust) != string(origTrust) {
+				t.Fatalf("trust.yaml was modified!\nbefore:\n%s\nafter:\n%s", origTrust, afterTrust)
+			}
+			if list, _ := s.pendingMgr.List(); len(list) != 0 {
+				t.Fatalf("expected 0 pending entries, got: %+v", list)
+			}
+		})
+	}
+}

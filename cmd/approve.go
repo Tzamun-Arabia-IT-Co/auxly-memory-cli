@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/git"
@@ -151,13 +154,24 @@ func runApprove(cmd *cobra.Command, args []string) error {
 	}
 
 	if applied > 0 {
-		// Auto-commit if configured
+		// Auto-commit / auto-backup if configured
 		gitCfg, _ := git.LoadConfig(memPath)
-		if gitCfg != nil && gitCfg.AutoCommit {
+		if gitCfg != nil && (gitCfg.AutoCommit || gitCfg.AutoPush) {
 			// git stages the whole vault dir — refresh the lazily-compiled rollup
 			// first so the commit never snapshots a stale unified_memory.md.
 			memory.NewStore(memPath).EnsureUnified()
-			git.AutoCommit(memPath, fmt.Sprintf("%d pending change(s)", applied), "Approved pending changes")
+		}
+		if gitCfg != nil && gitCfg.AutoCommit {
+			if err := git.AutoCommit(memPath, fmt.Sprintf("%d pending change(s)", applied), "Approved pending changes"); err != nil && !strings.Contains(err.Error(), "temporary decrypt") {
+				fmt.Fprintf(os.Stderr, "⚠ auxly: auto-commit failed: %s\n", oneLineGitErr(err))
+			}
+		}
+		if gitCfg != nil && gitCfg.AutoPush {
+			bctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			if _, berr := git.BackupNow(bctx, memPath); berr != nil {
+				fmt.Fprintf(os.Stderr, "⚠ auxly: auto-backup failed: %s\n", oneLineGitErr(berr))
+			}
+			cancel()
 		}
 	}
 	if bulk {

@@ -433,3 +433,168 @@ func TestArchiveFact_StickyArchiveEncryption(t *testing.T) {
 		t.Fatalf("archive content = %q, want both the older and new archived facts", plain)
 	}
 }
+
+func TestArchiveFacts_AppliesAllSkipsChangedLeavesByteIdentical(t *testing.T) {
+	store := newDecayTestStore(t)
+	header := "# Identity Profile (keep exact: 日本語 🌟)\n"
+	line1 := "- Alpha bullet point [2020-01-01]\n"
+	line2 := "  - Nested beta bullet [2020-01-01]\n"
+	line3 := "- Gamma changed bullet [2020-01-01]\n"
+	line4 := "- Delta untouched bullet [2020-01-01]\n"
+	originalContent := header + line1 + line2 + line3 + line4
+	if err := store.Write("identity.md", originalContent); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := []string{
+		strings.TrimSpace(line1),
+		strings.TrimSpace(line2),
+		"- Gamma old bullet [2020-01-01]", // changed, won't match line3
+		"- Zeta missing bullet",
+	}
+
+	applied, err := store.ArchiveFacts("identity.md", targets)
+	if err != nil {
+		t.Fatalf("ArchiveFacts error: %v", err)
+	}
+	if applied != 2 {
+		t.Fatalf("expected 2 applied, got %d", applied)
+	}
+
+	content, err := store.View("identity.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedRemaining := header + line3 + line4
+	if content != expectedRemaining {
+		t.Fatalf("remaining content mismatch:\ngot  %q\nwant %q", content, expectedRemaining)
+	}
+
+	archivePath := filepath.Join(store.Root, ".archive", "identity.md")
+	archBytes, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedArchive := strings.TrimRight(line1, "\r\n") + "\n" + strings.TrimRight(line2, "\r\n") + "\n"
+	if string(archBytes) != expectedArchive {
+		t.Fatalf("archive content mismatch:\ngot  %q\nwant %q", string(archBytes), expectedArchive)
+	}
+}
+
+func TestRestampFacts_AppliesAllSkipsChangedLeavesByteIdentical(t *testing.T) {
+	store := newDecayTestStore(t)
+	today := time.Now().Format("2006-01-02")
+	header := "# Preferences (keep exact: 日本語 🌟)\n"
+	line1 := "- Editor: vim [2020-01-01]\n"
+	line2 := "  - Indented detail: tabstop=4 [2020-01-01]\n"
+	line3 := "- Theme: dark [2020-01-01]\n"
+	line4 := "- Shell: zsh [2020-01-01]\n"
+	originalContent := header + line1 + line2 + line3 + line4
+	if err := store.Write("preferences.md", originalContent); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := []string{
+		strings.TrimSpace(line1),
+		strings.TrimSpace(line2),
+		"- Theme: light [2020-01-01]", // changed, won't match line3
+	}
+
+	applied, err := store.RestampFacts("preferences.md", targets)
+	if err != nil {
+		t.Fatalf("RestampFacts error: %v", err)
+	}
+	if applied != 2 {
+		t.Fatalf("expected 2 applied, got %d", applied)
+	}
+
+	content, err := store.View("preferences.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectedLine1 := "- Editor: vim [" + today + "]\n"
+	expectedLine2 := "  - Indented detail: tabstop=4 [" + today + "]\n"
+	expectedContent := header + expectedLine1 + expectedLine2 + line3 + line4
+	if content != expectedContent {
+		t.Fatalf("restamped content mismatch:\ngot  %q\nwant %q", content, expectedContent)
+	}
+}
+
+func TestArchiveFacts_ArchiveWriteFailureLeavesSourceByteIdentical(t *testing.T) {
+	store := newDecayTestStore(t)
+	content := "# Preferences\n- Editor: vim [2020-01-01]\n- Shell: zsh [2020-01-01]\n"
+	if err := store.Write("preferences.md", content); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a file at .archive so that resolving/writing .archive/preferences.md fails
+	archivePath := filepath.Join(store.Root, ".archive")
+	if err := os.WriteFile(archivePath, []byte("blocker"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	applied, err := store.ArchiveFacts("preferences.md", []string{"- Editor: vim [2020-01-01]"})
+	if err == nil {
+		t.Fatal("expected ArchiveFacts to fail when archive write fails")
+	}
+	if applied != 0 {
+		t.Fatalf("expected applied=0, got %d", applied)
+	}
+
+	// Source file must remain byte-identical
+	after, err := os.ReadFile(filepath.Join(store.Root, "preferences.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != content {
+		t.Fatalf("source file was modified despite archive failure:\ngot  %q\nwant %q", string(after), content)
+	}
+
+	// Test single-line ArchiveFact path through it as well
+	err = store.ArchiveFact("preferences.md", "- Editor: vim [2020-01-01]")
+	if err == nil {
+		t.Fatal("expected ArchiveFact to fail when archive write fails")
+	}
+	afterSingle, err := os.ReadFile(filepath.Join(store.Root, "preferences.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterSingle) != content {
+		t.Fatalf("source file was modified by ArchiveFact despite archive failure:\ngot  %q\nwant %q", string(afterSingle), content)
+	}
+}
+
+func TestArchiveFacts_ArchiveWithoutTrailingNewlineGetsSeparator(t *testing.T) {
+	store := newDecayTestStore(t)
+	content := "# Preferences\n- Editor: vim [2020-01-01]\n- Shell: zsh [2020-01-01]\n"
+	if err := store.Write("preferences.md", content); err != nil {
+		t.Fatal(err)
+	}
+
+	archiveDir := filepath.Join(store.Root, ".archive")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed := "- Old archived fact [2019-01-01]" // Notice: no trailing newline
+	if err := os.WriteFile(filepath.Join(archiveDir, "preferences.md"), []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	applied, err := store.ArchiveFacts("preferences.md", []string{"- Editor: vim [2020-01-01]"})
+	if err != nil {
+		t.Fatalf("ArchiveFacts: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("expected applied=1, got %d", applied)
+	}
+
+	archData, err := os.ReadFile(filepath.Join(archiveDir, "preferences.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArchive := seed + "\n- Editor: vim [2020-01-01]\n"
+	if string(archData) != wantArchive {
+		t.Fatalf("archive content mismatch:\ngot  %q\nwant %q", string(archData), wantArchive)
+	}
+}

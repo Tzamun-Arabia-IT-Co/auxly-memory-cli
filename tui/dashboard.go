@@ -12,6 +12,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/detect"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/git"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/sharing"
@@ -344,6 +345,7 @@ func (m dashboardModel) Refresh() tea.Cmd {
 		var trustCfg *trust.Config
 		if m.memoryPath != "" {
 			trustCfg, _ = trust.Load(m.memoryPath)
+			git.MaybeAutoBackup(m.memoryPath)
 		}
 		var activeProviders []string
 		var recentWrites []audit.Entry
@@ -2017,8 +2019,8 @@ func (m dashboardModel) renderAgentCard(b agentCard, idx, gridCardW int) string 
 		Render(body)
 }
 
-// remoteGroupCount counts DISTINCT remote connections (same host+IP+provider
-// collapses to one, matching renderConnectionsSummary's ×N grouping) — the basis
+// remoteGroupCount counts DISTINCT remote hosts (sessions from the same host
+// collapse to one row, matching renderConnectionsSummary's grouping) — the basis
 // for clamping connScroll.
 func (m dashboardModel) remoteGroupCount() int {
 	seen := make(map[string]bool)
@@ -2027,7 +2029,7 @@ func (m dashboardModel) remoteGroupCount() int {
 		if !s.Remote {
 			continue
 		}
-		key := strings.ToLower(s.Host + "|" + s.IP + "|" + s.Provider)
+		key := strings.ToLower(s.Host)
 		if seen[key] {
 			continue
 		}
@@ -2089,26 +2091,45 @@ func (m dashboardModel) renderConnectionsSummary(compact bool) string {
 			}
 		}
 
-		// Collapse identical remote sessions (same host + IP + provider) into a single
-		// row with a ×N count: three live MCP processes from the same box render as one
-		// "host … ×3" line instead of three duplicate rows. First-seen order is kept.
-		// NOTE: this grouping is display-only — the agent cards still count every live
-		// PID for their ⇄N badge, so a host with 3 sessions reads ⇄3 on its card and
-		// "×3" here.
-		type remoteGroup struct {
-			s     agentSession
-			count int
+		// Group remote sessions by box (same host): host, IP, OS, then the sorted
+		// unique providers joined with ", " (e.g. "claude, claude-code"), and the
+		// access scope once.
+		type remoteBoxGroup struct {
+			host      string
+			ip        string
+			os        string
+			providers map[string]bool
+			count     int
 		}
-		var groups []remoteGroup
-		groupIdx := make(map[string]int, len(remotes))
+		var groups []*remoteBoxGroup
+		groupIdx := make(map[string]int)
 		for _, s := range remotes {
-			key := strings.ToLower(s.Host + "|" + s.IP + "|" + s.Provider)
+			key := strings.ToLower(s.Host)
 			if i, ok := groupIdx[key]; ok {
 				groups[i].count++
+				if s.IP != "" && groups[i].ip == "" {
+					groups[i].ip = s.IP
+				}
+				if s.OS != "" && groups[i].os == "" {
+					groups[i].os = s.OS
+				}
+				if s.Provider != "" {
+					groups[i].providers[s.Provider] = true
+				}
 				continue
 			}
+			provs := make(map[string]bool)
+			if s.Provider != "" {
+				provs[s.Provider] = true
+			}
 			groupIdx[key] = len(groups)
-			groups = append(groups, remoteGroup{s: s, count: 1})
+			groups = append(groups, &remoteBoxGroup{
+				host:      s.Host,
+				ip:        s.IP,
+				os:        s.OS,
+				providers: provs,
+				count:     1,
+			})
 		}
 
 		// Height-bounded window: show at most connVisibleCap rows and scroll the
@@ -2138,18 +2159,26 @@ func (m dashboardModel) renderConnectionsSummary(compact bool) string {
 		}
 
 		for _, g := range window {
-			s := g.s
-			host := s.Host
+			host := g.host
 			if host == "" {
 				host = "remote"
 			}
-			loc := s.IP
+			loc := g.ip
 			if loc == "" {
 				loc = "via tunnel"
 			}
-			osLabel := s.OS
+			osLabel := g.os
 			if osLabel == "" {
 				osLabel = "?"
+			}
+			provList := make([]string, 0, len(g.providers))
+			for p := range g.providers {
+				provList = append(provList, p)
+			}
+			sort.Strings(provList)
+			provStr := strings.Join(provList, ", ")
+			if provStr == "" {
+				provStr = "unknown"
 			}
 			countSuffix := ""
 			if g.count > 1 {
@@ -2162,8 +2191,17 @@ func (m dashboardModel) renderConnectionsSummary(compact bool) string {
 			}
 			// Scope rides on the same detail line (not a new row) to keep the left
 			// column short enough that the rich dashboard still fits shorter terminals.
-			detail := fmt.Sprintf("%s · %s · %s", loc, osLabel, s.Provider)
-			if sc := m.remoteScope[s.Host]; sc != "" {
+			detail := fmt.Sprintf("%s · %s · %s", loc, osLabel, provStr)
+			sc := m.remoteScope[g.host]
+			if sc == "" {
+				for k, v := range m.remoteScope {
+					if strings.EqualFold(k, g.host) {
+						sc = v
+						break
+					}
+				}
+			}
+			if sc != "" {
 				detail += " · 🔑 " + sc
 			}
 			sb.WriteString(fmt.Sprintf("%s %s%s\n   %s\n",

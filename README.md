@@ -25,18 +25,17 @@ No cloud. No database. No vendor lock-in. Just Markdown files you own, with an a
 
 ---
 
-## 🆕 What's New in Version 1.5.5
+## 🆕 What's New in Version 1.6.0
+
+- **💾 Back up your memory to git in one step.** **Settings → Ops → Backup** (or `auxly sync setup`) links a repo URL, or creates a private GitHub repo for you when the GitHub CLI is logged in. It writes a safe `.gitignore`, uses your existing git login, refuses repo links with tokens in them, and before the first push warns about unencrypted files that look like secrets and about public repos. **Auto-backup** pushes after changes; the panel shows the last backup and anything not yet pushed.
+- **🧹 Clear the Review list in bulk.** In **Review**, `A` archives and `S` keeps every listed fact from the selected file (after a `y` confirmation), and a summary shows how many facts each file has. Nothing is archived automatically.
+- **👀 Facts agents read count as used.** When an agent reads a memory file with `auxly_memory_read`, its facts no longer show up as unused in Review.
+- **🖥️ One line per connected box.** Active Connections groups a box's sessions on one line (e.g. `laptop · claude, claude-code`).
+
+### Version 1.5.5
 
 - **🔒 Capture auto-save is now opt-in.** In 1.5.4, captured facts were saved straight to memory whenever the provider's `trust.yaml` level was `auto`, which is the shipped default. Captured facts come from whatever your agent read in a session (web pages, files, tool output), so planted text could end up in permanent memory. Auto-save is now a separate setting that is **off by default**: every captured fact waits in `auxly pending` until you turn it on with `auxly capture config --auto-save on` or **Settings → Auto-save captures** in the TUI. When it's on, the 1.5.4 rules still apply: only facts from providers trusted as `auto` are saved, and personal, identity, inbox and task facts, possible secrets and unverified duplicates are always held.
 - **⚡ Faster dashboard.** The dashboard now fills in about a second instead of ~20 seconds on large audit logs.
-
-### Version 1.5.4
-
-- **🧠 Smart capture: no more approving every fact.** Facts captured from providers you trust as `auto` in `trust.yaml` are now saved straight to memory. Only the risky ones wait in `auxly pending`: facts from providers that aren't `auto`, personal, identity, inbox and task facts, anything that looks like a secret (API keys, tokens, private keys, passwords), and facts whose duplicate check couldn't run. Each saved or held fact is in the audit log with its reason.
-- **♻️ Reworded duplicates are dropped.** Capture used to save the same fact again whenever the wording changed. It now finds similar existing lines (in the vault and in the pending queue) and makes one extra call to your own capture model to drop facts that are already known. If that check fails, the affected facts are held for review instead of saved.
-- **🛡️ Safe by construction.** A captured fact is always one clean line (line breaks and control characters removed), and only a single added line is ever auto-applied, so a captured fact can never delete or rewrite existing memory.
-- **🔗 Codex + Computer Use.** When Codex Computer Use wraps the `notify` hook and chains Auxly behind it, `auxly hooks status` and the TUI now show it as wired instead of "manual", and install/uninstall leave that line alone.
-- **🆕 Current models everywhere.** Memory Organize and the capture model picker list Claude Sonnet 5.5, Haiku 5.5, Opus 5.5 and Fable 5.1, read Codex's own model list and `agy models` live, and offer **custom…** to type any model id. The OpenAI default is now `gpt-6-luna`, and Gemini uses `gemini-flash-latest` (Gemini 1.5 was shut down).
 
 Looking for past release details? See the [CHANGELOG](CHANGELOG.md) for the full history.
 
@@ -59,7 +58,7 @@ Looking for past release details? See the [CHANGELOG](CHANGELOG.md) for the full
 - [Remote memory over SSH](#remote-memory-over-ssh)
 - [Live Usage](#live-usage)
 - [Statusline (Claude Code · Cursor · Antigravity)](#statusline-claude-code--cursor--antigravity)
-- [Git sync](#git-sync)
+- [Git backup](#git-backup)
 - [Connect any MCP agent](#connect-any-mcp-capable-agent-manual-setup)
 - [Command reference](#command-reference)
 - [Configuration](#configuration)
@@ -720,18 +719,26 @@ filtered out before anything reaches the extraction LLM.
 
 ---
 
-## Git sync
+## Git backup
 
-Your memory is a folder — so version it. Auxly auto-commits on write and pushes only when you ask:
+Back up your memory to a private git repo so you can undo bad edits and keep an off-machine copy. Set it up from the TUI (**Settings → Ops → Backup**) or the CLI:
 
 ```bash
-auxly sync     # commit + push to your configured remote
+auxly sync setup git@github.com:you/auxly-vault.git   # link an existing private repo
+auxly sync setup --create-github auxly-vault           # or create a private GitHub repo with `gh`
+auxly sync status                                      # remote, last backup, unpushed changes
+auxly sync auto on                                     # back up automatically after changes
+auxly sync                                             # back up now
 ```
+
+Setup makes the memory folder a git repo, writes a `.gitignore` that keeps the audit log, audit database, backups and pending queue out, links the remote and pushes. It uses your existing git login (SSH key or `gh auth login`) and refuses repo links with a password or token in them. Before the first push it lists unencrypted files that look like they contain secrets and checks that the repo is private (via `gh` when available); you confirm with `--yes` (and `--allow-public` for a public repo) or `y` in the TUI. Encrypt sensitive files first with `auxly encrypt file <name>`.
+
+Backup is one-way (push only): use [Remote memory over SSH](#remote-memory-over-ssh) to share one memory between machines.
 
 ```yaml
 # git.yaml
-auto_commit: true
-auto_push: false
+auto_commit: true      # commit CLI writes and approvals
+auto_push: false       # "Auto-backup": push after changes (at most every 2 minutes)
 commit_message_prefix: "auxly:"
 branch: main
 ```
@@ -798,7 +805,7 @@ Auxly is a standard **stdio MCP server**, so *any* MCP-capable tool can share th
 | `auxly trust suggest` | Propose trust level promotions or demotions based on approval stats |
 | `auxly tail` | Stream the audit log |
 | `auxly stats` | Memory & recall statistics (`stats --recall` for hit statistics) |
-| `auxly sync` | Commit + push memory to Git |
+| `auxly sync` | Back up memory to the linked git repo (`setup`, `status`, `auto on|off`) |
 | `auxly connect …` | Link this machine to a remote memory host |
 | `auxly host …` | Serve this machine's memory to other boxes |
 | `auxly host invite` | Mint a single-use token pinned to host SSH key for one-command pairing |

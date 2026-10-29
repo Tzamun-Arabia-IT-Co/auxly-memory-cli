@@ -43,6 +43,14 @@ func NewManager(memoryRoot string) *Manager {
 	}
 }
 
+// MemoryRoot returns the vault root directory managed by m.
+func (m *Manager) MemoryRoot() string {
+	if m == nil {
+		return ""
+	}
+	return m.memoryRoot
+}
+
 // List returns all files in .pending/. It never mutates the queue — the TTL
 // sweep is a separate, explicitly-invoked, vault-locked operation
 // (SweepExpired), because List is polled every second by the TUI and a sweep
@@ -75,6 +83,45 @@ func (m *Manager) List() ([]PendingFile, error) {
 	return files, nil
 }
 
+// ValidTargetFile checks that name is a safe relative memory .md path (ends in
+// ".md", is not absolute, contains no ".." or dot-prefixed segments, and is not
+// the generated unified_memory.md rollup).
+func ValidTargetFile(name string) error {
+	if name == "" {
+		return fmt.Errorf("invalid target file %q: empty filename", name)
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("invalid target file %q: contains control character", name)
+		}
+	}
+	if strings.HasSuffix(name, "/") || strings.HasSuffix(name, "\\") {
+		return fmt.Errorf("invalid target file %q: must be a file path", name)
+	}
+	if filepath.IsAbs(name) || strings.HasPrefix(name, "/") || strings.HasPrefix(name, "\\") {
+		return fmt.Errorf("invalid target file %q: must not be absolute", name)
+	}
+	norm := filepath.ToSlash(filepath.Clean(strings.ReplaceAll(name, "\\", "/")))
+	if filepath.IsAbs(norm) || strings.HasPrefix(norm, "/") {
+		return fmt.Errorf("invalid target file %q: must not be absolute", name)
+	}
+	for _, seg := range strings.Split(norm, "/") {
+		if seg == "" || seg == ".." {
+			return fmt.Errorf("invalid target file %q: path traversal is not allowed", name)
+		}
+		if strings.HasPrefix(seg, ".") {
+			return fmt.Errorf("invalid target file %q: dot-prefixed segment %q is not allowed", name, seg)
+		}
+	}
+	if !strings.HasSuffix(norm, ".md") {
+		return fmt.Errorf("invalid target file %q: must be a memory .md file", name)
+	}
+	if strings.EqualFold(norm, "unified_memory.md") {
+		return fmt.Errorf("invalid target file %q: unified_memory.md is generated and cannot be written", name)
+	}
+	return nil
+}
+
 // Write writes content to a pending file with no agent attribution (legacy
 // callers). Prefer WriteFrom.
 func (m *Manager) Write(targetFile, content string) (string, error) {
@@ -95,6 +142,9 @@ func (m *Manager) WriteFrom(targetFile, content, agent string) (string, error) {
 		if r < 0x20 || r == 0x7f {
 			return "", fmt.Errorf("invalid target filename: contains control character")
 		}
+	}
+	if err := ValidTargetFile(targetFile); err != nil {
+		return "", err
 	}
 
 	if err := os.MkdirAll(m.pendingDir, 0700); err != nil {
@@ -220,6 +270,9 @@ func (m *Manager) approve(pendingName string, force bool) error {
 	target := extractTarget(string(data))
 	if target == "" {
 		return fmt.Errorf("cannot determine target file from pending entry")
+	}
+	if err := ValidTargetFile(target); err != nil {
+		return fmt.Errorf("invalid pending target %q: %w", target, err)
 	}
 
 	// Extract content (everything after the frontmatter closing ---)

@@ -214,3 +214,85 @@ func TestListSkipsDotfiles(t *testing.T) {
 		t.Fatalf("dotfiles leaked into pending list: %+v", files)
 	}
 }
+
+func TestValidTargetFileAndWriteFrom(t *testing.T) {
+	root := t.TempDir()
+	m := NewManager(root)
+
+	rejected := []string{
+		"git.yaml",
+		"trust.yaml",
+		".gitignore",
+		".git/config",
+		".git/hooks/evil.md",
+		".index/semantic.md",
+		".pending/p.md",
+		".backup/b.md",
+		".archive/a.md",
+		"../x.md",
+		"projects/../../x.md",
+		"/tmp/x.md",
+		"unified_memory.md",
+		"./unified_memory.md",
+		"UNIFIED_MEMORY.md",
+		"",
+		".",
+	}
+	for _, bad := range rejected {
+		if err := ValidTargetFile(bad); err == nil {
+			t.Errorf("ValidTargetFile(%q) = nil, want error", bad)
+		}
+		if name, err := m.WriteFrom(bad, "+ - evil\n", "agent"); err == nil {
+			t.Errorf("WriteFrom(%q) succeeded (%s), want error", bad, name)
+		}
+	}
+
+	// Ensure rejected WriteFrom calls wrote nothing into .pending/.
+	if entries, err := os.ReadDir(filepath.Join(root, ".pending")); err == nil && len(entries) != 0 {
+		t.Fatalf("rejected WriteFrom created pending files: %+v", entries)
+	}
+
+	accepted := []string{
+		"infra.md",
+		"projects/x.md",
+		"./infra.md",
+	}
+	for _, good := range accepted {
+		if err := ValidTargetFile(good); err != nil {
+			t.Errorf("ValidTargetFile(%q) unexpected error: %v", good, err)
+		}
+		if _, err := m.WriteFrom(good, "+ - legitimate fact\n", "claude-code"); err != nil {
+			t.Errorf("WriteFrom(%q) unexpected error: %v", good, err)
+		}
+	}
+}
+
+func TestApproveRefusesPoisonedNonMemoryTargetAndLeavesPending(t *testing.T) {
+	root := t.TempDir()
+	m := NewManager(root)
+	pendingDir := filepath.Join(root, ".pending")
+	if err := os.MkdirAll(pendingDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	pendingName := "1700000000000_abcd_trust.md"
+	crafted := "---\ntarget: trust.yaml\ncreated: 2026-01-01T00:00:00Z\n---\n\n+default: auto\n"
+	pendingPath := filepath.Join(pendingDir, pendingName)
+	if err := os.WriteFile(pendingPath, []byte(crafted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Approve(pendingName); err == nil {
+		t.Fatal("Approve accepted a hand-crafted pending file targeting trust.yaml")
+	}
+	if err := m.ForceApprove(pendingName); err == nil {
+		t.Fatal("ForceApprove accepted a hand-crafted pending file targeting trust.yaml")
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "trust.yaml")); err == nil {
+		t.Fatal("trust.yaml must not be created when Approve refuses invalid target")
+	}
+	if _, err := os.Stat(pendingPath); err != nil {
+		t.Fatalf("pending file must remain in place when Approve refuses invalid target: %v", err)
+	}
+}

@@ -18,7 +18,7 @@ from pathlib import Path
 from ._verify import manifest_has_hash, sha256_hex, verify_minisign
 
 REPO = "Tzamun-Arabia-IT-Co/auxly-memory-cli"
-__version__ = "1.5.5"
+__version__ = "1.6.0"
 
 
 def _target() -> tuple[str, str]:

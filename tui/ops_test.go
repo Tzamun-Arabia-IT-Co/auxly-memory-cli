@@ -2,8 +2,10 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/git"
 	tea "github.com/charmbracelet/bubbletea"
@@ -46,7 +48,7 @@ func TestOpsPanelRendersHooksStatus(t *testing.T) {
 	}})
 
 	view := stripANSI(m.panel())
-	for _, want := range []string{"claude", "[WIRED]", "codex", "[not-installed]"} {
+	for _, want := range []string{"claude", "[WIRED]", "codex", "[not-installed]", "Backup (git)"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("ops panel missing %q:\n%s", want, view)
 		}
@@ -73,6 +75,44 @@ func resolveActionMsg(t *testing.T, cmd tea.Cmd) opsActionMsg {
 	}
 	t.Fatal("no opsActionMsg found among the batched commands")
 	return opsActionMsg{}
+}
+
+func resolveSetupMsg(t *testing.T, cmd tea.Cmd) opsBackupSetupMsg {
+	t.Helper()
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		if sm, ok := msg.(opsBackupSetupMsg); ok {
+			return sm
+		}
+		t.Fatalf("expected tea.BatchMsg or opsBackupSetupMsg, got %T", msg)
+	}
+	for _, sub := range batch {
+		if sm, ok := sub().(opsBackupSetupMsg); ok {
+			return sm
+		}
+	}
+	t.Fatal("no opsBackupSetupMsg found among the batched commands")
+	return opsBackupSetupMsg{}
+}
+
+func resolveAutoBackupMsg(t *testing.T, cmd tea.Cmd) opsAutoBackupMsg {
+	t.Helper()
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		if am, ok := msg.(opsAutoBackupMsg); ok {
+			return am
+		}
+		t.Fatalf("expected tea.BatchMsg or opsAutoBackupMsg, got %T", msg)
+	}
+	for _, sub := range batch {
+		if am, ok := sub().(opsAutoBackupMsg); ok {
+			return am
+		}
+	}
+	t.Fatal("no opsAutoBackupMsg found among the batched commands")
+	return opsAutoBackupMsg{}
 }
 
 // TestOpsInstallTriggersCmdAndUpdatesRows is the "install action triggers the
@@ -114,8 +154,9 @@ func TestOpsInstallTriggersCmdAndUpdatesRows(t *testing.T) {
 	}
 }
 
-// TestOpsUninstallIsConfirmGated guards the destructive-op gate: [u] on a
-// WIRED row must not remove anything until a subsequent y/enter confirms it.
+// TestOpsUninstallIsConfirmGated guards the destructive-op gate: [u] (when
+// backup is configured) or [x] on a WIRED row must not remove anything until a
+// subsequent y/enter confirms it.
 func TestOpsUninstallIsConfirmGated(t *testing.T) {
 	orig := runAuxlySub
 	defer func() { runAuxlySub = orig }()
@@ -127,6 +168,7 @@ func TestOpsUninstallIsConfirmGated(t *testing.T) {
 
 	m := newOpsModel(t.TempDir())
 	m.loaded = true
+	m.backup = git.Status{Configured: true, RemoteURL: "/tmp/bare.git", Branch: "main"}
 	m.hooksRows = []hookStatusRow{{agent: "claude", status: "WIRED"}}
 	m.cursor = 0
 
@@ -144,11 +186,15 @@ func TestOpsUninstallIsConfirmGated(t *testing.T) {
 		t.Fatal("[n] should cancel without running the uninstall")
 	}
 
-	// Re-enter and confirm.
-	m, _ = m.handleKey(keyRunes("u"))
+	// Re-enter via [x] (which also works when backup is not configured) and confirm.
+	m.backup = git.Status{Configured: false}
+	m, _ = m.handleKey(keyRunes("x"))
+	if m.mode != "confirmUninstall" {
+		t.Fatalf("mode after [x] = %q, want confirmUninstall", m.mode)
+	}
 	m, cmd = m.handleKey(keyRunes("y"))
 	if !m.busy || cmd == nil {
-		t.Fatal("[y] after [u] should busy the model and dispatch the uninstall")
+		t.Fatal("[y] after [x] should busy the model and dispatch the uninstall")
 	}
 	resolveActionMsg(t, cmd) // drives the stub
 	if !called {
@@ -272,9 +318,319 @@ func TestOpsCapturesInputBlocksGlobalKeys(t *testing.T) {
 		}
 		m = next
 	}
-	// The confirm prompt must still be exactly where it was — none of the
-	// "global" keys above should have been read as y/n/esc either.
 	if m.settings.ops.mode != "confirmSync" {
 		t.Fatalf("ops.mode = %q, want confirmSync untouched", m.settings.ops.mode)
+	}
+}
+
+// TestOpsURLInputOpensOnUAndDigitsDoNotSwitchTabs verifies that pressing `u`
+// when backup is not set up opens the URL text input, and typing digits or `q`
+// writes into the text input rather than switching tabs or quitting.
+func TestOpsURLInputOpensOnUAndDigitsDoNotSwitchTabs(t *testing.T) {
+	m := *NewApp(t.TempDir())
+	u, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = u.(model)
+	m.screen = screenSettings
+	m.settings.subTab = 4
+	m.settings.ops.loaded = true
+	m.settings.ops.hooksRows = []hookStatusRow{{agent: "claude", status: "WIRED"}}
+
+	// Press 'u' to open URL input.
+	res, _ := m.Update(keyRunes("u"))
+	m = res.(model)
+	if m.settings.ops.mode != "inputURL" {
+		t.Fatalf("ops.mode after [u] = %q, want inputURL", m.settings.ops.mode)
+	}
+	if !m.settings.ops.capturesInput() {
+		t.Fatal("inputURL mode must capture input")
+	}
+
+	// Type URL containing digits (1, 2, 7, 0) and 'q' — must land in urlInput, never switch screens!
+	typed := "ssh://git@127.0.0.1:2222/owner/qvault.git"
+	for _, r := range typed {
+		next, cmd := m.Update(keyRunes(string(r)))
+		m = next.(model)
+		if m.screen != screenSettings {
+			t.Fatalf("typing %q switched screen from Settings to %v", string(r), m.screen)
+		}
+		if m.settings.subTab != 4 {
+			t.Fatalf("typing %q switched Settings subTab to %d", string(r), m.settings.subTab)
+		}
+		_ = cmd
+	}
+	if got := m.settings.ops.urlInput.Value(); got != typed {
+		t.Fatalf("urlInput.Value() = %q, want %q", got, typed)
+	}
+
+	// Esc cancels cleanly.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(model)
+	if m.settings.ops.mode != "" {
+		t.Fatalf("ops.mode after Esc = %q, want empty", m.settings.ops.mode)
+	}
+}
+
+func TestOpsGHInputOnlyWhenGHAvailableAndDefaultsToAuxlyVault(t *testing.T) {
+	m := newOpsModel(t.TempDir())
+	m.loaded = true
+	m.width, m.height = 120, 40
+	m.ghAvail = false
+
+	if strings.Contains(stripANSI(m.panel()), "[g]") {
+		t.Fatal("panel should hide [g] when ghAvailable() is false")
+	}
+	m, _ = m.handleKey(keyRunes("g"))
+	if m.mode != "" {
+		t.Fatalf("[g] when ghAvail=false entered mode %q, want idle", m.mode)
+	}
+
+	m.ghAvail = true
+	if !strings.Contains(stripANSI(m.panel()), "[g]") {
+		t.Fatal("panel should show [g] when ghAvailable() is true")
+	}
+	m, _ = m.handleKey(keyRunes("g"))
+	if m.mode != "inputGH" {
+		t.Fatalf("mode after [g] = %q, want inputGH", m.mode)
+	}
+	if got := m.ghInput.Value(); got != "auxly-vault" {
+		t.Fatalf("default GitHub repo name = %q, want auxly-vault", got)
+	}
+}
+
+func TestOpsPrePushFindingsConfirmAndCancelInPage(t *testing.T) {
+	origSetup := opsBackupSetup
+	origStatus := opsBackupStatus
+	defer func() {
+		opsBackupSetup = origSetup
+		opsBackupStatus = origStatus
+	}()
+
+	var seenOpts []git.SetupOptions
+	opsBackupSetup = func(memPath, remoteURL string, opts git.SetupOptions) (git.SetupResult, error) {
+		seenOpts = append(seenOpts, opts)
+		rep := git.Report{
+			SensitiveFiles:  []git.SensitiveFile{{File: "infra.md", Count: 2}},
+			ExistingCommits: 3,
+			Visibility:      git.VisibilityPrivate,
+		}
+		if !opts.Confirmed {
+			return git.SetupResult{
+				RemoteURL: remoteURL,
+				Branch:    "main",
+				Blocked:   true,
+				Report:    rep,
+			}, fmt.Errorf("%w: sensitive files", git.ErrPrePushBlocked)
+		}
+		return git.SetupResult{
+			RemoteURL: remoteURL,
+			Branch:    "main",
+			Pushed:    true,
+			Report:    rep,
+		}, nil
+	}
+	opsBackupStatus = func(memPath string) git.Status {
+		if len(seenOpts) > 0 && seenOpts[len(seenOpts)-1].Confirmed {
+			return git.Status{Configured: true, RemoteURL: "/tmp/bare.git", Branch: "main"}
+		}
+		return git.Status{}
+	}
+
+	m := newOpsModel(t.TempDir())
+	m.loaded = true
+	m.width, m.height = 120, 40
+
+	m, _ = m.handleKey(keyRunes("u"))
+	m.urlInput.SetValue("/tmp/bare.git")
+	m, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.busy || cmd == nil {
+		t.Fatal("Enter in inputURL should enter busy state and dispatch setup tea.Cmd")
+	}
+
+	m, _ = m.Update(resolveSetupMsg(t, cmd))
+	if m.mode != "confirmPrePush" {
+		t.Fatalf("mode = %q, want confirmPrePush", m.mode)
+	}
+	view := stripANSI(m.panel())
+	if !strings.Contains(view, "infra.md") || !strings.Contains(view, "3 earlier commits will be pushed as they are") || !strings.Contains(view, "y push anyway / n cancel") {
+		t.Fatalf("confirmPrePush view missing findings or prompt:\n%s", view)
+	}
+
+	// Confirm with 'y': dispatches Setup with Confirmed=true.
+	m, cmd = m.handleKey(keyRunes("y"))
+	if !m.busy || cmd == nil {
+		t.Fatal("[y] on confirmPrePush should dispatch confirmed setup")
+	}
+	m, _ = m.Update(resolveSetupMsg(t, cmd))
+	if !m.backup.Configured {
+		t.Fatal("expected backup to be configured after confirming pre-push findings")
+	}
+}
+
+func TestOpsConfiguredStateStripsCredentialsAndTogglesAutoBackup(t *testing.T) {
+	origSetAuto := opsSetAutoBackup
+	origStatus := opsBackupStatus
+	defer func() {
+		opsSetAutoBackup = origSetAuto
+		opsBackupStatus = origStatus
+	}()
+
+	autoOn := false
+	opsSetAutoBackup = func(memPath string, enabled bool) error {
+		autoOn = enabled
+		return nil
+	}
+	opsBackupStatus = func(memPath string) git.Status {
+		return git.Status{
+			IsRepo:         true,
+			Configured:     true,
+			RemoteURL:      "https://github.com/owner/auxly-vault.git",
+			Branch:         "main",
+			AutoBackup:     autoOn,
+			LastSuccess:    time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC),
+			UnpushedCount:  2,
+			DirtyFileCount: 1,
+		}
+	}
+
+	m := newOpsModel(t.TempDir())
+	m.loaded = true
+	m.width, m.height = 120, 40
+	m.backup = git.Status{
+		IsRepo:         true,
+		Configured:     true,
+		RemoteURL:      "https://x:ghp_secret123456789012345678901234@github.com/owner/auxly-vault.git",
+		Branch:         "main",
+		AutoBackup:     false,
+		LastSuccess:    time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC),
+		UnpushedCount:  2,
+		DirtyFileCount: 1,
+	}
+
+	view := stripANSI(m.panel())
+	if strings.Contains(view, "ghp_secret") {
+		t.Fatalf("panel leaked remote URL credentials:\n%s", view)
+	}
+	for _, want := range []string{"https://github.com/owner/auxly-vault.git", "main", "OFF", "Unpushed: 2", "Dirty: 1"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("configured Backup panel missing %q:\n%s", want, view)
+		}
+	}
+
+	m, cmd := m.handleKey(keyRunes("b"))
+	if !m.busy || cmd == nil {
+		t.Fatal("[b] should busy model and dispatch auto-backup toggle cmd")
+	}
+	m, _ = m.Update(resolveAutoBackupMsg(t, cmd))
+	if !m.backup.AutoBackup {
+		t.Fatal("expected AutoBackup=true after toggling with [b]")
+	}
+}
+
+func TestOpsGHCreatePrePushFindingsConfirmRerunsWithConfirmed(t *testing.T) {
+	origCreateGH := opsBackupCreateGH
+	origStatus := opsBackupStatus
+	defer func() {
+		opsBackupCreateGH = origCreateGH
+		opsBackupStatus = origStatus
+	}()
+
+	var seenNames []string
+	var seenOpts []git.SetupOptions
+
+	opsBackupCreateGH = func(memPath, name string, opts git.SetupOptions) (git.SetupResult, error) {
+		seenNames = append(seenNames, name)
+		seenOpts = append(seenOpts, opts)
+		rep := git.Report{
+			SensitiveFiles: []git.SensitiveFile{{File: "infra.md", Count: 1}},
+			Visibility:     git.VisibilityUnknown,
+		}
+		if !opts.Confirmed {
+			return git.SetupResult{
+				Branch:  "main",
+				Blocked: true,
+				Report:  rep,
+			}, fmt.Errorf("%w: sensitive files", git.ErrPrePushBlocked)
+		}
+		return git.SetupResult{
+			RemoteURL: "https://github.com/owner/my-vault.git",
+			Branch:    "main",
+			Pushed:    true,
+			Report:    rep,
+		}, nil
+	}
+
+	opsBackupStatus = func(memPath string) git.Status {
+		if len(seenOpts) > 0 && seenOpts[len(seenOpts)-1].Confirmed {
+			return git.Status{Configured: true, RemoteURL: "https://github.com/owner/my-vault.git", Branch: "main"}
+		}
+		return git.Status{}
+	}
+
+	m := newOpsModel(t.TempDir())
+	m.loaded = true
+	m.width, m.height = 120, 40
+	m.ghAvail = true
+
+	// Open GitHub create input via 'g'
+	m, _ = m.handleKey(keyRunes("g"))
+	if m.mode != "inputGH" {
+		t.Fatalf("mode after [g] = %q, want inputGH", m.mode)
+	}
+	m.ghInput.SetValue("my-vault")
+
+	// Press Enter to submit
+	m, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.busy || cmd == nil {
+		t.Fatal("Enter in inputGH should enter busy state and dispatch create tea.Cmd")
+	}
+
+	// Update with setup msg (blocked by pre-push)
+	m, _ = m.Update(resolveSetupMsg(t, cmd))
+	if m.mode != "confirmPrePush" {
+		t.Fatalf("mode = %q, want confirmPrePush", m.mode)
+	}
+	if m.pendingGHRepo != "my-vault" {
+		t.Fatalf("pendingGHRepo = %q, want my-vault", m.pendingGHRepo)
+	}
+
+	// Confirm with 'y': MUST rerun create flow with Confirmed=true, NOT silently return
+	m, cmd = m.handleKey(keyRunes("y"))
+	if !m.busy || cmd == nil {
+		t.Fatal("[y] on confirmPrePush after GitHub create must enter busy state and dispatch confirmed create command")
+	}
+
+	// Resolve the confirmed setup msg
+	m, _ = m.Update(resolveSetupMsg(t, cmd))
+	if !m.backup.Configured {
+		t.Fatal("expected backup to be configured after confirming GitHub create pre-push findings")
+	}
+
+	if len(seenOpts) != 2 {
+		t.Fatalf("expected 2 calls to opsBackupCreateGH, got %d", len(seenOpts))
+	}
+	if seenOpts[0].Confirmed != false {
+		t.Errorf("call 0 Confirmed = %v, want false", seenOpts[0].Confirmed)
+	}
+	if seenOpts[1].Confirmed != true {
+		t.Errorf("call 1 Confirmed = %v, want true", seenOpts[1].Confirmed)
+	}
+	if seenNames[1] != "my-vault" {
+		t.Errorf("call 1 name = %q, want my-vault", seenNames[1])
+	}
+}
+
+func TestOpsConfirmPrePush_NoPendingSetupDoesNotSilentlyReturn(t *testing.T) {
+	m := newOpsModel(t.TempDir())
+	m.loaded = true
+	m.mode = "confirmPrePush"
+	m.pendingRemoteURL = ""
+	m.pendingGHRepo = ""
+
+	m, cmd := m.handleKey(keyRunes("y"))
+	if cmd != nil {
+		t.Fatal("should not dispatch a command when nothing pending")
+	}
+	if m.status == "" || !m.statusErr {
+		t.Fatalf("pressing 'y' with empty pending should set error status, got: status=%q statusErr=%v", m.status, m.statusErr)
 	}
 }

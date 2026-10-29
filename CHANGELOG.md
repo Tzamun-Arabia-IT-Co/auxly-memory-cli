@@ -5,6 +5,46 @@ All notable changes to Auxly Memory CLI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-10-30
+
+### Added
+
+- **Git backup setup.** `auxly sync setup <url>`, `auxly sync setup --create-github <name>`, `auxly sync status`,
+  `auxly sync auto on|off`, and a Backup panel in TUI Settings → Ops (set up by URL or create a private GitHub repo
+  via an authenticated `gh`, back up now, toggle auto-backup, last backup / error, unpushed and dirty counts).
+  Setup inits the repo, merges a safe `.gitignore`, links `origin` and pushes. Pre-push checks list unencrypted
+  vault files with secret-like lines and verify the repo is private (via `gh`); findings block until confirmed
+  (`--yes`, `--allow-public`, or `y` in the TUI).
+- **Auto-backup.** `auto_push` in `git.yaml` (previously unused) now backs up after CLI writes, approvals,
+  MCP writes, capture auto-saves and from the dashboard, at most once every 2 minutes, with the last attempt,
+  success and error recorded in `.index/git-backup.json`.
+- **Review bulk actions.** `A` archives and `S` re-stamps every listed fact of the selected file after an in-page
+  confirmation (`Store.ArchiveFacts` / `RestampFacts`, one lock per batch); a per-file count line sits above the list.
+- **Read-as-recall.** A successful `auxly_memory_read` records a recall for every fact line in that file, so facts
+  agents explicitly read stop showing as never recalled. Primer and internal reads don't count.
+
+### Changed
+
+- Active Connections groups remote sessions by box and lists the box's providers on one line.
+- Every git command runs non-interactively (`GIT_TERMINAL_PROMPT=0`, SSH `BatchMode=yes`) with a timeout, so a
+  credential prompt can't hang the TUI, the MCP server or a hook. Commits fall back to an `Auxly` identity when git
+  has none configured.
+- Homebrew cask: the quarantine-strip hook uses GoReleaser's `install_steps` instead of the deprecated `install`
+  hook, so `goreleaser check` (and the `test` workflow) passes again.
+
+### Security
+
+- Remote URLs with embedded credentials or tokens are refused; only the git remote stores the URL, and it is shown
+  with credentials stripped.
+- Agents can only write memory `.md` files: `pending.WriteFrom` / `Approve` refuse `git.yaml`, `trust.yaml`,
+  `.gitignore`, anything under a dot-directory, `..` paths and `unified_memory.md`. Before this, an MCP agent could
+  write `trust.yaml` and raise its own trust level.
+- The `git.yaml` branch is validated (no leading `-`, `..`, `@{`, `.lock`, …) and pushes use an explicit
+  `HEAD:refs/heads/<branch>` refspec, so a crafted branch value can't become a git option.
+- Backup setup on a folder that already has git history asks for confirmation (older commits aren't scanned), and
+  files the backup `.gitignore` excludes but git already tracked (audit log, audit database, …) are untracked
+  before pushing.
+
 ## [1.5.5] - 2026-10-29
 
 ### Security

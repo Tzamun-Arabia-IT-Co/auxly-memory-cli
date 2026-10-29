@@ -236,7 +236,7 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 		var cmd tea.Cmd
 		m.vault, cmd = m.vault.Update(msg)
 		return m, cmd
-	case opsRefreshMsg, opsActionMsg, opsSyncMsg, opsSpinTickMsg:
+	case opsRefreshMsg, opsActionMsg, opsSyncMsg, opsBackupSetupMsg, opsAutoBackupMsg, opsSpinTickMsg:
 		var cmd tea.Cmd
 		m.ops, cmd = m.ops.Update(msg)
 		return m, cmd

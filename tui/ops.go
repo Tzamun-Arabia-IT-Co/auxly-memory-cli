@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -8,12 +10,13 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/git"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 // ─────────────────────────────────────────────────────────────────
-//  Settings → Ops sub-tab: capture-hook status, git sync, and the doctor
+//  Settings → Ops sub-tab: capture-hook status, git backup, and the doctor
 //  report — the three CLI-only surfaces a prior audit flagged as unreachable
 //  from the TUI.
 //
@@ -21,16 +24,9 @@ import (
 //  in unexported cmd functions), and tui/ must never import cmd/ — so both
 //  shell the real `auxly` binary (runAuxlySub) and render its output, the
 //  same "reuse the CLI, don't reimplement it" approach ssh.go's captured runs
-//  use for connect/host. Sync is different: internal/git.Sync is already a
-//  clean, directly-callable core (not cmd-only), so it's called in-process —
-//  no subprocess needed, and it can't drift from what `auxly sync` does
-//  because it's the exact same function.
-//
-//  ponytail: hooks/doctor use a single-shot exec+wait (spinner ticks locally)
-//  rather than ssh.go's line-streaming captured-run — those commands finish
-//  in well under a second with no incremental progress to show, unlike the
-//  multi-minute SSH provisioning flows that streaming exists for. Upgrade to
-//  streaming if `auxly doctor` ever grows a slow step worth showing live.
+//  use for connect/host. Backup is different: internal/git is a clean,
+//  directly-callable core (not cmd-only), so it's called in-process via
+//  tea.Cmds — never on the Update/View goroutine.
 // ─────────────────────────────────────────────────────────────────
 
 // runAuxlySub is a package-level var (like ssh.go's copyInvite/copyVaultKey)
@@ -42,6 +38,28 @@ var runAuxlySub = func(memPath string, args ...string) (string, error) {
 	out, err := exec.Command(exePath(), full...).CombinedOutput()
 	return string(out), err
 }
+
+// Package-level git/gh hooks so Ops TUI tests never invoke real gh or touch
+// external state unless exercising a local bare repo in a temp dir.
+var (
+	opsGHAvailable  = git.GHAvailable
+	opsBackupStatus = git.BackupStatus
+	opsBackupNow    = func(memPath string) (git.SyncResult, error) { return git.BackupNow(context.Background(), memPath) }
+	opsBackupSetup  = func(memPath, remoteURL string, opts git.SetupOptions) (git.SetupResult, error) {
+		return git.Setup(context.Background(), memPath, remoteURL, opts)
+	}
+	opsBackupCreateGH = func(memPath, name string, opts git.SetupOptions) (git.SetupResult, error) {
+		return git.CreateGitHubAndSetup(context.Background(), memPath, name, opts)
+	}
+	opsSetAutoBackup = func(memPath string, enabled bool) error {
+		cfg, err := git.LoadConfig(memPath)
+		if err != nil {
+			return err
+		}
+		cfg.AutoPush = enabled
+		return git.SaveConfig(memPath, cfg)
+	}
+)
 
 // hookStatusRow is one parsed row of `auxly hooks status`'s table.
 type hookStatusRow struct {
@@ -77,9 +95,20 @@ type opsModel struct {
 	hooksErr  string
 	cursor    int
 
-	// mode == "" is idle; confirmUninstall/confirmSync gate destructive/outward
-	// actions behind a y/n prompt, mirroring vaultModel's confirm shape.
+	backup  git.Status
+	ghAvail bool
+
+	// mode == "" is idle;
+	//   "confirmUninstall" / "confirmSync" / "confirmPrePush" gate actions behind y/n;
+	//   "inputURL" / "inputGH" capture text entry for backup setup.
 	mode string
+
+	urlInput textinput.Model
+	ghInput  textinput.Model
+
+	pendingRemoteURL string
+	pendingGHRepo    string
+	pendingReport    git.Report
 
 	busy      bool
 	busyLabel string
@@ -93,20 +122,36 @@ type opsModel struct {
 }
 
 func newOpsModel(memPath string) opsModel {
-	return opsModel{memoryPath: memPath}
+	ui := textinput.New()
+	ui.Placeholder = "git@github.com:owner/auxly-vault.git"
+	ui.CharLimit = 512
+	ui.Width = 48
+
+	gi := textinput.New()
+	gi.Placeholder = "auxly-vault"
+	gi.CharLimit = 100
+	gi.Width = 40
+	gi.SetValue("auxly-vault")
+
+	return opsModel{
+		memoryPath: memPath,
+		urlInput:   ui,
+		ghInput:    gi,
+	}
 }
 
-// capturesInput mirrors vaultModel.capturesInput: only a confirm prompt or an
-// in-flight action should block the app-wide digit/quit keys — idle
-// navigation (j/k/i/u/s/d) is not in that global key set, so it always
-// reaches handleKey via app.go's normal sub-model delegation regardless.
+// capturesInput mirrors vaultModel.capturesInput: any active text input,
+// confirm prompt, or in-flight action blocks the app-wide digit/quit keys so
+// typing into URL/repo-name inputs never switches tabs or quits the TUI.
 func (m opsModel) capturesInput() bool {
 	return m.busy || m.mode != ""
 }
 
 type opsRefreshMsg struct {
-	rows []hookStatusRow
-	err  string
+	rows    []hookStatusRow
+	err     string
+	backup  git.Status
+	ghAvail bool
 }
 
 type opsActionMsg struct {
@@ -118,7 +163,22 @@ type opsActionMsg struct {
 
 type opsSyncMsg struct {
 	result git.SyncResult
+	backup git.Status
 	err    error
+}
+
+type opsBackupSetupMsg struct {
+	result    git.SetupResult
+	remoteURL string
+	repoName  string
+	backup    git.Status
+	err       error
+}
+
+type opsAutoBackupMsg struct {
+	enabled bool
+	backup  git.Status
+	err     error
 }
 
 type opsSpinTickMsg struct{}
@@ -130,10 +190,15 @@ func opsSpinTick() tea.Cmd {
 func opsHooksStatusCmd(memPath string) tea.Cmd {
 	return func() tea.Msg {
 		out, err := runAuxlySub(memPath, "hooks", "status")
-		if err != nil && strings.TrimSpace(out) == "" {
-			return opsRefreshMsg{err: err.Error()}
+		backup := opsBackupStatus(memPath)
+		var ghAvail bool
+		if !backup.Configured {
+			ghAvail = opsGHAvailable()
 		}
-		return opsRefreshMsg{rows: parseHooksStatus(out)}
+		if err != nil && strings.TrimSpace(out) == "" {
+			return opsRefreshMsg{err: err.Error(), backup: backup, ghAvail: ghAvail}
+		}
+		return opsRefreshMsg{rows: parseHooksStatus(out), backup: backup, ghAvail: ghAvail}
 	}
 }
 
@@ -153,20 +218,56 @@ func opsDoctorCmd(memPath string) tea.Cmd {
 
 func opsSyncCmd(memPath string) tea.Cmd {
 	return func() tea.Msg {
-		res, err := git.SyncStatus(memPath)
-		return opsSyncMsg{result: res, err: err}
+		res, err := opsBackupNow(memPath)
+		return opsSyncMsg{result: res, backup: opsBackupStatus(memPath), err: err}
 	}
 }
 
-// refreshCmd reloads the hooks status table — called on Ops sub-tab entry and
-// after any install/uninstall.
+func opsBackupSetupURLCmd(memPath, remoteURL string, opts git.SetupOptions) tea.Cmd {
+	return func() tea.Msg {
+		res, err := opsBackupSetup(memPath, remoteURL, opts)
+		return opsBackupSetupMsg{
+			result:    res,
+			remoteURL: remoteURL,
+			backup:    opsBackupStatus(memPath),
+			err:       err,
+		}
+	}
+}
+
+func opsBackupCreateGHCmd(memPath, name string, opts git.SetupOptions) tea.Cmd {
+	return func() tea.Msg {
+		res, err := opsBackupCreateGH(memPath, name, opts)
+		return opsBackupSetupMsg{
+			result:    res,
+			remoteURL: res.RemoteURL,
+			repoName:  name,
+			backup:    opsBackupStatus(memPath),
+			err:       err,
+		}
+	}
+}
+
+func opsToggleAutoBackupCmd(memPath string, enable bool) tea.Cmd {
+	return func() tea.Msg {
+		err := opsSetAutoBackup(memPath, enable)
+		return opsAutoBackupMsg{
+			enabled: enable,
+			backup:  opsBackupStatus(memPath),
+			err:     err,
+		}
+	}
+}
+
+// refreshCmd reloads hooks status + git backup status — called on Ops sub-tab
+// entry and after any install/uninstall.
 func (m opsModel) refreshCmd() tea.Cmd {
 	return opsHooksStatusCmd(m.memoryPath)
 }
 
-// syncStatusText renders a SyncStatus result into the four distinct outcomes
-// the audit asked for: pushed / nothing-to-push / refused (sentinel or no
-// remote) / error. Pure, so it's unit-testable without a real git repo.
+// syncStatusText renders a SyncStatus/BackupNow result into the four distinct
+// outcomes: pushed / nothing-to-push / refused (sentinel or no remote) / error.
+// Pure, so it's unit-testable without a real git repo.
 func syncStatusText(res git.SyncResult, err error) (string, bool) {
 	if err != nil {
 		msg := err.Error()
@@ -178,7 +279,7 @@ func syncStatusText(res git.SyncResult, err error) (string, bool) {
 			strings.Contains(msg, "No configured push destination"):
 			return "⚠ sync not set up — vault isn't a git repo with a remote (optional; enables off-machine backup)", true
 		default:
-			return "✗ sync error: " + msg, true
+			return "✗ sync error: " + joinLines(msg), true
 		}
 	}
 	if res.Pushed {
@@ -197,6 +298,8 @@ func (m opsModel) Update(msg tea.Msg) (opsModel, tea.Cmd) {
 		m.loaded = true
 		m.hooksRows = msg.rows
 		m.hooksErr = msg.err
+		m.backup = msg.backup
+		m.ghAvail = msg.ghAvail
 		if m.cursor >= len(m.hooksRows) {
 			m.cursor = 0
 		}
@@ -229,7 +332,48 @@ func (m opsModel) Update(msg tea.Msg) (opsModel, tea.Cmd) {
 
 	case opsSyncMsg:
 		m.busy = false
+		if msg.backup.Configured || msg.backup.IsRepo {
+			m.backup = msg.backup
+		}
 		m.status, m.statusErr = syncStatusText(msg.result, msg.err)
+		return m, nil
+
+	case opsBackupSetupMsg:
+		m.busy = false
+		if errors.Is(msg.err, git.ErrPrePushBlocked) {
+			m.pendingRemoteURL = msg.remoteURL
+			m.pendingGHRepo = msg.repoName
+			m.pendingReport = msg.result.Report
+			m.mode = "confirmPrePush"
+			return m, nil
+		}
+		if msg.err != nil {
+			m.status, m.statusErr = "✗ "+joinLines(msg.err.Error()), true
+			return m, nil
+		}
+		m.backup = msg.backup
+		m.pendingRemoteURL = ""
+		m.pendingGHRepo = ""
+		m.pendingReport = git.Report{}
+		status := fmt.Sprintf("✓ backup set up → %s (%s)", git.StripCredentials(msg.result.RemoteURL), msg.result.Branch)
+		if msg.result.Report.Warning != "" {
+			status += " · ⚠ " + msg.result.Report.Warning
+		}
+		m.status, m.statusErr = status, false
+		return m, nil
+
+	case opsAutoBackupMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.status, m.statusErr = "✗ "+joinLines(msg.err.Error()), true
+			return m, nil
+		}
+		m.backup = msg.backup
+		if msg.enabled {
+			m.status, m.statusErr = "✓ Auto-backup ON", false
+		} else {
+			m.status, m.statusErr = "✓ Auto-backup OFF", false
+		}
 		return m, nil
 
 	case opsSpinTickMsg:
@@ -242,9 +386,7 @@ func (m opsModel) Update(msg tea.Msg) (opsModel, tea.Cmd) {
 	return m, nil
 }
 
-// joinLines collapses `auxly hooks install/uninstall`'s output (1-2 short
-// lines — a confirmation plus, sometimes, a caveat worth keeping, see
-// cmd/hooks.go / cmd/hooks_shell.go) into one status line, dropping blanks.
+// joinLines collapses multi-line command output into one status line, dropping blanks.
 func joinLines(s string) string {
 	var kept []string
 	for _, l := range strings.Split(s, "\n") {
@@ -264,10 +406,6 @@ func (m opsModel) cursorAgentWired() (agent string, wired bool) {
 }
 
 // wireHintFor describes what [i] does for the given not-yet-wired agent.
-// claude/codex get a native hook auto-wired by `auxly setup`/`auxly connect`
-// already (see autoWireCleanHooks); gemini/kimi/antigravity are wired the
-// same way but via a ~/.zshrc shell wrapper, since none of the three has a
-// session-end hook to write into a settings file.
 func wireHintFor(agent string) string {
 	switch agent {
 	case "claude", "codex":
@@ -282,17 +420,95 @@ func wireHintFor(agent string) string {
 }
 
 func (m opsModel) handleKey(msg tea.KeyMsg) (opsModel, tea.Cmd) {
-	// Report view: any key dismisses it (mirrors sshModePrint's "any key
-	// dismisses the config preview").
 	if m.viewingDoctor {
 		m.viewingDoctor = false
 		return m, nil
 	}
 	if m.busy {
-		return m, nil // input is frozen while the subprocess/push is in flight
+		return m, nil // input is frozen while the subprocess/git command is in flight
 	}
 
 	switch m.mode {
+	case "inputURL":
+		switch msg.String() {
+		case "esc", "ctrl+c":
+			m.urlInput.Blur()
+			m.mode = ""
+			return m, nil
+		case "enter":
+			raw := strings.TrimSpace(m.urlInput.Value())
+			if raw == "" {
+				m.status, m.statusErr = "⚠ enter a repository URL or press esc to cancel", true
+				return m, nil
+			}
+			m.urlInput.Blur()
+			m.mode = ""
+			m.status = ""
+			m.busy, m.busyLabel, m.spin = true, "Setting up git backup", 0
+			return m, tea.Batch(opsBackupSetupURLCmd(m.memoryPath, raw, git.SetupOptions{}), opsSpinTick())
+		}
+		var cmd tea.Cmd
+		m.urlInput, cmd = m.urlInput.Update(msg)
+		return m, cmd
+
+	case "inputGH":
+		switch msg.String() {
+		case "esc", "ctrl+c":
+			m.ghInput.Blur()
+			m.mode = ""
+			return m, nil
+		case "enter":
+			name := strings.TrimSpace(m.ghInput.Value())
+			if name == "" {
+				name = "auxly-vault"
+			}
+			m.ghInput.Blur()
+			m.mode = ""
+			m.status = ""
+			m.busy, m.busyLabel, m.spin = true, "Creating private GitHub repo "+name, 0
+			return m, tea.Batch(opsBackupCreateGHCmd(m.memoryPath, name, git.SetupOptions{}), opsSpinTick())
+		}
+		var cmd tea.Cmd
+		m.ghInput, cmd = m.ghInput.Update(msg)
+		return m, cmd
+
+	case "confirmPrePush":
+		switch msg.String() {
+		case "y", "Y":
+			remote := m.pendingRemoteURL
+			ghRepo := m.pendingGHRepo
+			m.mode = ""
+			m.pendingRemoteURL = ""
+			m.pendingGHRepo = ""
+			m.pendingReport = git.Report{}
+			if ghRepo != "" {
+				m.status = ""
+				m.busy, m.busyLabel, m.spin = true, "Creating private GitHub repo "+ghRepo, 0
+				return m, tea.Batch(opsBackupCreateGHCmd(m.memoryPath, ghRepo, git.SetupOptions{
+					Confirmed:   true,
+					AllowPublic: true,
+				}), opsSpinTick())
+			}
+			if remote != "" {
+				m.status = ""
+				m.busy, m.busyLabel, m.spin = true, "Pushing initial backup", 0
+				return m, tea.Batch(opsBackupSetupURLCmd(m.memoryPath, remote, git.SetupOptions{
+					Confirmed:   true,
+					AllowPublic: true,
+				}), opsSpinTick())
+			}
+			m.status, m.statusErr = "⚠ backup setup cancelled", true
+			return m, nil
+		case "n", "N", "esc", "ctrl+c":
+			m.mode = ""
+			m.pendingRemoteURL = ""
+			m.pendingGHRepo = ""
+			m.pendingReport = git.Report{}
+			m.status, m.statusErr = "⚠ backup setup cancelled", true
+			return m, nil
+		}
+		return m, nil
+
 	case "confirmUninstall":
 		switch msg.String() {
 		case "y", "Y", "enter":
@@ -314,7 +530,7 @@ func (m opsModel) handleKey(msg tea.KeyMsg) (opsModel, tea.Cmd) {
 		case "y", "Y", "enter":
 			m.mode = ""
 			m.status = ""
-			m.busy, m.busyLabel, m.spin = true, "Syncing to remote", 0
+			m.busy, m.busyLabel, m.spin = true, "Backing up to remote", 0
 			return m, tea.Batch(opsSyncCmd(m.memoryPath), opsSpinTick())
 		case "n", "N", "esc":
 			m.mode = ""
@@ -325,7 +541,7 @@ func (m opsModel) handleKey(msg tea.KeyMsg) (opsModel, tea.Cmd) {
 	// idle
 	switch msg.String() {
 	case "j", "down":
-		m.status = "" // a prior action's result is stale once you move to act on another row
+		m.status = ""
 		if m.cursor < len(m.hooksRows)-1 {
 			m.cursor++
 		}
@@ -341,11 +557,38 @@ func (m opsModel) handleKey(msg tea.KeyMsg) (opsModel, tea.Cmd) {
 			return m, tea.Batch(opsHookActionCmd(m.memoryPath, "install", agent), opsSpinTick())
 		}
 	case "u":
+		if !m.backup.Configured {
+			m.status = ""
+			m.urlInput.SetValue("")
+			cmd := m.urlInput.Focus()
+			m.mode = "inputURL"
+			return m, cmd
+		}
 		if _, wired := m.cursorAgentWired(); wired {
 			m.mode = "confirmUninstall"
 		}
+	case "x", "U":
+		if _, wired := m.cursorAgentWired(); wired {
+			m.mode = "confirmUninstall"
+		}
+	case "g":
+		if !m.backup.Configured && m.ghAvail {
+			m.status = ""
+			m.ghInput.SetValue("auxly-vault")
+			m.ghInput.CursorEnd()
+			cmd := m.ghInput.Focus()
+			m.mode = "inputGH"
+			return m, cmd
+		}
 	case "s":
 		m.mode = "confirmSync"
+	case "b":
+		if m.backup.Configured {
+			m.status = ""
+			next := !m.backup.AutoBackup
+			m.busy, m.busyLabel, m.spin = true, "Updating auto-backup", 0
+			return m, tea.Batch(opsToggleAutoBackupCmd(m.memoryPath, next), opsSpinTick())
+		}
 	case "d":
 		m.status = ""
 		m.busy, m.busyLabel, m.spin = true, "Running doctor", 0
@@ -403,6 +646,50 @@ func (m opsModel) panel() string {
 	}
 
 	switch m.mode {
+	case "inputURL":
+		promptLines := []string{
+			bold.Render("Set up Backup (git) — Repository URL"),
+			dim.Render("Accepts git@host:owner/repo.git, https://..., or a local path (no tokens in URL)."),
+			"",
+			m.urlInput.View(),
+			"",
+			green.Render("[enter] submit") + dim.Render("   [esc] cancel"),
+		}
+		if m.status != "" {
+			promptLines = append(promptLines, "", warn.Render(m.status))
+		}
+		return box(ColorPrimary, promptLines)
+
+	case "inputGH":
+		return box(ColorPrimary, []string{
+			bold.Render("Create Private GitHub Repository"),
+			dim.Render("Creates a private GitHub repository via `gh` and sets up backup."),
+			"",
+			m.ghInput.View(),
+			"",
+			green.Render("[enter] create & push") + dim.Render("   [esc] cancel"),
+		})
+
+	case "confirmPrePush":
+		var findings []string
+		findings = append(findings, warn.Render("⚠ Pre-push safety findings"))
+		for _, sf := range m.pendingReport.SensitiveFiles {
+			findings = append(findings, fmt.Sprintf("  • %s: %d potential secret(s) (unencrypted)", sf.File, sf.Count))
+		}
+		if m.pendingReport.ExistingCommits > 0 {
+			findings = append(findings, fmt.Sprintf("  • %d earlier commits will be pushed as they are; older commits are not checked for secrets", m.pendingReport.ExistingCommits))
+		}
+		if m.pendingReport.IsPublic() {
+			findings = append(findings, danger.Render("  • Remote repository is PUBLIC"))
+		} else if m.pendingReport.Warning != "" {
+			findings = append(findings, dim.Render("  • "+m.pendingReport.Warning))
+		}
+		findings = append(findings,
+			"",
+			warn.Render("y push anyway / n cancel"),
+		)
+		return box(ColorWarning, findings)
+
 	case "confirmUninstall":
 		agent, _ := m.cursorAgentWired()
 		return box(ColorWarning, []string{
@@ -411,11 +698,12 @@ func (m opsModel) panel() string {
 			"",
 			green.Render("[y] remove") + dim.Render("   [n]/esc cancel"),
 		})
+
 	case "confirmSync":
 		return box(ColorWarning, []string{
-			warn.Render("Push memory changes to the git remote now?"),
+			warn.Render("Back up memory changes to the git remote now?"),
 			"",
-			green.Render("[y] sync") + dim.Render("   [n]/esc cancel"),
+			green.Render("[y] back up") + dim.Render("   [n]/esc cancel"),
 		})
 	}
 
@@ -449,7 +737,11 @@ func (m opsModel) panel() string {
 		}
 	}
 	lines = append(lines, "")
-	lines = append(lines, dim.Render("↑/↓ select · i install · u uninstall (confirm) · r rescan"))
+	if m.backup.Configured {
+		lines = append(lines, dim.Render("↑/↓ select · i install · u/x uninstall (confirm) · r rescan"))
+	} else {
+		lines = append(lines, dim.Render("↑/↓ select · i install · x uninstall (confirm) · r rescan"))
+	}
 	if agent, wired := m.cursorAgentWired(); agent != "" && !wired {
 		if hint := wireHintFor(agent); hint != "" {
 			lines = append(lines, dim.Render(hint))
@@ -457,18 +749,45 @@ func (m opsModel) panel() string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, bold.Render("Sync (git push)"))
-	lines = append(lines, dim.Render("[s] sync now")+dim.Render(" — commits + pushes; confirm required"))
+	lines = append(lines, bold.Render("Backup (git)"))
+	if !m.backup.Configured {
+		lines = append(lines, dim.Render("Back up your memory vault to a private git repo for off-machine recovery."))
+		lines = append(lines, dim.Render("[u] set up with a repo URL"))
+		if m.ghAvail {
+			lines = append(lines, dim.Render("[g] create a private GitHub repo (default: auxly-vault)"))
+		}
+	} else {
+		branch := m.backup.Branch
+		if branch == "" {
+			branch = "main"
+		}
+		lines = append(lines, fmt.Sprintf("Remote: %s · Branch: %s",
+			accent.Render(git.StripCredentials(m.backup.RemoteURL)),
+			bold.Render(branch),
+		))
+		autoBadge := dim.Render("OFF")
+		if m.backup.AutoBackup {
+			autoBadge = green.Render("ON")
+		}
+		lines = append(lines, fmt.Sprintf("Auto-backup: %s · Unpushed: %d · Dirty: %d",
+			autoBadge, m.backup.UnpushedCount, m.backup.DirtyFileCount,
+		))
+		switch {
+		case m.backup.LastError != "":
+			lines = append(lines, danger.Render("Last error: "+truncate(joinLines(m.backup.LastError), padW-14)))
+		case !m.backup.LastSuccess.IsZero():
+			lines = append(lines, dim.Render("Last backup: "+m.backup.LastSuccess.Local().Format("2006-01-02 15:04:05")))
+		default:
+			lines = append(lines, dim.Render("Last backup: never"))
+		}
+		lines = append(lines, dim.Render("[s] back up now (confirm) · [b] toggle auto-backup"))
+	}
 
 	lines = append(lines, "")
 	lines = append(lines, bold.Render("Diagnostics"))
 	lines = append(lines, dim.Render("[d] run doctor report"))
 
 	if m.status != "" {
-		// Color by the leading glyph, not a bare error bool: ✓ ok (green),
-		// ⚠ a not-configured / skipped state (amber — optional, NOT a failure),
-		// ✗ a real error (red). Painting "sync not configured" red made users
-		// read an optional-feature notice as a crash.
 		style := green
 		switch {
 		case strings.HasPrefix(m.status, "✗"):

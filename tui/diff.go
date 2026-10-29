@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/git"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -107,6 +108,9 @@ func batchApproveCmd(mgr *pending.Manager, logger *audit.Logger, names []string)
 				failed++
 			}
 		}
+		if applied > 0 {
+			git.MaybeAutoBackup(mgr.MemoryRoot())
+		}
 		return diffBatchMsg{applied: applied, conflicted: conflicted, failed: failed}
 	}
 }
@@ -179,13 +183,18 @@ func (m diffModel) Update(msg tea.Msg) (diffModel, tea.Cmd) {
 				// visible, not silently swallowed — the item stays queued.
 				if err := m.mgr.Approve(name); err != nil {
 					m.status = err.Error()
-				} else {
-					m.status = ""
-					if m.cursor < len(m.infos) {
-						logPendingDecision(m.logger, m.infos[m.cursor], "pending_approve", "human approved")
-					}
+					return m, m.Refresh()
 				}
-				return m, m.Refresh()
+				m.status = ""
+				if m.cursor < len(m.infos) {
+					logPendingDecision(m.logger, m.infos[m.cursor], "pending_approve", "human approved")
+				}
+				root := m.mgr.MemoryRoot()
+				backupCmd := func() tea.Msg {
+					git.MaybeAutoBackup(root)
+					return nil
+				}
+				return m, tea.Batch(m.Refresh(), backupCmd)
 			}
 		case "r":
 			if m.cursor < len(m.files) {

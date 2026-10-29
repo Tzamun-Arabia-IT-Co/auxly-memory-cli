@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,17 +29,24 @@ const (
 // line, refreshed on tab-enter rather than on the dashboard's 1s tick since
 // the scan walks the whole vault plus one audit-DB query per file.
 type reviewModel struct {
-	store    *memory.Store
-	logger   *audit.Logger
-	facts    []memory.StaleFact
-	cursor   int
-	scanning bool
-	status   string // last action outcome, or an error
-	err      string // scan-level error (vault unreadable etc.)
+	store        *memory.Store
+	logger       *audit.Logger
+	facts        []memory.StaleFact
+	cursor       int
+	scanning     bool
+	status       string // last action outcome, or an error
+	err          string // scan-level error (vault unreadable etc.)
+	confirmKind  string // "" | "archive" | "restamp"
+	confirmFile  string
+	confirmLines []string
 }
 
 func newReviewModel(store *memory.Store, logger *audit.Logger) reviewModel {
 	return reviewModel{store: store, logger: logger}
+}
+
+func (m reviewModel) capturesInput() bool {
+	return m.confirmKind != ""
 }
 
 // reviewFactsMsg carries the result of an async StaleFacts scan.
@@ -53,6 +61,14 @@ type reviewActionMsg struct {
 	file string
 	line string
 	err  error
+}
+
+// reviewBatchActionMsg carries the result of an async batch restamp/archive.
+type reviewBatchActionMsg struct {
+	kind    string // "restamp" | "archive"
+	file    string
+	applied int
+	err     error
 }
 
 // scanCmd runs the (potentially slow) vault-wide stale scan off the UI thread.
@@ -102,6 +118,26 @@ func archiveCmd(store *memory.Store, logger *audit.Logger, file, line string) te
 	}
 }
 
+func batchArchiveCmd(store *memory.Store, logger *audit.Logger, file string, lines []string) tea.Cmd {
+	return func() tea.Msg {
+		applied, err := store.ArchiveFacts(file, lines)
+		if err == nil && logger != nil {
+			logger.Log("human", "dashboard", "review_archive", file, "", fmt.Sprintf("%d facts", applied), "auto")
+		}
+		return reviewBatchActionMsg{kind: "archive", file: file, applied: applied, err: err}
+	}
+}
+
+func batchRestampCmd(store *memory.Store, logger *audit.Logger, file string, lines []string) tea.Cmd {
+	return func() tea.Msg {
+		applied, err := store.RestampFacts(file, lines)
+		if err == nil && logger != nil {
+			logger.Log("human", "dashboard", "review_keep", file, "", fmt.Sprintf("%d facts", applied), "auto")
+		}
+		return reviewBatchActionMsg{kind: "restamp", file: file, applied: applied, err: err}
+	}
+}
+
 func (m reviewModel) Update(msg tea.Msg) (reviewModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case reviewFactsMsg:
@@ -132,7 +168,35 @@ func (m reviewModel) Update(msg tea.Msg) (reviewModel, tea.Cmd) {
 		}
 		return m, nil
 
+	case reviewBatchActionMsg:
+		if msg.err != nil {
+			m.status = msg.err.Error() + " — vault may have changed, try r to rescan"
+			return m, nil
+		}
+		m.scanning = true
+		m.status = ""
+		m.err = ""
+		return m, m.scanCmd()
+
 	case tea.KeyMsg:
+		if m.confirmKind != "" {
+			kind := m.confirmKind
+			file := m.confirmFile
+			lines := m.confirmLines
+			m.confirmKind = ""
+			m.confirmFile = ""
+			m.confirmLines = nil
+			if msg.String() == "y" {
+				m.status = ""
+				if kind == "archive" {
+					return m, batchArchiveCmd(m.store, m.logger, file, lines)
+				}
+				return m, batchRestampCmd(m.store, m.logger, file, lines)
+			}
+			m.status = ""
+			return m, nil
+		}
+
 		switch msg.String() {
 		// "k"/up match the vim convention used by every other list in this app
 		// (down=j, up=k) — a mis-key must never silently rewrite a fact, so the
@@ -156,6 +220,38 @@ func (m reviewModel) Update(msg tea.Msg) (reviewModel, tea.Cmd) {
 			if m.cursor >= 0 && m.cursor < len(m.facts) {
 				f := m.facts[m.cursor]
 				return m, archiveCmd(m.store, m.logger, f.File, f.Line)
+			}
+		case "A":
+			if m.cursor >= 0 && m.cursor < len(m.facts) {
+				file := m.facts[m.cursor].File
+				var lines []string
+				for _, f := range m.facts {
+					if f.File == file {
+						lines = append(lines, f.Line)
+					}
+				}
+				if len(lines) > 0 {
+					m.confirmKind = "archive"
+					m.confirmFile = file
+					m.confirmLines = lines
+					m.status = fmt.Sprintf("Archive %d facts from %s? y/n", len(lines), file)
+				}
+			}
+		case "S":
+			if m.cursor >= 0 && m.cursor < len(m.facts) {
+				file := m.facts[m.cursor].File
+				var lines []string
+				for _, f := range m.facts {
+					if f.File == file {
+						lines = append(lines, f.Line)
+					}
+				}
+				if len(lines) > 0 {
+					m.confirmKind = "restamp"
+					m.confirmFile = file
+					m.confirmLines = lines
+					m.status = fmt.Sprintf("Keep %d facts from %s? y/n", len(lines), file)
+				}
 			}
 		case "r":
 			m.scanning = true
@@ -223,6 +319,32 @@ func reviewRow(f memory.StaleFact, textW int) string {
 	return fmt.Sprintf("%s %s %s %s", file, text, age, last)
 }
 
+// reviewSummary builds a per-file count summary line (e.g. "daily.md 111 · business.md 70 · …").
+func reviewSummary(facts []memory.StaleFact) string {
+	if len(facts) == 0 {
+		return ""
+	}
+	counts := make(map[string]int)
+	var order []string
+	for _, f := range facts {
+		if counts[f.File] == 0 {
+			order = append(order, f.File)
+		}
+		counts[f.File]++
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		if counts[order[i]] != counts[order[j]] {
+			return counts[order[i]] > counts[order[j]]
+		}
+		return order[i] < order[j]
+	})
+	parts := make([]string, len(order))
+	for i, file := range order {
+		parts[i] = fmt.Sprintf("%s %d", file, counts[file])
+	}
+	return strings.Join(parts, " · ")
+}
+
 func reviewHeaderRow() string {
 	return fmt.Sprintf("%-*s %-*s %-*s %s",
 		reviewFileW, "FILE", reviewTextW, "FACT", reviewAgeW, "AGE", "LAST RECALL")
@@ -247,6 +369,9 @@ func (m reviewModel) View() string {
 
 	var b strings.Builder
 	b.WriteString(title + "\n\n")
+	if summary := reviewSummary(m.facts); summary != "" {
+		b.WriteString(dim.Render(summary) + "\n\n")
+	}
 	b.WriteString(dim.Render(reviewHeaderRow()) + "\n")
 	for i, f := range m.facts {
 		row := reviewRow(f, reviewTextW)

@@ -115,12 +115,13 @@ homebrew_casks:
       email: hi@auxly.io
     # Strip the Gatekeeper quarantine flag on install so an unsigned binary runs
     # without a "developer cannot be verified" prompt on macOS.
+    # install_steps (GoReleaser >= 2.19) replaces the deprecated raw-Ruby
+    # `install` hook; Homebrew has supported the steps DSL since May 2026.
     hooks:
       post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr",
-              args: ["-dr", "com.apple.quarantine", "#{staged_path}/auxly"]
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/auxly"]
           end
 
 # Linux packages attached to each GitHub Release.

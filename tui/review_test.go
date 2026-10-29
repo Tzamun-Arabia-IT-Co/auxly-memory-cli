@@ -2,11 +2,14 @@ package tui
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -237,5 +240,198 @@ func TestTruncateRuneSafe(t *testing.T) {
 	// Short strings pass through untouched.
 	if got := truncate("hi", 5); got != "hi" {
 		t.Fatalf("short string should not be truncated, got %q", got)
+	}
+}
+
+func TestReviewBatchArchive_Cancel(t *testing.T) {
+	dir := t.TempDir()
+	store := memory.NewStore(dir)
+	if err := store.Write("daily.md", "# Daily\n- Daily fact 1 [2020-01-01]\n- Daily fact 2 [2020-01-01]\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write("business.md", "# Business\n- Biz fact 1 [2020-01-01]\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newReviewModel(store, nil)
+	m.facts = []memory.StaleFact{
+		{File: "daily.md", Line: "- Daily fact 1 [2020-01-01]"},
+		{File: "daily.md", Line: "- Daily fact 2 [2020-01-01]"},
+		{File: "business.md", Line: "- Biz fact 1 [2020-01-01]"},
+	}
+	m.cursor = 0 // pointing to daily.md
+
+	// Press 'A' to trigger batch archive confirmation
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("A")})
+	if cmd != nil {
+		t.Fatalf("'A' should wait for confirmation, got cmd %v", cmd)
+	}
+	if !m.capturesInput() {
+		t.Fatalf("expected capturesInput() to be true during confirmation")
+	}
+	wantPrompt := "Archive 2 facts from daily.md? y/n"
+	if m.status != wantPrompt {
+		t.Fatalf("status = %q, want %q", m.status, wantPrompt)
+	}
+
+	// Press 'n' to cancel
+	m, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if cmd != nil {
+		t.Fatalf("cancel should return nil cmd, got %v", cmd)
+	}
+	if m.capturesInput() {
+		t.Fatalf("capturesInput() should be false after cancel")
+	}
+	if m.status != "" {
+		t.Fatalf("status should be cleared on cancel, got %q", m.status)
+	}
+	if len(m.facts) != 3 {
+		t.Fatalf("facts should remain unchanged on cancel, got %d", len(m.facts))
+	}
+
+	// Verify no archive file was created
+	archFile := filepath.Join(dir, ".archive", "daily.md")
+	if _, err := os.Stat(archFile); !os.IsNotExist(err) {
+		t.Fatalf("no archive file should be created on cancel: %v", err)
+	}
+}
+
+func TestReviewBatchArchive_Confirm(t *testing.T) {
+	t.Setenv("AUXLY_REVIEW_AGE_DAYS", "1")
+	dir := t.TempDir()
+	store := memory.NewStore(dir)
+	logger, err := audit.NewLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.Close()
+
+	if err := store.Write("daily.md", "# Daily\n- Daily fact 1 [2020-01-01]\n- Daily fact 2 [2020-01-01]\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write("business.md", "# Business\n- Biz fact 1 [2020-01-01]\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newReviewModel(store, logger)
+	m.facts = []memory.StaleFact{
+		{File: "daily.md", Line: "- Daily fact 1 [2020-01-01]"},
+		{File: "daily.md", Line: "- Daily fact 2 [2020-01-01]"},
+		{File: "business.md", Line: "- Biz fact 1 [2020-01-01]"},
+	}
+	m.cursor = 0 // pointing to daily.md
+
+	// Press 'A' then 'y'
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("A")})
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatalf("expected batch command on 'y'")
+	}
+
+	msg := cmd()
+	batchMsg, ok := msg.(reviewBatchActionMsg)
+	if !ok {
+		t.Fatalf("expected reviewBatchActionMsg, got %T", msg)
+	}
+	if batchMsg.applied != 2 || batchMsg.file != "daily.md" {
+		t.Fatalf("batch result mismatch: %+v", batchMsg)
+	}
+
+	m, scanCmd := m.Update(batchMsg)
+	if scanCmd == nil {
+		t.Fatalf("expected scan command after batch action")
+	}
+
+	scanMsg := scanCmd()
+	m, _ = m.Update(scanMsg)
+
+	// All rows of daily.md archived, business.md preserved
+	for _, f := range m.facts {
+		if f.File == "daily.md" {
+			t.Fatalf("daily.md facts should have been archived, got %+v", f)
+		}
+	}
+	if len(m.facts) != 1 || m.facts[0].File != "business.md" {
+		t.Fatalf("expected only business.md fact remaining, got %+v", m.facts)
+	}
+
+	// Verify .archive/daily.md content
+	archBytes, err := os.ReadFile(filepath.Join(dir, ".archive", "daily.md"))
+	if err != nil {
+		t.Fatalf("failed to read archive: %v", err)
+	}
+	if !strings.Contains(string(archBytes), "Daily fact 1") || !strings.Contains(string(archBytes), "Daily fact 2") {
+		t.Fatalf("archive missing facts: %q", string(archBytes))
+	}
+}
+
+func TestReviewBatchKeep_Confirm(t *testing.T) {
+	t.Setenv("AUXLY_REVIEW_AGE_DAYS", "1")
+	dir := t.TempDir()
+	store := memory.NewStore(dir)
+	logger, err := audit.NewLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.Close()
+
+	if err := store.Write("daily.md", "# Daily\n- Daily fact 1 [2020-01-01]\n- Daily fact 2 [2020-01-01]\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newReviewModel(store, logger)
+	m.facts = []memory.StaleFact{
+		{File: "daily.md", Line: "- Daily fact 1 [2020-01-01]"},
+		{File: "daily.md", Line: "- Daily fact 2 [2020-01-01]"},
+	}
+	m.cursor = 0
+
+	// Press 'S' then 'y'
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")})
+	wantPrompt := "Keep 2 facts from daily.md? y/n"
+	if m.status != wantPrompt {
+		t.Fatalf("status = %q, want %q", m.status, wantPrompt)
+	}
+
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatalf("expected batch keep command on 'y'")
+	}
+
+	msg := cmd()
+	batchMsg, ok := msg.(reviewBatchActionMsg)
+	if !ok {
+		t.Fatalf("expected reviewBatchActionMsg, got %T", msg)
+	}
+	if batchMsg.applied != 2 || batchMsg.kind != "restamp" {
+		t.Fatalf("batch result mismatch: %+v", batchMsg)
+	}
+
+	content, err := store.View("daily.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	today := time.Now().Format("2006-01-02")
+	if !strings.Contains(content, "- Daily fact 1 ["+today+"]") || !strings.Contains(content, "- Daily fact 2 ["+today+"]") {
+		t.Fatalf("daily.md not re-stamped: %q", content)
+	}
+}
+
+func TestReviewPerFileSummaryLine(t *testing.T) {
+	facts := []memory.StaleFact{
+		{File: "daily.md", Line: "- d1"},
+		{File: "daily.md", Line: "- d2"},
+		{File: "business.md", Line: "- b1"},
+	}
+	summary := reviewSummary(facts)
+	want := "daily.md 2 · business.md 1"
+	if summary != want {
+		t.Fatalf("reviewSummary = %q, want %q", summary, want)
+	}
+
+	m := reviewModel{facts: facts}
+	view := m.View()
+	if !strings.Contains(view, want) {
+		t.Fatalf("m.View() should contain summary line %q:\n%s", want, view)
 	}
 }

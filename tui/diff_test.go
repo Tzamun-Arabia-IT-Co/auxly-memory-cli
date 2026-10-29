@@ -247,6 +247,46 @@ func TestFormatApprovalDiffDimsFrontmatter(t *testing.T) {
 	}
 }
 
+func TestDiffSingleApproveDispatchesBatchedBackupCmd(t *testing.T) {
+	dir := t.TempDir()
+	mgr := pending.NewManager(dir)
+	logger, err := audit.NewLogger(dir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	approveName, err := mgr.WriteFrom("identity.md", "- likes tea\n", "claude-code")
+	if err != nil {
+		t.Fatalf("WriteFrom: %v", err)
+	}
+
+	m := newDiffModel(mgr, logger)
+	m.files = []pending.PendingFile{{Name: approveName}}
+	m.infos = []pending.Info{{Name: approveName, Agent: "claude-code", Target: "identity.md"}}
+	m.cursor = 0
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if cmd == nil {
+		t.Fatal("'a' must return a command")
+	}
+
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected tea.BatchMsg, got %T", msg)
+	}
+	if len(batch) < 2 {
+		t.Fatalf("expected at least 2 batched commands (refresh + backup), got %d", len(batch))
+	}
+
+	for _, subCmd := range batch {
+		if subCmd != nil {
+			_ = subCmd()
+		}
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

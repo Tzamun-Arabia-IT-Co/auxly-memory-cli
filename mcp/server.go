@@ -19,6 +19,7 @@ import (
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/audit"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/config"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/embed"
+	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/git"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/memory"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/pending"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/session"
@@ -738,7 +739,44 @@ func (s *Server) toolRead(file string) toolResult {
 	if err != nil {
 		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}}, IsError: true}
 	}
+	s.recordExplicitReadRecall(file, content)
 	return toolResult{Content: []toolContent{{Type: "text", Text: content}}}
+}
+
+// recordExplicitReadRecall logs a recall event for every bullet line in a file
+// successfully read via auxly_memory_read, marking them active for review decay.
+// Only the auxly_memory_read tool path counts: primer reads, unified_memory.md,
+// search, and internal reads must not record. A logger failure never fails the read.
+func (s *Server) recordExplicitReadRecall(file, content string) {
+	clean := filepath.Clean(file)
+	if s.logger == nil || strings.EqualFold(filepath.Base(clean), "unified_memory.md") {
+		return
+	}
+	var hits []audit.RecallHitRecord
+	rank := 0
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
+			hits = append(hits, audit.RecallHitRecord{
+				File:     clean,
+				LineHash: memory.HashRecallText(line),
+				Score:    1.0,
+				Rank:     rank,
+				Accepted: true,
+			})
+			rank++
+		}
+	}
+	if len(hits) == 0 {
+		return
+	}
+	_ = s.logger.RecordRecall(audit.RecallMeta{
+		Provider:   s.resolveProvider(),
+		QueryHash:  memory.HashRecallText("read:" + clean),
+		Fallback:   false,
+		Source:     s.sourceMeta.Source,
+		RemoteHost: s.sourceMeta.RemoteHost,
+	}, hits)
 }
 
 func (s *Server) toolWrite(file, diff, reason, provider string) toolResult {
@@ -751,6 +789,10 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 
 	if file == "" || diff == "" || reason == "" {
 		return toolResult{Content: []toolContent{{Type: "text", Text: "Error: file, diff, and reason are all required"}}, IsError: true}
+	}
+
+	if err := pending.ValidTargetFile(file); err != nil {
+		return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}}, IsError: true}
 	}
 
 	// §10: SSH-remote consumers may only write files explicitly granted to them.
@@ -816,6 +858,7 @@ func (s *Server) toolWriteScoped(file, diff, reason, provider, scope string) too
 	if s.logger != nil {
 		s.logger.LogWithSource(agentID, provider, "write", file, diff, reason, level, s.sourceMeta)
 	}
+	git.MaybeAutoBackup(s.memoryPath)
 
 	msgText := fmt.Sprintf("✅ Synced → %s.", file)
 	return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(msgText)}}}
@@ -1049,6 +1092,7 @@ func (s *Server) toolTaskAdd(text string) toolResult {
 	if s.logger != nil {
 		s.logger.LogWithSource(fmt.Sprintf("%s-mcp", provider), provider, "task_add", memory.TasksFile, t.Text, "task", "auto", s.sourceMeta)
 	}
+	git.MaybeAutoBackup(s.memoryPath)
 	return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("✅ Added task: %s", t.Text)}}}
 }
 
@@ -1069,6 +1113,7 @@ func (s *Server) toolTaskDone(match string) toolResult {
 	if s.logger != nil {
 		s.logger.LogWithSource(fmt.Sprintf("%s-mcp", provider), provider, "task_done", memory.TasksFile, t.Text, "task", "auto", s.sourceMeta)
 	}
+	git.MaybeAutoBackup(s.memoryPath)
 	return toolResult{Content: []toolContent{{Type: "text", Text: fmt.Sprintf("✅ Completed: %s", t.Text)}}}
 }
 
@@ -1504,6 +1549,7 @@ func (s *Server) toolSkillForget(query string) toolResult {
 		return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(fmt.Sprintf("No matching facts or bullets found in memory for query: \"%s\"", query))}}}
 	}
 
+	git.MaybeAutoBackup(s.memoryPath)
 	sb.WriteString(fmt.Sprintf("✓ Successfully pruned %d obsolete statement(s) from memory vault.", deletedCount))
 	return toolResult{Content: []toolContent{{Type: "text", Text: s.withSyncFooter(sb.String())}}}
 }

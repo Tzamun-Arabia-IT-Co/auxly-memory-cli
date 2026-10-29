@@ -170,9 +170,14 @@ func (s *Store) StaleFacts(lastRecall func(file string) (map[string]time.Time, e
 	return stale, nil
 }
 
-// ArchiveFact moves one exact stale snapshot to .archive for human-auditable
+// ArchiveFacts moves exact stale snapshots to .archive for human-auditable
 // retention. RULE 0: decay never deletes facts; humans can grep .archive forever.
-func (s *Store) ArchiveFact(file, line string) error {
+// Lines that no longer match exactly are skipped, not errors. Returns the count
+// of facts successfully archived.
+func (s *Store) ArchiveFacts(file string, lines []string) (int, error) {
+	if len(lines) == 0 {
+		return 0, nil
+	}
 	// MAJOR 7: resolve/cache the vault identity BEFORE the lock — see
 	// PrewarmCrypto's doc comment for why this must never happen while
 	// holding LockVault.
@@ -180,49 +185,60 @@ func (s *Store) ArchiveFact(file, line string) error {
 
 	unlock, err := LockVault(s.Root)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer unlock()
 
 	content, sourcePath, root, encrypted, err := s.readViewCopy(file)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	lines := strings.SplitAfter(content, "\n")
-	idx := -1
-	var original string
-	for i, raw := range lines {
+	targets := make(map[string]int, len(lines))
+	for _, l := range lines {
+		targets[l]++
+	}
+
+	fileLines := strings.SplitAfter(content, "\n")
+	kept := make([]string, 0, len(fileLines))
+	var archivedOriginals []string
+	for _, raw := range fileLines {
 		trimmedEOL := strings.TrimRight(raw, "\r\n")
-		if strings.TrimSpace(trimmedEOL) == line {
-			idx = i
-			original = trimmedEOL
-			break
+		trimmedSpace := strings.TrimSpace(trimmedEOL)
+		if targets[trimmedSpace] > 0 {
+			targets[trimmedSpace]--
+			archivedOriginals = append(archivedOriginals, trimmedEOL)
+		} else {
+			kept = append(kept, raw)
 		}
 	}
-	if idx < 0 {
-		return errors.New("fact not found (changed since review?)")
-	}
 
-	kept := append([]string{}, lines[:idx]...)
-	kept = append(kept, lines[idx+1:]...)
-	if err := s.writeVaultFile(sourcePath, []byte(strings.Join(kept, "")), 0644, encrypted); err != nil {
-		return fmt.Errorf("cannot write %s: %w", file, err)
+	applied := len(archivedOriginals)
+	if applied == 0 {
+		return 0, nil
 	}
 
 	archivePath, err := safepath.ResolveSafe(root, filepath.Join(".archive", file))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	// Read through readVaultFile (not raw os.ReadFile) — a prior archive pass
 	// may have already encrypted this file.
 	existing, _, err := s.readVaultFile(archivePath)
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("cannot read archive %s: %w", file, err)
+		return 0, fmt.Errorf("cannot read archive %s: %w", file, err)
 	}
-	// Preserve the original line's indentation (real bullets nest, e.g.
-	// "  - Driver: ...") rather than the caller's trimmed StaleFact.Line.
-	next := string(existing) + original + "\n"
+
+	var archBuf strings.Builder
+	archBuf.Write(existing)
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		archBuf.WriteByte('\n')
+	}
+	for _, orig := range archivedOriginals {
+		archBuf.WriteString(orig)
+		archBuf.WriteByte('\n')
+	}
+
 	// CRITICAL 5: encryption is STICKY. `encrypted` alone (the SOURCE's
 	// CURRENT state) covers the archive's very first write, when
 	// .archive/<file> doesn't exist yet to carry any state of its own — but
@@ -232,46 +248,92 @@ func (s *Store) ArchiveFact(file, line string) error {
 	// shouldStayEncrypted(archivePath) (the archive's OWN on-disk state, "" /
 	// missing = false) makes that stick.
 	archiveEncrypted := encrypted || s.shouldStayEncrypted(archivePath)
-	if err := s.writeVaultFile(archivePath, []byte(next), 0644, archiveEncrypted); err != nil {
-		return fmt.Errorf("cannot write archive %s: %w", file, err)
+	if err := s.writeVaultFile(archivePath, []byte(archBuf.String()), 0644, archiveEncrypted); err != nil {
+		return 0, fmt.Errorf("cannot write archive %s: %w", file, err)
+	}
+
+	if err := s.writeVaultFile(sourcePath, []byte(strings.Join(kept, "")), 0644, encrypted); err != nil {
+		return applied, fmt.Errorf("cannot write %s: %w", file, err)
+	}
+	return applied, nil
+}
+
+// ArchiveFact moves one exact stale snapshot to .archive for human-auditable
+// retention. RULE 0: decay never deletes facts; humans can grep .archive forever.
+func (s *Store) ArchiveFact(file, line string) error {
+	applied, err := s.ArchiveFacts(file, []string{line})
+	if err != nil {
+		return err
+	}
+	if applied == 0 {
+		return errors.New("fact not found (changed since review?)")
 	}
 	return nil
 }
 
-// RestampFact refreshes an exact fact line in place, keeping review human-led.
-func (s *Store) RestampFact(file, line string) error {
+// RestampFacts refreshes exact fact lines in place, keeping review human-led.
+// Lines that no longer match exactly are skipped, not errors. Returns the
+// count of facts successfully re-stamped.
+func (s *Store) RestampFacts(file string, lines []string) (int, error) {
+	if len(lines) == 0 {
+		return 0, nil
+	}
 	// MAJOR 7: see ArchiveFact — resolve/cache the identity before the lock.
 	s.PrewarmCrypto()
 
 	unlock, err := LockVault(s.Root)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer unlock()
 
 	content, sourcePath, _, encrypted, err := s.readViewCopy(file)
 	if err != nil {
-		return err
+		return 0, err
+	}
+
+	targets := make(map[string]int, len(lines))
+	for _, l := range lines {
+		targets[l]++
 	}
 
 	today := time.Now().Format("2006-01-02")
-	lines := strings.SplitAfter(content, "\n")
-	for i, raw := range lines {
+	fileLines := strings.SplitAfter(content, "\n")
+	applied := 0
+	for i, raw := range fileLines {
 		trimmedEOL := strings.TrimRight(raw, "\r\n")
-		if strings.TrimSpace(trimmedEOL) != line {
-			continue
+		trimmedSpace := strings.TrimSpace(trimmedEOL)
+		if targets[trimmedSpace] > 0 {
+			targets[trimmedSpace]--
+			eol := raw[len(trimmedEOL):]
+			// restampLine gets the full original (indentation intact) line so a
+			// nested bullet's leading whitespace survives the round trip.
+			nextLine := restampLine(trimmedEOL, today)
+			fileLines[i] = nextLine + eol
+			applied++
 		}
-		eol := raw[len(trimmedEOL):]
-		// restampLine gets the full original (indentation intact) line so a
-		// nested bullet's leading whitespace survives the round trip.
-		nextLine := restampLine(trimmedEOL, today)
-		lines[i] = nextLine + eol
-		if err := s.writeVaultFile(sourcePath, []byte(strings.Join(lines, "")), 0644, encrypted); err != nil {
-			return fmt.Errorf("cannot write %s: %w", file, err)
-		}
-		return nil
 	}
-	return errors.New("fact not found (changed since review?)")
+
+	if applied == 0 {
+		return 0, nil
+	}
+
+	if err := s.writeVaultFile(sourcePath, []byte(strings.Join(fileLines, "")), 0644, encrypted); err != nil {
+		return 0, fmt.Errorf("cannot write %s: %w", file, err)
+	}
+	return applied, nil
+}
+
+// RestampFact refreshes an exact fact line in place, keeping review human-led.
+func (s *Store) RestampFact(file, line string) error {
+	applied, err := s.RestampFacts(file, []string{line})
+	if err != nil {
+		return err
+	}
+	if applied == 0 {
+		return errors.New("fact not found (changed since review?)")
+	}
+	return nil
 }
 
 func isBulletLine(line string) bool {
