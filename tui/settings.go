@@ -22,6 +22,7 @@ type settingsModel struct {
 	trustLevels []string
 	width       int
 	height      int
+	chromeTop   int
 
 	// Live Usage opt-in (calls each agent's provider with its stored login —
 	// off keeps Auxly fully local). Persisted via config.SaveSettings.
@@ -302,9 +303,12 @@ func (m settingsModel) Update(msg tea.Msg) (settingsModel, tea.Cmd) {
 			if w <= 0 {
 				w = 80
 			}
-			banner := renderBanner(w)
-			tabRow := strings.Count(banner, "\n")
-			contentOffsetY := tabRow + 4
+			contentOffsetY := m.chromeTop
+			if contentOffsetY == 0 {
+				banner := renderBanner(w)
+				tabRow := strings.Count(banner, "\n")
+				contentOffsetY = tabRow + 4
+			}
 			viewLines := strings.Split(m.View(), "\n")
 			clickedY := msg.Y - contentOffsetY
 
@@ -953,8 +957,8 @@ func (m settingsModel) View() string {
 	lines = append(lines, bold.Render("Trust & Access Controls"))
 	if !compact {
 		lines = append(lines, dim.Render("Manage active security levels"))
+		lines = append(lines, "")
 	}
-	lines = append(lines, "")
 
 	cursorDefault := "  "
 	if m.cursor == 0 {

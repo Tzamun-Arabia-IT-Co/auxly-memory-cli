@@ -97,17 +97,18 @@ const (
 )
 
 type sshModel struct {
-	remotes []remoteEntry
-	clients []clientRow // remote boxes wired to use THIS machine (host side) — managed list
-	host    hostInfo    // this machine's relay-host config (host.yaml)
-	hostOK  bool        // true when this machine is set up as a relay host
-	cursor  int
-	rename  string // transient buffer for the rename action (sshModeRename)
-	mode    string
-	preview string // MCP JSON shown in print mode
-	status  string // transient feedback after an action
-	width   int
-	height  int
+	remotes   []remoteEntry
+	clients   []clientRow // remote boxes wired to use THIS machine (host side) — managed list
+	host      hostInfo    // this machine's relay-host config (host.yaml)
+	hostOK    bool        // true when this machine is set up as a relay host
+	cursor    int
+	rename    string // transient buffer for the rename action (sshModeRename)
+	mode      string
+	preview   string // MCP JSON shown in print mode
+	status    string // transient feedback after an action
+	width     int
+	height    int
+	chromeTop int
 
 	// add-host form state (mode == sshModeForm)
 	formStep   string
@@ -871,7 +872,11 @@ func (m sshModel) listAnchorY() int {
 	}
 	// Mirror activity.go's offset model: panel top border at tabRow+4, then
 	// +2 for the border+padding, then the fixed header lines before the list.
-	contentTop := strings.Count(renderBanner(w), "\n") + 4 + 2
+	top := m.chromeTop
+	if top == 0 {
+		top = strings.Count(renderBanner(w), "\n") + 4
+	}
+	contentTop := top + 2
 	if m.hostOK {
 		// REMOTE(0) intro(1) press-c(2) blank(3) HOSThdr(4) relay(5) boxes(6)
 		// blank(7) CONNECTEDhdr(8) blank(9) firstRow(10)

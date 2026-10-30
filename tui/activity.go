@@ -36,6 +36,7 @@ type activityModel struct {
 	detailScrollY int
 	width         int
 	height        int
+	chromeTop     int
 }
 
 type activityRefreshMsg struct {
@@ -81,9 +82,12 @@ func (m activityModel) Update(msg tea.Msg) (activityModel, tea.Cmd) {
 			if w <= 0 {
 				w = 80
 			}
-			banner := renderBanner(w)
-			tabRow := strings.Count(banner, "\n")
-			contentOffsetY := tabRow + 4
+			contentOffsetY := m.chromeTop
+			if contentOffsetY == 0 {
+				banner := renderBanner(w)
+				tabRow := strings.Count(banner, "\n")
+				contentOffsetY = tabRow + 4
+			}
 
 			if m.viewingDetail {
 				// Popup Y: [contentOffsetY + 4, contentOffsetY + 22], X: [5, 76]
@@ -375,6 +379,7 @@ type auditTrailModel struct {
 	detailScrollY int
 	width         int
 	height        int
+	chromeTop     int
 }
 
 // applyFilter recomputes the visible entries from allEntries and clamps the cursor.
@@ -442,9 +447,12 @@ func (m auditTrailModel) Update(msg tea.Msg) (auditTrailModel, tea.Cmd) {
 			if w <= 0 {
 				w = 80
 			}
-			banner := renderBanner(w)
-			tabRow := strings.Count(banner, "\n")
-			contentOffsetY := tabRow + 4
+			contentOffsetY := m.chromeTop
+			if contentOffsetY == 0 {
+				banner := renderBanner(w)
+				tabRow := strings.Count(banner, "\n")
+				contentOffsetY = tabRow + 4
+			}
 
 			if m.viewingDetail {
 				// Popup Y: [contentOffsetY + 4, contentOffsetY + 22], X: [5, 76]

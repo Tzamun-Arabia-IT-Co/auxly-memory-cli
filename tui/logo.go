@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/assets"
 	"github.com/Tzamun-Arabia-IT-Co/auxly-memory-cli/internal/update"
@@ -43,12 +44,34 @@ func osc8(url, text string) string {
 	return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
 }
 
+var (
+	bannerCacheMu sync.RWMutex
+	bannerCache   = make(map[int]string)
+)
+
 // renderBanner draws the full ASCII-art Auxly logo with the title labels beside
 // it. The logo is always shown — the layout gives content room by scrolling it in
 // a viewport, not by shrinking the brand. The only exception is a genuinely narrow
 // terminal (<80 cols) where the 45-wide art can't fit horizontally; there it falls
 // back to a compact text header (a width constraint, not a height one).
 func renderBanner(width int) string {
+	bannerCacheMu.RLock()
+	if b, ok := bannerCache[width]; ok {
+		bannerCacheMu.RUnlock()
+		return b
+	}
+	bannerCacheMu.RUnlock()
+
+	b := renderBannerUncached(width)
+
+	bannerCacheMu.Lock()
+	bannerCache[width] = b
+	bannerCacheMu.Unlock()
+
+	return b
+}
+
+func renderBannerUncached(width int) string {
 	title, version, subtitle, developedBy := bannerLabels()
 
 	if width > 0 && width < 80 {

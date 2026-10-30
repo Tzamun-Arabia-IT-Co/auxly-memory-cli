@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type screen int
@@ -57,6 +58,14 @@ var screenNames = []string{
 	"Memory",
 }
 
+type tabRect struct {
+	idx       int
+	row       int
+	x0        int
+	x1        int
+	totalRows int
+}
+
 type model struct {
 	memoryPath string
 	screen     screen
@@ -89,6 +98,23 @@ type model struct {
 	// dashboard and the file viewer manage their own height and don't use it.
 	contentVP viewport.Model
 	vpReady   bool
+
+	// Layout cache populated by relayout()
+	layoutValid       bool
+	cachedScreen      screen
+	cachedBanner      string
+	cachedTabs        string
+	cachedFooter      string
+	cachedContent     string
+	cachedTight       bool
+	cachedUsesVP      bool
+	cachedTooSmall    bool
+	cachedChromeH     int
+	cachedNeedsScroll bool
+	cachedReviewCount int
+	cachedOrgMode     orgMode
+	cachedOrgApproved int
+	cachedOrgRejected int
 }
 
 func NewApp(memoryPath string) *model {
@@ -125,10 +151,14 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(tea.MouseMsg); ok {
+		m.relayout()
+	}
 	switch msg := msg.(type) {
 	case OpenFileMsg:
 		m.viewer = m.viewer.load(msg.Filename, msg.Content, msg.Editable)
 		m.screen = screenViewer
+		m.relayout()
 		return m, nil
 	case vaultActionMsg, trustSuggestAppliedMsg, opsRefreshMsg, opsActionMsg, opsSyncMsg, opsBackupSetupMsg, opsAutoBackupMsg, opsSpinTickMsg:
 		// A vault op (init/encrypt/decrypt/rebuild), a trust-suggestion apply, or
@@ -144,9 +174,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fields update correctly but the rendered frame doesn't, and a
 		// mid-flight spinner tick or the final result never repaints: the Ops
 		// panel looks frozen even though the underlying action completed fine.
-		if m.vpReady {
-			m.syncViewport()
-		}
+		m.relayout()
 		return m, cmd
 	case tea.KeyMsg:
 		if m.screen == screenDashboard && m.dashboard.selectedAgent != "" {
@@ -157,6 +185,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "1", "2", "3", "4":
 				var cmd tea.Cmd
 				m.dashboard, cmd = m.dashboard.Update(msg)
+				m.relayout()
 				return m, cmd
 			}
 		}
@@ -170,8 +199,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The wizard is rendered at the bottom of the SSH view, so also scroll
 			// there — otherwise the viewport stays at the top showing the static
 			// list header while the form (below the fold) changes invisibly.
+			m.relayout()
 			if m.vpReady {
-				m.syncViewport()
 				m.contentVP.GotoBottom()
 			}
 			return m, cmd
@@ -180,6 +209,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == screenMemoryOrg && m.memoryOrg.capturesInput() {
 			var cmd tea.Cmd
 			m.memoryOrg, cmd = m.memoryOrg.Update(msg)
+			m.relayout()
 			return m, cmd
 		}
 
@@ -190,18 +220,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == screenMemory && (m.memBrowser.capturesInput() || msg.String() == "tab") {
 			var cmd tea.Cmd
 			m.memBrowser, cmd = m.memBrowser.Update(msg)
-			if m.vpReady {
-				m.syncViewport()
-			}
+			m.relayout()
 			return m, cmd
 		}
 
 		if m.screen == screenReview && m.review.capturesInput() {
 			var cmd tea.Cmd
 			m.review, cmd = m.review.Update(msg)
-			if m.vpReady {
-				m.syncViewport()
-			}
+			m.relayout()
 			return m, cmd
 		}
 
@@ -213,9 +239,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == screenSettings && m.settings.cust.capturesInput() {
 			var cmd tea.Cmd
 			m.settings, cmd = m.settings.Update(msg)
-			if m.vpReady {
-				m.syncViewport()
-			}
+			m.relayout()
 			return m, cmd
 		}
 
@@ -229,9 +253,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == screenSettings && m.settings.capturesInput() {
 			var cmd tea.Cmd
 			m.settings, cmd = m.settings.Update(msg)
-			if m.vpReady {
-				m.syncViewport()
-			}
+			m.relayout()
 			return m, cmd
 		}
 
@@ -240,6 +262,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == screenViewer && m.viewer.editing {
 			var cmd tea.Cmd
 			m.viewer, cmd = m.viewer.Update(msg)
+			m.relayout()
 			return m, cmd
 		}
 
@@ -302,6 +325,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.usesViewport() && m.vpReady && !m.inModalSubmode() {
 				var vcmd tea.Cmd
 				m.contentVP, vcmd = m.contentVP.Update(msg)
+				m.relayout()
 				return m, vcmd
 			}
 		case "esc":
@@ -332,25 +356,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.review, _ = m.review.Update(msg)
 		m.memBrowser, _ = m.memBrowser.Update(msg)
 		m.viewer, _ = m.viewer.Update(msg)
-		m.syncViewport()
+		m.relayout()
+		return m, nil
 
 	case tea.MouseMsg:
+		m.relayout()
 		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
-			banner := renderBanner(m.width)
-			tabRow := strings.Count(banner, "\n")
-			if msg.Y >= tabRow-1 && msg.Y <= tabRow+1 {
-				startX := 0
-				for idx := range screenNames {
-					// labelFor is the SAME label renderTabs draws (incl. the
-					// "Review (N)" badge) — computing width from the static
-					// screenNames entry instead let a badged tab widen on screen
-					// while its click zone stayed the static width, so clicks on
-					// the badge silently hit nothing.
-					tabWidth := 4 + len(m.labelFor(idx)) + 2
-					if msg.X >= startX && msg.X < startX+tabWidth {
-						return m, m.gotoScreen(screen(idx))
+			tabStartY := lipgloss.Height(m.cachedBanner)
+			rects := m.tabLayout()
+			if len(rects) > 0 {
+				totalRows := rects[0].totalRows
+				clickRow := msg.Y - tabStartY
+				if clickRow == 1 && totalRows == 1 {
+					clickRow = 0
+				}
+				if clickRow >= 0 && clickRow < totalRows {
+					for _, r := range rects {
+						if r.row == clickRow && msg.X >= r.x0 && msg.X < r.x1 {
+							return m, m.gotoScreen(screen(r.idx))
+						}
 					}
-					startX += tabWidth
 				}
 			}
 		}
@@ -359,6 +384,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			(msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown) {
 			var vcmd tea.Cmd
 			m.contentVP, vcmd = m.contentVP.Update(msg)
+			m.relayout()
 			return m, vcmd
 		}
 	}
@@ -369,6 +395,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case screenMemoryOrg:
 		m.memoryOrg, cmd = m.memoryOrg.Update(msg)
 	case screenDashboard:
+		if m.usesViewport() {
+			m.dashboard.vpYOffset = m.contentVP.YOffset
+		} else {
+			m.dashboard.vpYOffset = 0
+		}
 		m.dashboard, cmd = m.dashboard.Update(msg)
 	case screenActivity:
 		m.activity, cmd = m.activity.Update(msg)
@@ -395,28 +426,52 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Keep the content viewport sized and filled for the active screen after the
-	// sub-model updated (selection moved, data refreshed). Re-sizing here (not just
-	// SetContent) keeps the viewport height consistent with a footer that may have
-	// gained/lost the scroll-hint line. Scroll offset is preserved.
-	if m.usesViewport() && m.vpReady {
-		m.syncViewport()
-		// The SSH wizard renders at the bottom of the view. When the wizard is
-		// open, keep the viewport pinned there so the form is always visible.
-		if m.screen == screenSSH && m.ssh.editingHost {
-			m.contentVP.GotoBottom()
-		}
+	// sub-model updated (selection moved, data refreshed).
+	m.relayout()
+	if m.screen == screenSSH && m.ssh.editingHost && m.vpReady {
+		m.contentVP.GotoBottom()
 	}
 
 	return m, cmd
 }
 
-// usesViewport reports whether the active screen scrolls its content inside the
-// shared viewport. The dashboard fits itself (fixed overview) and the file viewer
-// scrolls its own content, so they render directly.
-func (m model) usesViewport() bool {
-	switch m.screen {
-	case screenMemoryOrg, screenDashboard, screenViewer:
+// baseFooter returns the footer text wrapped to width without any scroll affordance hint.
+func (m model) baseFooter() string {
+	footerText := m.rawFooter()
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	return StyleFooter.Render(wrapFooter(footerText, w))
+}
+
+func (m model) screenNeedsScroll() bool {
+	if m.layoutValid && m.cachedScreen == m.screen {
+		return m.cachedNeedsScroll
+	}
+	if m.height <= 0 {
 		return false
+	}
+	blank := 2
+	if m.screen == screenDashboard && m.dashboard.bodyCompact() {
+		blank = 0
+	}
+	chrome := lipgloss.Height(renderBanner(m.width)) +
+		lipgloss.Height(m.renderTabs()) +
+		lipgloss.Height(m.baseFooter()) + blank
+	avail := m.height - chrome
+	return lipgloss.Height(m.screenContent()) > avail
+}
+
+// usesViewport reports whether the active screen scrolls its content inside the
+// shared viewport.
+func (m model) usesViewport() bool {
+	if m.layoutValid && m.cachedScreen == m.screen {
+		return m.cachedUsesVP
+	}
+	switch m.screen {
+	case screenDashboard, screenMemoryOrg, screenViewer:
+		return m.screenNeedsScroll()
 	}
 	return true
 }
@@ -433,6 +488,12 @@ func (m model) inModalSubmode() bool {
 		return m.activity.viewingDetail
 	case screenAuditTrail:
 		return m.auditTrail.viewingDetail
+	case screenDashboard:
+		return m.dashboard.selectedAgent != ""
+	case screenMemoryOrg:
+		return m.memoryOrg.capturesInput()
+	case screenViewer:
+		return m.viewer.editing
 	}
 	return false
 }
@@ -471,35 +532,26 @@ func (m model) screenContent() string {
 }
 
 // chromeHeight is the number of rows consumed by the fixed header (full logo +
-// tabs), the two blank separators, and the footer — i.e. everything that is NOT
+// tabs), the blank separators, and the footer — i.e. everything that is NOT
 // the scrollable content region.
 func (m model) chromeHeight() int {
+	if m.layoutValid && m.cachedScreen == m.screen {
+		return m.cachedChromeH
+	}
+	blank := 2
+	if m.screen == screenDashboard && m.dashboard.bodyCompact() {
+		blank = 0
+	}
 	return lipgloss.Height(renderBanner(m.width)) +
 		lipgloss.Height(m.renderTabs()) +
-		lipgloss.Height(m.renderFooter()) + 2 // two blank separator rows
+		lipgloss.Height(m.renderFooter()) + blank
 }
 
 // syncViewport (re)sizes the content viewport to the rows left under the fixed
 // chrome and refreshes its content for the active screen. Scroll offset is
 // preserved across data ticks; callers reset it on a screen switch.
 func (m *model) syncViewport() {
-	if m.width <= 0 || m.height <= 0 {
-		return
-	}
-	h := m.height - m.chromeHeight()
-	if h < 1 {
-		h = 1
-	}
-	if !m.vpReady {
-		m.contentVP = viewport.New(m.width, h)
-		m.vpReady = true
-	} else {
-		m.contentVP.Width = m.width
-		m.contentVP.Height = h
-	}
-	if m.usesViewport() {
-		m.contentVP.SetContent(m.screenContent())
-	}
+	m.relayout()
 }
 
 // gotoScreen switches the active tab, resets the content scroll to the top, and
@@ -523,34 +575,249 @@ func (m *model) gotoScreen(s screen) tea.Cmd {
 	if m.vpReady {
 		m.contentVP.GotoTop()
 	}
+	m.dashboard.vpYOffset = 0
 	cmd := m.refreshCurrentScreen()
-	m.syncViewport()
+	m.relayout()
 	return cmd
 }
 
-func (m model) View() string {
+func (m *model) propagateChrome() {
+	if m.width <= 0 {
+		return
+	}
+	if !m.layoutValid || m.cachedScreen != m.screen {
+		m.relayout()
+		return
+	}
+	bannerH := lipgloss.Height(m.cachedBanner)
+	tabsH := lipgloss.Height(m.cachedTabs)
+	footerH := lipgloss.Height(m.cachedFooter)
+
+	// Standard non-tight layout:
+	// banner (bannerH) + empty line (1) + tabs (tabsH) + empty line (1)
+	chromeTop := bannerH + tabsH + 1
+	// Tight layout:
+	// banner + tabs (no blank rows)
+	chromeTopTight := bannerH + tabsH
+
+	// Total chrome rows:
+	// Full: banner + tabs + footer + 2 blank separators
+	chromeFull := bannerH + tabsH + footerH + 2
+	// Tight: banner + tabs + footer
+	chromeTight := bannerH + tabsH + footerH
+
+	m.dashboard.chromeTop = chromeTop
+	m.dashboard.chromeTopTight = chromeTopTight
+	m.dashboard.chromeFull = chromeFull
+	m.dashboard.chromeTight = chromeTight
+	if m.cachedUsesVP && m.screen == screenDashboard {
+		m.dashboard.vpYOffset = m.contentVP.YOffset
+	} else {
+		m.dashboard.vpYOffset = 0
+	}
+
+	m.memoryOrg.contentTop = chromeTop
+	m.memoryOrg.appChrome = chromeFull
+	m.memoryOrg.resizeReviewPanes()
+
+	m.skills.chromeTop = chromeTop
+	m.activity.chromeTop = chromeTop
+	m.auditTrail.chromeTop = chromeTop
+	m.settings.chromeTop = chromeTop
+	m.ssh.chromeTop = chromeTop
+}
+
+func (m model) tooSmall() bool {
+	if m.layoutValid && m.cachedScreen == m.screen {
+		return m.cachedTooSmall
+	}
+	if m.width <= 0 || m.height <= 0 {
+		return false
+	}
+	if m.width < 80 {
+		return true
+	}
+	bannerH := lipgloss.Height(renderBanner(m.width))
+	tabsH := lipgloss.Height(m.renderTabs())
+	footerH := lipgloss.Height(m.baseFooter())
+	blank := 2
+	if m.screen == screenDashboard && m.dashboard.bodyCompact() {
+		blank = 0
+	}
+	chrome := bannerH + tabsH + footerH + blank
+	return m.height-chrome < 3
+}
+
+// relayout performs a single layout pass for the active screen: renders banner,
+// tabs, base footer, and screen content once; decides whether viewport scrolling
+// is required; sizes and fills the viewport; computes the scroll affordance;
+// updates sub-screen chrome metrics; and caches results on m.
+func (m *model) relayout() {
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+
+	m.layoutValid = false
+
 	banner := renderBanner(m.width)
+	bannerH := lipgloss.Height(banner)
+
 	tabs := m.renderTabs()
-	footer := m.renderFooter()
+	tabsH := lipgloss.Height(tabs)
+
+	baseFooter := m.baseFooter()
+	baseFooterH := lipgloss.Height(baseFooter)
+
+	// Pre-propagate chrome metrics so bodyCompact() and sub-models have
+	// accurate measurements before screen content is rendered.
+	chromeTop := bannerH + tabsH + 1
+	chromeTopTight := bannerH + tabsH
+	chromeFull := bannerH + tabsH + baseFooterH + 2
+	chromeTight := bannerH + tabsH + baseFooterH
+
+	m.dashboard.chromeTop = chromeTop
+	m.dashboard.chromeTopTight = chromeTopTight
+	m.dashboard.chromeFull = chromeFull
+	m.dashboard.chromeTight = chromeTight
+
+	m.memoryOrg.contentTop = chromeTop
+	m.memoryOrg.appChrome = chromeFull
+	m.memoryOrg.resizeReviewPanes()
+
+	m.skills.chromeTop = chromeTop
+	m.activity.chromeTop = chromeTop
+	m.auditTrail.chromeTop = chromeTop
+	m.settings.chromeTop = chromeTop
+	m.ssh.chromeTop = chromeTop
+
+	tight := m.screen == screenDashboard && m.dashboard.bodyCompact()
+	blank := 2
+	if tight {
+		blank = 0
+	}
+
+	content := m.screenContent()
+	contentH := lipgloss.Height(content)
+
+	avail := m.height - (bannerH + tabsH + baseFooterH + blank)
+	needsScroll := contentH > avail
+
+	usesVP := true
+	switch m.screen {
+	case screenDashboard, screenMemoryOrg, screenViewer:
+		usesVP = needsScroll
+	}
+
+	vpHeight := avail
+	if vpHeight < 1 {
+		vpHeight = 1
+	}
+	if !m.vpReady {
+		m.contentVP = viewport.New(m.width, vpHeight)
+		m.vpReady = true
+	} else {
+		m.contentVP.Width = m.width
+		m.contentVP.Height = vpHeight
+	}
+
+	footer := baseFooter
+	if usesVP {
+		m.contentVP.SetContent(content)
+		if !m.inModalSubmode() && m.contentVP.TotalLineCount() > m.contentVP.Height {
+			pct := int(m.contentVP.ScrollPercent() * 100)
+			hintText := fmt.Sprintf("  ⇕ %d%% · PgUp/PgDn or wheel to scroll", pct)
+			if m.width > 0 && lipgloss.Width(hintText) > m.width {
+				hintText = ansi.Truncate(hintText, m.width, "")
+			}
+			hint := lipgloss.NewStyle().Foreground(ColorPrimary).Render(hintText)
+			footer = lipgloss.JoinVertical(lipgloss.Left, hint, footer)
+
+			newH := m.height - (bannerH + tabsH + lipgloss.Height(footer) + blank)
+			if newH < 1 {
+				newH = 1
+			}
+			if newH != m.contentVP.Height {
+				m.contentVP.Height = newH
+			}
+		}
+	}
+
+	footerH := lipgloss.Height(footer)
+	if footerH != baseFooterH {
+		chromeFull = bannerH + tabsH + footerH + 2
+		chromeTight = bannerH + tabsH + footerH
+		m.dashboard.chromeFull = chromeFull
+		m.dashboard.chromeTight = chromeTight
+		m.memoryOrg.appChrome = chromeFull
+	}
+
+	if usesVP && m.screen == screenDashboard {
+		m.dashboard.vpYOffset = m.contentVP.YOffset
+	} else {
+		m.dashboard.vpYOffset = 0
+	}
+
+	tooSmall := false
+	if m.width < 80 {
+		tooSmall = true
+	} else {
+		chrome := bannerH + tabsH + baseFooterH + blank
+		tooSmall = m.height-chrome < 3
+	}
+
+	m.cachedBanner = banner
+	m.cachedTabs = tabs
+	m.cachedFooter = footer
+	m.cachedContent = content
+	m.cachedTight = tight
+	m.cachedUsesVP = usesVP
+	m.cachedTooSmall = tooSmall
+	m.cachedChromeH = bannerH + tabsH + footerH + blank
+	m.cachedNeedsScroll = needsScroll
+	m.cachedScreen = m.screen
+	m.cachedReviewCount = len(m.review.facts)
+	m.cachedOrgMode = m.memoryOrg.mode
+	appr, rej, _ := m.memoryOrg.decisionCounts()
+	m.cachedOrgApproved = appr
+	m.cachedOrgRejected = rej
+	m.layoutValid = true
+}
+
+func (m model) composeView() string {
+	appr, rej, _ := m.memoryOrg.decisionCounts()
+	if !m.layoutValid || m.cachedScreen != m.screen || m.cachedReviewCount != len(m.review.facts) ||
+		(m.screen == screenMemoryOrg && (m.cachedOrgMode != m.memoryOrg.mode || m.cachedOrgApproved != appr || m.cachedOrgRejected != rej)) {
+		m.relayout()
+	}
+
+	if m.cachedTooSmall {
+		msg := fmt.Sprintf("Terminal too small — enlarge to at least 80 columns (now %dx%d)", m.width, m.height)
+		if m.width > 0 {
+			msg = lipgloss.PlaceHorizontal(m.width, lipgloss.Center, msg)
+		}
+		return msg
+	}
+
+	banner := m.cachedBanner
+	tabs := m.cachedTabs
+	footer := m.cachedFooter
 
 	var out string
-	if m.usesViewport() && m.vpReady {
+	if m.cachedUsesVP && m.vpReady {
 		// Content pages: fixed header + scrolling viewport + fixed footer. The
 		// viewport makes the body exactly its height, so the chrome can never be
 		// pushed off the top, and content scrolls instead of being truncated.
-		out = fmt.Sprintf("%s\n%s\n\n%s\n\n%s", banner, tabs, m.contentVP.View(), footer)
-	} else {
-		// Dashboard / Memory Org / viewer manage their own height. The dashboard tightens its body
-		// to fit (full logo always); the clamp keeps the chrome on screen if a pane is
-		// too short for even the compact body.
-		content := m.screenContent()
-		tight := m.screen == screenDashboard && m.dashboard.bodyCompact()
-		blank := 2
-		if tight {
-			blank = 0
+		if m.cachedTight {
+			out = fmt.Sprintf("%s\n%s\n%s\n%s", banner, tabs, m.contentVP.View(), footer)
+		} else {
+			out = fmt.Sprintf("%s\n%s\n\n%s\n\n%s", banner, tabs, m.contentVP.View(), footer)
 		}
+	} else {
+		// Dashboard / Memory Org / viewer manage their own height when they fit.
+		content := m.cachedContent
+		tight := m.cachedTight
 		if m.height > 0 {
-			used := lipgloss.Height(banner) + lipgloss.Height(tabs) + lipgloss.Height(footer) + blank
+			used := m.cachedChromeH
 			content = clampContentHeight(content, m.height-used)
 		}
 		if tight {
@@ -566,6 +833,22 @@ func (m model) View() string {
 	if m.height > 0 && lipgloss.Height(out) > m.height {
 		lines := strings.Split(out, "\n")
 		out = strings.Join(lines[:m.height], "\n")
+	}
+	return out
+}
+
+func (m model) View() string {
+	out := m.composeView()
+
+	// Line-width safety net: truncate any line still wider than m.width
+	if m.width > 0 {
+		lines := strings.Split(out, "\n")
+		for i, line := range lines {
+			if lipgloss.Width(line) > m.width {
+				lines[i] = ansi.Truncate(line, m.width, "")
+			}
+		}
+		out = strings.Join(lines, "\n")
 	}
 	return out
 }
@@ -603,40 +886,247 @@ func (m model) labelFor(i int) string {
 	return name
 }
 
-func (m model) renderTabs() string {
-	var tabs string
+func (m model) tabKey(i int) string {
+	if i == 9 {
+		return "0"
+	}
+	if screen(i) == screenMemory {
+		return "="
+	}
+	if screen(i) == screenReview {
+		return "-"
+	}
+	return fmt.Sprintf("%d", i+1)
+}
+
+func (m model) fullTabsFit() bool {
+	if m.width <= 0 {
+		return true
+	}
+	totalW := 0
 	for i := range screenNames {
-		key := fmt.Sprintf("%d", i+1)
-		if i == 9 {
-			key = "0"
-		} else if screen(i) == screenMemory {
-			// 12th tab — its own key instead.
-			key = "="
-		} else if screen(i) == screenReview {
-			// 11th tab, past the 1-9/0 digit range — its own key instead.
-			key = "-"
-		}
-		name := m.labelFor(i)
-		if screen(i) == m.screen {
-			tabs += lipgloss.NewStyle().
+		totalW += 6 + lipgloss.Width(m.labelFor(i))
+	}
+	return totalW <= m.width
+}
+
+func (m model) renderTabChip(i int, full bool) string {
+	key := m.tabKey(i)
+	name := m.labelFor(i)
+	isActive := screen(i) == m.screen
+
+	if full {
+		if isActive {
+			return lipgloss.NewStyle().
 				Bold(true).
 				Foreground(ColorPrimary).
 				Padding(0, 1).
 				Render(fmt.Sprintf("[%s] %s", key, name))
-		} else {
-			tabs += lipgloss.NewStyle().
-				Foreground(ColorDim).
-				Padding(0, 1).
-				Render(fmt.Sprintf(" %s  %s", key, name))
 		}
+		return lipgloss.NewStyle().
+			Foreground(ColorDim).
+			Padding(0, 1).
+			Render(fmt.Sprintf(" %s  %s", key, name))
+	}
+
+	// Compact style
+	if isActive {
+		return lipgloss.NewStyle().
+			Bold(true).
+			Foreground(ColorPrimary).
+			Render(fmt.Sprintf("[%s] %s", key, name))
 	}
 	return lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), false, false, true, false).
-		BorderForeground(ColorDim).
-		Render(tabs)
+		Foreground(ColorDim).
+		Render(fmt.Sprintf("%s %s", key, name))
 }
 
-func (m model) renderFooter() string {
+func (m model) tabLayout() []tabRect {
+	rects := make([]tabRect, len(screenNames))
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+
+	// Strategy 1: full labels on one row if they fit m.width
+	if m.fullTabsFit() {
+		curX := 0
+		for i := range screenNames {
+			tabW := 6 + lipgloss.Width(m.labelFor(i))
+			rects[i] = tabRect{
+				idx:       i,
+				row:       0,
+				x0:        curX,
+				x1:        curX + tabW,
+				totalRows: 1,
+			}
+			curX += tabW
+		}
+		return rects
+	}
+
+	// Strategy 2: compact style on one row if it fits
+	compactWidths := make([]int, len(screenNames))
+	compactTotal := 0
+	for i := range screenNames {
+		txt := m.renderTabChip(i, false)
+		compactWidths[i] = lipgloss.Width(txt)
+		compactTotal += compactWidths[i]
+		if i > 0 {
+			compactTotal += 2 // two spaces between compact chips
+		}
+	}
+
+	canFitOneRow := compactTotal <= w
+	savedOne := false
+	if !canFitOneRow && compactTotal-1 <= w {
+		// If 2 spaces overshoots by exactly 1 character (e.g. 141 cols at width 140),
+		// tighten the single gap before the last punctuation tab ("= Memory") to 1 space
+		// so all tabs fit on 1 row instead of wasting an entire row on wrapping.
+		canFitOneRow = true
+		savedOne = true
+	}
+
+	if canFitOneRow {
+		curX := 0
+		for i := range screenNames {
+			rects[i] = tabRect{
+				idx:       i,
+				row:       0,
+				x0:        curX,
+				x1:        curX + compactWidths[i],
+				totalRows: 1,
+			}
+			gap := 2
+			if savedOne && i == len(screenNames)-2 {
+				gap = 1
+			}
+			curX = rects[i].x1 + gap
+		}
+		return rects
+	}
+
+	// Strategy 3: wrap tabs onto minimum rows, balanced across rows
+	greedyRows := greedyWrapTabs(compactWidths, w)
+	minRows := len(greedyRows)
+	if minRows < 2 {
+		minRows = 2
+	}
+
+	R := minRows
+	numTabs := len(screenNames)
+	base := numTabs / R
+	rem := numTabs % R
+
+	balancedRows := make([][]int, R)
+	tabIdx := 0
+	balancedFits := true
+	for r := 0; r < R; r++ {
+		count := base
+		if r < rem {
+			count++
+		}
+		rowW := 0
+		for c := 0; c < count; c++ {
+			tw := compactWidths[tabIdx]
+			if c > 0 {
+				rowW += 2
+			}
+			rowW += tw
+			balancedRows[r] = append(balancedRows[r], tabIdx)
+			tabIdx++
+		}
+		if rowW > w {
+			balancedFits = false
+			break
+		}
+	}
+
+	chosenRows := balancedRows
+	if !balancedFits {
+		chosenRows = greedyRows
+	}
+
+	totalRows := len(chosenRows)
+	for r, rowTabs := range chosenRows {
+		curX := 0
+		for _, idx := range rowTabs {
+			tw := compactWidths[idx]
+			rects[idx] = tabRect{
+				idx:       idx,
+				row:       r,
+				x0:        curX,
+				x1:        curX + tw,
+				totalRows: totalRows,
+			}
+			curX = rects[idx].x1 + 2
+		}
+	}
+	return rects
+}
+
+func greedyWrapTabs(compactWidths []int, w int) [][]int {
+	var rows [][]int
+	var curRow []int
+	curW := 0
+	for i, tw := range compactWidths {
+		if len(curRow) == 0 {
+			curRow = append(curRow, i)
+			curW = tw
+		} else if curW+2+tw <= w {
+			curRow = append(curRow, i)
+			curW += 2 + tw
+		} else {
+			rows = append(rows, curRow)
+			curRow = []int{i}
+			curW = tw
+		}
+	}
+	if len(curRow) > 0 {
+		rows = append(rows, curRow)
+	}
+	return rows
+}
+
+func (m model) renderTabs() string {
+	if m.layoutValid && m.cachedScreen == m.screen && m.cachedTabs != "" && m.cachedReviewCount == len(m.review.facts) {
+		return m.cachedTabs
+	}
+	rects := m.tabLayout()
+	if len(rects) == 0 {
+		return ""
+	}
+	totalRows := rects[0].totalRows
+	lines := make([]string, totalRows)
+	isFull := totalRows == 1 && m.fullTabsFit()
+
+	for _, r := range rects {
+		txt := m.renderTabChip(r.idx, isFull)
+		if lines[r.row] == "" {
+			if r.x0 > 0 {
+				lines[r.row] = strings.Repeat(" ", r.x0) + txt
+			} else {
+				lines[r.row] = txt
+			}
+		} else {
+			gap := r.x0 - lipgloss.Width(lines[r.row])
+			if gap > 0 {
+				lines[r.row] += strings.Repeat(" ", gap) + txt
+			} else {
+				lines[r.row] += txt
+			}
+		}
+	}
+
+	borderW := m.width
+	if borderW <= 0 {
+		borderW = 80
+	}
+	borderLine := lipgloss.NewStyle().Foreground(ColorDim).Render(strings.Repeat("─", borderW))
+	return strings.Join(lines, "\n") + "\n" + borderLine
+}
+
+func (m model) rawFooter() string {
 	var footerText string
 	switch m.screen {
 	case screenMemoryOrg:
@@ -670,12 +1160,12 @@ func (m model) renderFooter() string {
 		case m.diff.viewing != "":
 			footerText = "a: Approve • r: Reject • Esc: Back to queue • q: Quit"
 		default:
-			footerText = "j/k: Navigate queue • Enter: View diff • a: Approve • r: Reject • A: Approve by agent • F: Approve by file • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+			footerText = "j/k: Navigate queue • Enter: View diff • a: Approve • r: Reject • A: Approve by agent • F: Approve by file • Tab/[ ]: tabs • q: Quit"
 		}
 	case screenAnalytics:
 		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	case screenSettings:
-		footerText = "↑/↓: Select option • ←/→: Switch Settings section • Enter: Toggle option • t: Trust suggestions • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+		footerText = "↑/↓ option • ←/→ section • Enter toggle • t trust suggestions • Tab/[ ]: tabs • q quit"
 	case screenSSH:
 		footerText = "j/k: Select • c: Connect new • t: Test • p: Print config • d: Remove • i/I: Invite • J: Join a host • Tab/[ / ]: Switch tabs • q: Quit"
 	case screenSkills:
@@ -691,7 +1181,7 @@ func (m model) renderFooter() string {
 		case m.review.capturesInput():
 			footerText = "y: Confirm • any other key: Cancel"
 		default:
-			footerText = "j/k/↑/↓: Navigate • K keep (re-stamp) · a archive · S keep all · A archive all · r rescan · e edit hint • Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
+			footerText = "j/k/↑/↓: Navigate • K keep (re-stamp) · a archive · S keep all · A archive all · r rescan · e edit hint • Tab/[ ]: tabs • q: Quit"
 		}
 	case screenMemory:
 		switch {
@@ -712,8 +1202,20 @@ func (m model) renderFooter() string {
 	default:
 		footerText = "Tab/Shift+Tab or [ / ]: Switch tabs • q: Quit"
 	}
+	return footerText
+}
 
-	footer := StyleFooter.Render(footerText)
+func (m model) renderFooter() string {
+	if m.layoutValid && m.cachedScreen == m.screen && m.cachedFooter != "" {
+		return m.cachedFooter
+	}
+	footerText := m.rawFooter()
+
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	footer := StyleFooter.Render(wrapFooter(footerText, w))
 
 	// On a content page whose body overflows, surface a scroll affordance so the
 	// extra rows are discoverable (progressive disclosure) rather than silently
@@ -721,12 +1223,123 @@ func (m model) renderFooter() string {
 	if m.usesViewport() && m.vpReady && !m.inModalSubmode() &&
 		m.contentVP.TotalLineCount() > m.contentVP.Height {
 		pct := int(m.contentVP.ScrollPercent() * 100)
-		hint := lipgloss.NewStyle().Foreground(ColorPrimary).
-			Render(fmt.Sprintf("  ⇕ %d%% · PgUp/PgDn or wheel to scroll", pct))
+		hintText := fmt.Sprintf("  ⇕ %d%% · PgUp/PgDn or wheel to scroll", pct)
+		if w > 0 && lipgloss.Width(hintText) > w {
+			hintText = ansi.Truncate(hintText, w, "")
+		}
+		hint := lipgloss.NewStyle().Foreground(ColorPrimary).Render(hintText)
 		footer = lipgloss.JoinVertical(lipgloss.Left, hint, footer)
 	}
 
 	return footer
+}
+
+type footerToken struct {
+	text string
+	sep  string
+}
+
+func splitFooterHints(text string) []footerToken {
+	var tokens []footerToken
+	remaining := text
+	for len(remaining) > 0 {
+		idxDot := strings.Index(remaining, " • ")
+		idxMid := strings.Index(remaining, " · ")
+		idx := -1
+		sep := ""
+		if idxDot != -1 && (idxMid == -1 || idxDot < idxMid) {
+			idx = idxDot
+			sep = " • "
+		} else if idxMid != -1 {
+			idx = idxMid
+			sep = " · "
+		}
+		if idx == -1 {
+			tokens = append(tokens, footerToken{text: remaining, sep: ""})
+			break
+		}
+		tokens = append(tokens, footerToken{text: remaining[:idx], sep: sep})
+		remaining = remaining[idx+len(sep):]
+	}
+	return tokens
+}
+
+func wrapAtSpaces(text string, width int) []string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{text}
+	}
+	var lines []string
+	cur := ""
+	for _, w := range words {
+		if cur == "" {
+			cur = w
+		} else if lipgloss.Width(cur+" "+w) <= width {
+			cur += " " + w
+		} else {
+			lines = append(lines, cur)
+			cur = w
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
+}
+
+func wrapFooter(text string, width int) string {
+	if width <= 0 {
+		width = 80
+	}
+	if lipgloss.Width(text) <= width {
+		return text
+	}
+	tokens := splitFooterHints(text)
+	if len(tokens) == 0 {
+		return text
+	}
+
+	var lines []string
+	curLine := ""
+
+	for i, tok := range tokens {
+		hint := tok.text
+		if lipgloss.Width(hint) > width {
+			if curLine != "" {
+				lines = append(lines, curLine)
+				curLine = ""
+			}
+			hintLines := wrapAtSpaces(hint, width)
+			for j, hl := range hintLines {
+				if j < len(hintLines)-1 {
+					lines = append(lines, hl)
+				} else {
+					curLine = hl
+				}
+			}
+			continue
+		}
+
+		if curLine == "" {
+			curLine = hint
+		} else {
+			prevSep := tokens[i-1].sep
+			if prevSep == "" {
+				prevSep = " "
+			}
+			candidate := curLine + prevSep + hint
+			if lipgloss.Width(candidate) <= width {
+				curLine = candidate
+			} else {
+				lines = append(lines, curLine)
+				curLine = hint
+			}
+		}
+	}
+	if curLine != "" {
+		lines = append(lines, curLine)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *model) refreshCurrentScreen() tea.Cmd {

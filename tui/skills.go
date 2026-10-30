@@ -41,6 +41,7 @@ type skillsModel struct {
 	exportTime      time.Time
 	width           int
 	height          int
+	chromeTop       int
 }
 
 type skillsRefreshMsg struct {
@@ -171,9 +172,12 @@ func (m skillsModel) Update(msg tea.Msg) (skillsModel, tea.Cmd) {
 			if w <= 0 {
 				w = 80
 			}
-			banner := renderBanner(w)
-			tabRow := strings.Count(banner, "\n")
-			contentOffsetY := tabRow + 4
+			contentOffsetY := m.chromeTop
+			if contentOffsetY == 0 {
+				banner := renderBanner(w)
+				tabRow := strings.Count(banner, "\n")
+				contentOffsetY = tabRow + 4
+			}
 
 			// Use dynamic view rendering to locate coordinates!
 			viewStr := m.View(w, m.height)

@@ -150,10 +150,10 @@ func TestDashboardFeedSurvivesHeightPressure(t *testing.T) {
 	// spare. Composition (lower priority) is still dropped in compact; the feed
 	// must now survive.
 	m2 := newSmallDashboard(t)
-	updated2, _ := m2.Update(tea.WindowSizeMsg{Width: 79, Height: 50})
+	updated2, _ := m2.Update(tea.WindowSizeMsg{Width: 80, Height: 50})
 	m2 = updated2.(model)
 	if !m2.dashboard.bodyCompact() {
-		t.Fatal("width 79 must force compact regardless of height")
+		t.Fatal("width 80 must force compact regardless of height")
 	}
 	out2 := stripANSI(m2.View())
 	if strings.Contains(out2, "Memory by category") {

@@ -192,6 +192,10 @@ type organizeModel struct {
 	errMsg  string
 	summary string
 	diff    string
+
+	// Chrome offsets passed down from parent app model
+	contentTop int
+	appChrome  int
 }
 
 type orgRunMsg struct {
@@ -833,6 +837,9 @@ func (m organizeModel) updateRunning(msg tea.KeyMsg) (organizeModel, tea.Cmd) {
 // app renders `banner\n tabs\n\n content`, so content starts at bannerH + 2 (tabs
 // height) + 1 (the blank row).
 func (m organizeModel) contentTopY() int {
+	if m.contentTop > 0 {
+		return m.contentTop
+	}
 	bannerH := 7
 	if m.width > 0 {
 		bannerH = lipgloss.Height(renderBanner(m.width))
@@ -1861,6 +1868,9 @@ const reviewChromeRows = 7
 // content (full logo banner + tab bar + footer + the blank separator rows), so the
 // panes fill the remaining height without being clipped by the app's clamp.
 func (m organizeModel) appChromeRows() int {
+	if m.appChrome > 0 {
+		return m.appChrome
+	}
 	bannerH := 7
 	if m.width > 0 {
 		bannerH = lipgloss.Height(renderBanner(m.width))
@@ -1877,7 +1887,7 @@ func (m *organizeModel) resizeReviewPanes() {
 	if h <= 0 {
 		h = 30
 	}
-	panelW := (w - 6) / 2
+	panelW := (w - 10) / 2
 	if panelW < 20 {
 		panelW = 20
 	}
@@ -2143,12 +2153,12 @@ func (m organizeModel) idleView() string {
 	}
 	cp := m.currentProvider()
 
-	panelW := (m.width - 8) / 2
+	panelW := (m.width - 10) / 2
 	if panelW > 42 {
 		panelW = 42
 	}
-	if panelW < 22 {
-		panelW = 22
+	if panelW < 20 {
+		panelW = 20
 	}
 
 	// Provider column.
@@ -2238,7 +2248,7 @@ func (m organizeModel) idleView() string {
 			filesPart + orgDimStyle.Render(" · history in Audit Trail (0)") + "\n")
 	}
 
-	b.WriteString("\n" + StyleFooter.Render("← → action · ↑↓ choose · Tab: Provider↔Model · Enter run · F re-run all · e edit URL · f refetch · [ ] tabs"))
+	b.WriteString("\n" + StyleFooter.Render(wrapFooter("← → action · ↑↓ choose · Tab: Provider↔Model · Enter run · F re-run all · e edit URL · f refetch · [ ] tabs", m.width)))
 	return b.String()
 }
 
@@ -2257,9 +2267,56 @@ func (m organizeModel) modeSelectorView() string {
 	}
 	label := lipgloss.NewStyle().Bold(true).Foreground(ColorSecondary).Render("Step 1 · Choose action")
 	hint := orgDimStyle.Render("(← → switch)")
+
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+
+	var chipsLine string
+	fullChips := strings.Join(chips, "    ")
+	if lipgloss.Width(fullChips) <= w {
+		chipsLine = fullChips
+	} else {
+		tightChips := strings.Join(chips, "  ")
+		if lipgloss.Width(tightChips) <= w {
+			chipsLine = tightChips
+		} else {
+			var rows []string
+			var curRow string
+			for _, chip := range chips {
+				if curRow == "" {
+					curRow = chip
+				} else if lipgloss.Width(curRow+"  "+chip) <= w {
+					curRow += "  " + chip
+				} else {
+					rows = append(rows, curRow)
+					curRow = chip
+				}
+			}
+			if curRow != "" {
+				rows = append(rows, curRow)
+			}
+			chipsLine = strings.Join(rows, "\n")
+		}
+	}
+
+	desc := orgRunModeInfos[m.runMode].desc
+	var descLine string
+	if lipgloss.Width(desc) <= w {
+		descLine = orgDimStyle.Render(desc)
+	} else {
+		wrapped := wrapAtSpaces(desc, w)
+		var styledLines []string
+		for _, wl := range wrapped {
+			styledLines = append(styledLines, orgDimStyle.Render(wl))
+		}
+		descLine = strings.Join(styledLines, "\n")
+	}
+
 	return label + "   " + hint + "\n" +
-		strings.Join(chips, "    ") + "\n" +
-		orgDimStyle.Render(orgRunModeInfos[m.runMode].desc)
+		chipsLine + "\n" +
+		descLine
 }
 
 // nonConsolidateIdleView renders the Split projects / Find contradictions
@@ -2298,7 +2355,7 @@ func (m organizeModel) reviewView() string {
 
 	strip := orgDimStyle.Render("Files: ") + m.decisionStrip()
 
-	panelW := (m.width - 6) / 2
+	panelW := (m.width - 10) / 2
 	if panelW < 20 {
 		panelW = 20
 	}

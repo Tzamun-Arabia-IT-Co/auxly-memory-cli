@@ -5,6 +5,30 @@ All notable changes to Auxly Memory CLI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-10-30
+
+### Fixed
+
+- **The TUI fits every terminal from 80 columns up with nothing cut off.** The tab bar was a fixed 165 columns,
+  so on narrower terminals the last tabs were clipped. It now shows full labels when they fit, shorter labels
+  when they don't, and wraps onto balanced rows after that; mouse clicks use the same layout, so every tab stays
+  clickable on any row.
+- Footer key hints wrap at their separators instead of running off the right edge, and the Settings, Approvals
+  and Review hints are shorter.
+- The Dashboard and Memory Org scroll (PgUp/PgDn or the mouse wheel, with a scroll hint) when they don't fit,
+  instead of hiding rows behind "▾ N more — enlarge window". Card and detail-popup clicks still land on the
+  right row after scrolling.
+- Memory Org wraps its action strip and description on narrow terminals.
+- Below 80 columns, or when fewer than 3 rows are left for content, the TUI shows one "Terminal too small" line
+  instead of a broken layout.
+
+### Changed
+
+- Screens get their mouse offsets from the real banner, tab and footer heights instead of assuming a
+  two-row tab bar and a one-row footer.
+- The layout is worked out once per update and reused for drawing, so key presses on the Dashboard cost
+  about the same as in 1.6.0.
+
 ## [1.6.0] - 2026-10-30
 
 ### Added

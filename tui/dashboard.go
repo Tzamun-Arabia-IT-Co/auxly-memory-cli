@@ -103,6 +103,13 @@ type dashboardModel struct {
 	// instead of racing a second Cmd off the same stale cursor, which would
 	// double-count the same events into the feed.
 	feedInFlight bool
+
+	// Chrome offsets passed down from parent app model
+	chromeTop      int
+	chromeTopTight int
+	chromeFull     int
+	chromeTight    int
+	vpYOffset      int
 }
 
 type dashboardRefreshMsg struct {
@@ -586,11 +593,17 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			// hit-test relies on lines up with what's actually drawn (a compact
 			// banner and/or tight spacing on a short terminal shift every row up).
 			bodyC := m.bodyCompact()
-			banner := renderBanner(w)
-			tabRow := strings.Count(banner, "\n")
-			contentOffsetY := tabRow + 4
+			contentOffsetY := m.chromeTop
 			if bodyC {
-				contentOffsetY = tabRow + 2 // tight spacing removes two blank rows
+				contentOffsetY = m.chromeTopTight
+			}
+			if contentOffsetY == 0 {
+				banner := renderBanner(w)
+				tabRow := strings.Count(banner, "\n")
+				contentOffsetY = tabRow + 4
+				if bodyC {
+					contentOffsetY = tabRow + 2 // tight spacing removes two blank rows
+				}
 			}
 
 			// Use dynamic view rendering to locate coordinates!
@@ -614,11 +627,36 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 						pStartX = 0
 					}
 				}
-				contentLocalStart := 2
-				if m.renderUpdateBanner() != "" {
-					contentLocalStart = 3
+				// Locate the popup's first line in the rendered view lines so
+				// vertical placement is derived from where it is actually drawn,
+				// avoiding hardcoded banner or compact-mode offsets.
+				thatLocalRow := -1
+				if len(popLines) > 0 {
+					firstPop := popLines[0]
+					for idx, line := range viewLines {
+						if strings.Contains(line, firstPop) {
+							thatLocalRow = idx
+							break
+						}
+					}
+					if thatLocalRow < 0 {
+						firstPopClean := stripANSI(firstPop)
+						for idx, line := range viewLines {
+							if strings.Contains(stripANSI(line), firstPopClean) {
+								thatLocalRow = idx
+								break
+							}
+						}
+					}
 				}
-				pStartY := contentOffsetY + contentLocalStart + 3
+				if thatLocalRow < 0 {
+					contentLocalStart := 2
+					if m.renderUpdateBanner() != "" {
+						contentLocalStart = 3
+					}
+					thatLocalRow = contentLocalStart + 3
+				}
+				pStartY := contentOffsetY + thatLocalRow - m.vpYOffset
 				pEndY := pStartY + len(popLines)
 				pEndX := pStartX + popWidth
 
@@ -651,12 +689,17 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			// actually sits (column + card width) rather than hardcoded splits —
 			// so two-up cards and any future layout shift still hit-test cleanly.
 			const cardWidth = 30 // card content width; border/padding add a small margin
-			clickLineIdx := msg.Y - contentOffsetY
+			clickLineIdx := msg.Y - contentOffsetY + m.vpYOffset
 			for _, b := range m.cards {
 				for idx, line := range viewLines {
 					clean := stripANSI(line)
 					col := visibleColumnOf(clean, b.name)
 					if col < 0 {
+						continue
+					}
+					// Ensure we didn't match a prefix of a longer name (e.g. "Agent 1" in "Agent 12").
+					endIdx := strings.Index(clean, b.name) + len(b.name)
+					if endIdx < len(clean) && clean[endIdx] != ' ' && !strings.HasPrefix(clean[endIdx:], "│") {
 						continue
 					}
 					// The name sits right of the glyph emblem (border+pad+glyph+gap ≈ 5
@@ -877,9 +920,13 @@ func (m dashboardModel) bodyCompact() bool {
 	if m.height <= 0 {
 		return false
 	}
-	bFull := lipgloss.Height(renderBanner(m.width))
+	chromeF := m.chromeFull
+	if chromeF == 0 {
+		bFull := lipgloss.Height(renderBanner(m.width))
+		chromeF = bFull + dashboardChromeFull
+	}
 	canonical := m.bodyCompactCanonical()
-	if bFull+dashboardChromeFull+lipgloss.Height(canonical.renderBody(false)) <= m.height {
+	if chromeF+lipgloss.Height(canonical.renderBody(false)) <= m.height {
 		return false
 	}
 	return true
@@ -953,8 +1000,12 @@ func (m dashboardModel) renderBody(compact bool) string {
 	if !compact || m.height <= 0 {
 		return m.renderBodyAt(compact, enrichN)
 	}
-	bFull := lipgloss.Height(renderBanner(m.width))
-	budget := m.height - bFull - dashboardChromeTight
+	chromeT := m.chromeTight
+	if chromeT == 0 {
+		bFull := lipgloss.Height(renderBanner(m.width))
+		chromeT = bFull + dashboardChromeTight
+	}
+	budget := m.height - chromeT
 	for feedRows := enrichN; feedRows >= 0; feedRows-- {
 		body := m.renderBodyAt(true, feedRows)
 		if lipgloss.Height(body) <= budget {
@@ -970,10 +1021,19 @@ func (m dashboardModel) renderBody(compact bool) string {
 // enrichN as before.
 func (m dashboardModel) renderBodyAt(compact bool, feedRows int) string {
 	title := StyleTitle.Render("📊 Auxly-Memory CLI Dashboard")
+	sideBySide := !(m.width > 0 && m.width < 116)
 
 	clockStr := time.Now().Format("02/01/2006 15:04:05")
 	clockHeader := lipgloss.NewStyle().Foreground(ColorDim).Render("🕒 Time: " + clockStr)
 	headerRow := lipgloss.JoinHorizontal(lipgloss.Top, title, "         ", clockHeader)
+	if compact && sideBySide && m.height > 0 && m.height <= 32 {
+		headerW := lipgloss.Width(headerRow)
+		gutter := 50 - headerW
+		if gutter < 2 {
+			gutter = 2
+		}
+		headerRow = headerRow + strings.Repeat(" ", gutter) + StyleHeader.Render("📡 Connected Agent Brands")
+	}
 	// The freshness signal rides on the header row (no extra height); only in full
 	// mode so cramped terminals stay byte-identical to before.
 	if !compact {
@@ -1074,7 +1134,12 @@ func (m dashboardModel) renderBodyAt(compact bool, feedRows int) string {
 	// decision below can measure a CANONICAL (max-feed) right column — built from
 	// m.bodyCompactCanonical() — without duplicating this block.
 	buildRightCol := func(mm dashboardModel, fRows int) string {
-		rc := fmt.Sprintf("%s\n%s", StyleHeader.Render("📡 Connected Agent Brands"), gridSection)
+		var rc string
+		if compact && sideBySide && mm.height > 0 && mm.height <= 32 {
+			rc = gridSection
+		} else {
+			rc = fmt.Sprintf("%s\n%s", StyleHeader.Render("📡 Connected Agent Brands"), gridSection)
+		}
 		// Pending approvals are decorative/supplementary enrichment — dropped first
 		// under height pressure, full mode only (same tier as the composition
 		// breakdown and charts in the left column above).
@@ -1141,7 +1206,6 @@ func (m dashboardModel) renderBodyAt(compact bool, feedRows int) string {
 	//     left's spare room with bars costs nothing — regardless of compact.
 	//   - stacked (width<116): left's height adds directly to the body height,
 	//     so bars only belong there in full mode — unchanged from before.
-	sideBySide := !(m.width > 0 && m.width < 116)
 	var diagExtra string
 	if sideBySide {
 		// Bound against a CANONICAL (max-feed) right column, not the live one:
@@ -1211,24 +1275,23 @@ func (m dashboardModel) renderBodyAt(compact bool, feedRows int) string {
 	// In full mode keep one separator above the content and hug the footer below it,
 	// so the rich body needs one less row and fits more terminals.
 	if compact {
-		b.WriteString(dashboardContent + "\n")
+		b.WriteString(dashboardContent)
 	} else {
 		b.WriteString("\n")
 		b.WriteString(dashboardContent + "\n")
 	}
 
 	if m.selectedAgent != "" {
-		b.WriteString(dim.Render("  Popup active: [1/2/3/4] switch tabs • [Esc] or Click outside to close"))
+		b.WriteString(dim.Render("  Popup active: [1/2/3/4] switch tabs • [Esc] or Click outside to close") + "\n")
 	} else if m.showUsagePopup {
-		b.WriteString(dim.Render("  Live Usage • [r] refresh • [Esc]/[u] close"))
-	} else {
+		b.WriteString(dim.Render("  Live Usage • [r] refresh • [Esc]/[u] close") + "\n")
+	} else if !compact {
 		hint := "  Use arrow keys or Mouse Clicks to select agent boxes • Enter: open details popup • [u] usage • q: exit TUI"
 		if m.updateAvail && !m.updating {
 			hint += " • [U] update"
 		}
-		b.WriteString(dim.Render(hint))
+		b.WriteString(dim.Render(hint) + "\n")
 	}
-	b.WriteString("\n")
 
 	return b.String()
 }
@@ -2045,6 +2108,9 @@ func (m dashboardModel) remoteGroupCount() int {
 // bars + recent feed). Full mode spends 2 lines per remote, so its caps are smaller.
 func (m dashboardModel) connVisibleCap(compact bool) int {
 	if compact {
+		if m.height > 0 && m.height <= 30 {
+			return 2
+		}
 		if m.height > 0 && m.height < 40 {
 			return 4
 		}
